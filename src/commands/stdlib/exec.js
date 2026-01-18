@@ -14,10 +14,11 @@ export const execCommand = {
   },
   async run({ args, ctx }) {
     const cmd = args._;
-    if (!cmd.length) throw new Error('exec requires a command');
 
     const shellLine = typeof args.shell === 'string' ? args.shell : null;
     const useShell = Boolean(args.shell) || (cmd.length === 1 && /\s/.test(cmd[0]));
+
+    if (!cmd.length && !shellLine) throw new Error('exec requires a command');
 
     const result = useShell
       ? await runProcess('/bin/sh', ['-lc', shellLine ?? cmd[0] ?? ''], { env: ctx.env, cwd: process.cwd() })

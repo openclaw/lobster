@@ -14,21 +14,21 @@ function splitPipes(input) {
       if (ch === '\\') {
         const next = input[i + 1];
         if (next) {
-          current += next;
+          current += ch + next;
           i++;
           continue;
         }
       }
+      current += ch;
       if (ch === quote) {
         quote = null;
-        continue;
       }
-      current += ch;
       continue;
     }
 
     if (ch === '"' || ch === "'") {
       quote = ch;
+      current += ch;
       continue;
     }
 

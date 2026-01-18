@@ -1,8 +1,10 @@
 import { createJsonRenderer } from './renderers/json.js';
 
-export async function runPipeline({ pipeline, registry, stdin, stdout, stderr, env }) {
+export async function runPipeline({ pipeline, registry, stdin, stdout, stderr, env, mode = 'human' }) {
   let stream = emptyStream();
   let rendered = false;
+  let halted = false;
+  let haltedAt = null;
 
   const ctx = {
     stdin,
@@ -10,10 +12,12 @@ export async function runPipeline({ pipeline, registry, stdin, stdout, stderr, e
     stderr,
     env,
     registry,
+    mode,
     render: createJsonRenderer(stdout),
   };
 
-  for (const stage of pipeline) {
+  for (let idx = 0; idx < pipeline.length; idx++) {
+    const stage = pipeline[idx];
     const command = registry.get(stage.name);
     if (!command) {
       throw new Error(`Unknown command: ${stage.name}`);
@@ -21,8 +25,15 @@ export async function runPipeline({ pipeline, registry, stdin, stdout, stderr, e
 
     const result = await command.run({ input: stream, args: stage.args, ctx });
 
-    if (result && result.rendered) {
+    if (result?.rendered) {
       rendered = true;
+    }
+
+    if (result?.halt) {
+      halted = true;
+      haltedAt = { index: idx, stage };
+      stream = result.output ?? emptyStream();
+      break;
     }
 
     stream = result?.output ?? emptyStream();
@@ -31,7 +42,7 @@ export async function runPipeline({ pipeline, registry, stdin, stdout, stderr, e
   const items = [];
   for await (const item of stream) items.push(item);
 
-  return { items, rendered };
+  return { items, rendered, halted, haltedAt };
 }
 
 async function* emptyStream() {}

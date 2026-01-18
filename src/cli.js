@@ -26,11 +26,28 @@ export async function runCli(argv) {
     return;
   }
 
-  const inputLine = argv.join(' ');
+  if (argv[0] === 'run') {
+    await handleRun({ argv: argv.slice(1), registry });
+    return;
+  }
+
+  // Default: treat argv as a pipeline string.
+  await handleRun({ argv, registry });
+}
+
+async function handleRun({ argv, registry }) {
+  const { mode, rest } = parseModeAndStrip(argv);
+  const pipelineString = rest.join(' ');
+
   let pipeline;
   try {
-    pipeline = parsePipeline(inputLine);
+    pipeline = parsePipeline(pipelineString);
   } catch (err) {
+    if (mode === 'tool') {
+      writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: err?.message ?? String(err) } });
+      process.exitCode = 2;
+      return;
+    }
     process.stderr.write(`Parse error: ${err?.message ?? String(err)}\n`);
     process.exitCode = 2;
     return;
@@ -44,24 +61,80 @@ export async function runCli(argv) {
       stdout: process.stdout,
       stderr: process.stderr,
       env: process.env,
+      mode,
     });
 
-    // Default rendering: if the last command didn't render, print JSON.
+    if (mode === 'tool') {
+      const approval = output.halted && output.items.length === 1 && output.items[0]?.type === 'approval_request'
+        ? output.items[0]
+        : null;
+
+      writeToolEnvelope({
+        ok: true,
+        status: approval ? 'needs_approval' : 'ok',
+        output: approval ? [] : output.items,
+        requiresApproval: approval,
+      });
+      return;
+    }
+
+    // Human mode: if the last command didn't render, print JSON.
     if (!output.rendered) {
       process.stdout.write(JSON.stringify(output.items, null, 2));
       process.stdout.write('\n');
     }
   } catch (err) {
+    if (mode === 'tool') {
+      writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
+      process.exitCode = 1;
+      return;
+    }
     process.stderr.write(`Error: ${err?.message ?? String(err)}\n`);
     process.exitCode = 1;
   }
+}
+
+function parseModeAndStrip(argv) {
+  const rest = [];
+  let mode = 'human';
+
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+
+    if (tok === '--mode') {
+      const value = argv[i + 1];
+      if (value) {
+        mode = value;
+        i++;
+      }
+      continue;
+    }
+
+    if (tok.startsWith('--mode=')) {
+      mode = tok.slice('--mode='.length) || 'human';
+      continue;
+    }
+
+    rest.push(tok);
+  }
+
+  return { mode, rest };
+}
+
+function writeToolEnvelope(payload) {
+  process.stdout.write(JSON.stringify(payload, null, 2));
+  process.stdout.write('\n');
 }
 
 function helpText() {
   return `lobster (v0.1) — Clawdbot-native typed shell\n\n` +
     `Usage:\n` +
     `  lobster '<pipeline>'\n` +
+    `  lobster run --mode tool '<pipeline>'\n` +
     `  lobster help <command>\n\n` +
+    `Modes:\n` +
+    `  - human (default): renderers can write to stdout\n` +
+    `  - tool: prints a single JSON envelope for easy integration\n\n` +
     `Pipeline basics:\n` +
     `  - Commands are piped with |\n` +
     `  - Data is JSON-first (arrays/objects), not text-first\n` +
@@ -69,6 +142,7 @@ function helpText() {
     `Examples:\n` +
     `  lobster 'exec --json "echo [1,2,3]" | json'\n` +
     `  lobster 'gog.gmail.search --query "newer_than:7d" --max 10 | pick id,subject,from | table'\n` +
+    `  lobster run --mode tool 'exec --json "echo [1]" | approve --prompt "ok?"'\n` +
     `\nCommands:\n` +
     `  exec, head, json, pick, table, where, approve, gog.gmail.search, gog.gmail.send, email.triage\n`;
 }

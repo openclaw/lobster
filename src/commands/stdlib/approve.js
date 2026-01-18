@@ -5,7 +5,7 @@ function isInteractive(stdin) {
 export const approveCommand = {
   name: 'approve',
   help() {
-    return `approve — require confirmation to continue\n\nUsage:\n  ... | approve --prompt "Send these emails?"\n  ... | approve --emit --prompt "Send these emails?"\n\nModes:\n  - Interactive (default): prompts on TTY and passes items through if approved.\n  - Emit (--emit): returns an approval request object and stops the pipeline.\n\nNotes:\n  - Default behavior fails closed in non-interactive mode.\n`;
+    return `approve — require confirmation to continue\n\nUsage:\n  ... | approve --prompt "Send these emails?"\n  ... | approve --emit --prompt "Send these emails?"\n\nModes:\n  - Interactive (default): prompts on TTY and passes items through if approved.\n  - Emit (--emit): returns an approval request object and stops the pipeline.\n\nNotes:\n  - In tool mode (or non-interactive), this emits an approval request and halts.\n`;
   },
   async run({ input, args, ctx }) {
     const prompt = args.prompt ?? 'Approve?';
@@ -13,8 +13,11 @@ export const approveCommand = {
     const items = [];
     for await (const item of input) items.push(item);
 
-    if (args.emit) {
+    const emit = Boolean(args.emit) || ctx.mode === 'tool' || !isInteractive(ctx.stdin);
+
+    if (emit) {
       return {
+        halt: true,
         output: (async function* () {
           yield {
             type: 'approval_request',
@@ -23,10 +26,6 @@ export const approveCommand = {
           };
         })(),
       };
-    }
-
-    if (!isInteractive(ctx.stdin)) {
-      throw new Error('approve requires an interactive TTY (or pass --emit)');
     }
 
     ctx.stdout.write(`${prompt} [y/N] `);
