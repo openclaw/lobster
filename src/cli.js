@@ -28,6 +28,16 @@ export async function runCli(argv) {
     return;
   }
 
+  if (argv[0] === 'version' || argv[0] === '--version' || argv[0] === '-v') {
+    process.stdout.write(`${await readVersion()}\n`);
+    return;
+  }
+
+  if (argv[0] === 'doctor') {
+    await handleDoctor({ argv: argv.slice(1), registry });
+    return;
+  }
+
   if (argv[0] === 'run') {
     await handleRun({ argv: argv.slice(1), registry });
     return;
@@ -205,6 +215,56 @@ async function handleResume({ argv, registry }) {
   }
 }
 
+async function readVersion() {
+  const { readFile } = await import('node:fs/promises');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+
+  const here = dirname(fileURLToPath(import.meta.url));
+  const pkgPath = join(here, '..', 'package.json');
+  const pkg = JSON.parse(await readFile(pkgPath, 'utf8'));
+  return pkg.version ?? '0.0.0';
+}
+
+async function handleDoctor({ argv, registry }) {
+  const mode = 'tool';
+  const pipeline = "exec --json --shell 'echo [1]'";
+  const output = await (async () => {
+    try {
+      const parsed = parsePipeline(pipeline);
+      return await runPipeline({
+        pipeline: parsed,
+        registry,
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env: process.env,
+        mode,
+      });
+    } catch (err) {
+      return { error: err };
+    }
+  })();
+
+  if (output?.error) {
+    writeToolEnvelope({ ok: false, error: { type: 'doctor_error', message: output.error?.message ?? String(output.error) } });
+    process.exitCode = 1;
+    return;
+  }
+
+  writeToolEnvelope({
+    ok: true,
+    status: 'ok',
+    output: [{
+      toolMode: true,
+      protocolVersion: 1,
+      version: await readVersion(),
+      notes: argv.length ? argv : undefined,
+    }],
+    requiresApproval: null,
+  });
+}
+
 function writeToolEnvelope(payload) {
   const envelope = {
     protocolVersion: 1,
@@ -215,23 +275,20 @@ function writeToolEnvelope(payload) {
 }
 
 function helpText() {
-  return `lobster (v0.1) — Clawdbot-native typed shell\n\n` +
+  return `lobster — Clawdbot-native typed shell\n\n` +
     `Usage:\n` +
     `  lobster '<pipeline>'\n` +
     `  lobster run --mode tool '<pipeline>'\n` +
+    `  lobster resume --token <token> --approve yes|no\n` +
+    `  lobster doctor\n` +
+    `  lobster version\n` +
     `  lobster help <command>\n\n` +
     `Modes:\n` +
     `  - human (default): renderers can write to stdout\n` +
     `  - tool: prints a single JSON envelope for easy integration\n\n` +
-    `Pipeline basics:\n` +
-    `  - Commands are piped with |\n` +
-    `  - Data is JSON-first (arrays/objects), not text-first\n` +
-    `  - Most commands accept --flag value or --flag=value\n\n` +
     `Examples:\n` +
     `  lobster 'exec --json "echo [1,2,3]" | json'\n` +
-    `  lobster 'gog.gmail.search --query "newer_than:7d" --max 10 | pick id,subject,from | table'\n` +
-    `  lobster run --mode tool 'exec --json "echo [1]" | approve --prompt "ok?"'\n` +
-    `  lobster resume --token <token> --approve yes\n` +
-    `\nCommands:\n` +
+    `  lobster run --mode tool 'exec --json "echo [1]" | approve --prompt "ok?"'\n\n` +
+    `Commands:\n` +
     `  exec, head, json, pick, table, where, approve, gog.gmail.search, gog.gmail.send, email.triage, clawd.invoke\n`;
 }
