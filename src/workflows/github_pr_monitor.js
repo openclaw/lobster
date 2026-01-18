@@ -30,6 +30,47 @@ function runProcess(command, argv, { env, cwd }) {
 
 import { diffAndStore } from '../state/store.js';
 
+function pickSubset(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  return {
+    number: snapshot.number,
+    title: snapshot.title,
+    url: snapshot.url,
+    state: snapshot.state,
+    isDraft: snapshot.isDraft,
+    mergeable: snapshot.mergeable,
+    reviewDecision: snapshot.reviewDecision,
+    updatedAt: snapshot.updatedAt,
+    baseRefName: snapshot.baseRefName,
+    headRefName: snapshot.headRefName,
+  };
+}
+
+export function buildPrChangeSummary(before, after) {
+  const a = pickSubset(after);
+  const b = pickSubset(before);
+
+  if (!a) return { changedFields: [], changes: {} };
+  if (!b) {
+    return {
+      changedFields: Object.keys(a),
+      changes: Object.fromEntries(Object.keys(a).map((k) => [k, { from: null, to: a[k] }])),
+    };
+  }
+
+  const changes = {};
+  for (const key of Object.keys(a)) {
+    if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) {
+      changes[key] = { from: b[key], to: a[key] };
+    }
+  }
+
+  return {
+    changedFields: Object.keys(changes),
+    changes,
+  };
+}
+
 export async function runGithubPrMonitorWorkflow({ args, ctx }) {
   const repo = args.repo;
   const pr = args.pr;
@@ -37,6 +78,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 
   const key = args.key ?? `github.pr:${repo}#${pr}`;
   const changesOnly = Boolean(args.changesOnly);
+  const summaryOnly = Boolean(args.summaryOnly);
 
   const argv = [
     'pr',
@@ -57,7 +99,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
     throw new Error('gh returned non-JSON output');
   }
 
-  const { changed } = await diffAndStore({ env: ctx.env, key, value: current });
+  const { changed, before } = await diffAndStore({ env: ctx.env, key, value: current });
 
   if (changesOnly && !changed) {
     return {
@@ -70,12 +112,33 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
     };
   }
 
+  const summary = buildPrChangeSummary(before, current);
+
+  if (summaryOnly) {
+    return {
+      kind: 'github.pr.monitor',
+      repo,
+      pr: Number(pr),
+      key,
+      changed,
+      summary,
+      pr: {
+        number: current.number,
+        title: current.title,
+        url: current.url,
+        state: current.state,
+        updatedAt: current.updatedAt,
+      },
+    };
+  }
+
   return {
     kind: 'github.pr.monitor',
     repo,
     pr: Number(pr),
     key,
     changed,
+    summary,
     prSnapshot: current,
   };
 }
