@@ -1,10 +1,11 @@
 import { workflowRegistry } from '../../workflows/registry.js';
 import { runEmailTriageWorkflow } from '../../workflows/email_triage.js';
-import { runGithubPrMonitorWorkflow } from '../../workflows/github_pr_monitor.js';
+import { runGithubPrMonitorWorkflow, runGithubPrMonitorNotifyWorkflow } from '../../workflows/github_pr_monitor.js';
 
 const runners = {
   'email.triage': runEmailTriageWorkflow,
   'github.pr.monitor': runGithubPrMonitorWorkflow,
+  'github.pr.monitor.notify': runGithubPrMonitorNotifyWorkflow,
 };
 
 export const workflowsRunCommand = {

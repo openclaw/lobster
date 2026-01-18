@@ -41,6 +41,26 @@ export const workflowRegistry = {
     ],
     sideEffects: [],
   },
+  'github.pr.monitor.notify': {
+    name: 'github.pr.monitor.notify',
+    description: 'Monitor a PR and emit a single human-friendly message when it changes.',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'owner/repo (e.g. clawdbot/clawdbot)' },
+        pr: { type: 'number', description: 'Pull request number' },
+        key: { type: 'string', description: 'Optional state key override.' },
+      },
+      required: ['repo', 'pr'],
+    },
+    examples: [
+      {
+        args: { repo: 'clawdbot/clawdbot', pr: 1152 },
+        description: 'Emit “PR updated” message only when changed.',
+      },
+    ],
+    sideEffects: [],
+  },
 };
 
 export function listWorkflows() {

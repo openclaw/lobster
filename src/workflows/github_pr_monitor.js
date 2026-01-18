@@ -71,6 +71,13 @@ export function buildPrChangeSummary(before, after) {
   };
 }
 
+function formatPrChangeMessage({ repo, pr, changedFields, prInfo }) {
+  const fields = changedFields.length ? ` (${changedFields.join(', ')})` : '';
+  const title = prInfo?.title ? `: ${prInfo.title}` : '';
+  const url = prInfo?.url ? ` ${prInfo.url}` : '';
+  return `PR updated: ${repo}#${pr}${title}${fields}.${url}`.replace(/\s+/g, ' ').trim();
+}
+
 export async function runGithubPrMonitorWorkflow({ args, ctx }) {
   const repo = args.repo;
   const pr = args.pr;
@@ -140,5 +147,38 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
     changed,
     summary,
     prSnapshot: current,
+  };
+}
+
+export async function runGithubPrMonitorNotifyWorkflow({ args, ctx }) {
+  const base = await runGithubPrMonitorWorkflow({
+    args: {
+      ...args,
+      changesOnly: true,
+      summaryOnly: true,
+    },
+    ctx,
+  });
+
+  if (base.suppressed) {
+    return { kind: 'github.pr.monitor.notify', suppressed: true };
+  }
+
+  const changedFields = base.summary?.changedFields ?? [];
+  const prInfo = base.pr ?? {};
+
+  return {
+    kind: 'github.pr.monitor.notify',
+    changed: Boolean(base.changed),
+    repo: args.repo,
+    pr: Number(args.pr),
+    message: formatPrChangeMessage({
+      repo: args.repo,
+      pr: Number(args.pr),
+      changedFields,
+      prInfo,
+    }),
+    pr: prInfo,
+    summary: base.summary,
   };
 }
