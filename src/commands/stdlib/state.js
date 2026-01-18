@@ -1,24 +1,6 @@
-import os from 'node:os';
-import path from 'node:path';
 import { promises as fsp } from 'node:fs';
 
-function defaultStateDir(env) {
-  return (
-    (env.LOBSTER_STATE_DIR && String(env.LOBSTER_STATE_DIR).trim()) ||
-    path.join(os.homedir(), '.lobster', 'state')
-  );
-}
-
-function keyToPath(stateDir, key) {
-  // Simple, safe file keying.
-  const safe = String(key)
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  if (!safe) throw new Error('state key is empty/invalid');
-  return path.join(stateDir, `${safe}.json`);
-}
+import { defaultStateDir, keyToPath } from '../../state/store.js';
 
 export const stateGetCommand = {
   name: 'state.get',

@@ -28,6 +28,7 @@ export const workflowRegistry = {
         repo: { type: 'string', description: 'owner/repo (e.g. clawdbot/clawdbot)' },
         pr: { type: 'number', description: 'Pull request number' },
         key: { type: 'string', description: 'Optional state key override.' },
+        changesOnly: { type: 'boolean', description: 'If true, suppress snapshot when unchanged.' },
       },
       required: ['repo', 'pr'],
     },
