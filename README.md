@@ -16,6 +16,8 @@ This repo is an MVP scaffold focused on the core shell runtime and a first Gmail
 From this folder:
 
 - `node ./bin/lobster.js --help`
+- `node ./bin/lobster.js version`
+- `node ./bin/lobster.js doctor`
 - `node ./bin/lobster.js "exec --json 'echo [1,2,3]' | where '0>=0' | json"`
 
 If you have `gog` installed:
@@ -36,4 +38,4 @@ If you have `gog` installed:
 
 - Canonical `EmailMessage` schema (normalize gog output predictably).
 - `email.draft` + `email.send` macros (compose approvals cleanly).
-- Clawdbot integration: expose Lobster as a first-class tool (`lobster.run`).
+- Clawdbot integration: ship as an optional Clawdbot plugin tool.
