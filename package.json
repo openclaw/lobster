@@ -1,0 +1,15 @@
+{
+  "name": "lobster-shell",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "lobster": "./bin/lobster.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
