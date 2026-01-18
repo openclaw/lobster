@@ -1,0 +1,52 @@
+export const workflowRegistry = {
+  'email.triage': {
+    name: 'email.triage',
+    description: 'Triage recent Gmail messages via gog and classify into buckets.',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Gmail search query.', default: 'newer_than:1d' },
+        max: { type: 'number', description: 'Maximum messages to fetch.', default: 20 },
+        account: { type: 'string', description: 'Optional gog account (GOG_ACCOUNT).' },
+      },
+      required: [],
+    },
+    examples: [
+      {
+        args: { query: 'newer_than:1d', max: 20 },
+        description: 'Daily inbox triage for the last day.',
+      },
+    ],
+    sideEffects: [],
+  },
+  'github.pr.monitor': {
+    name: 'github.pr.monitor',
+    description: 'Fetch PR state via gh, diff against last run, emit only on change.',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'owner/repo (e.g. clawdbot/clawdbot)' },
+        pr: { type: 'number', description: 'Pull request number' },
+        key: { type: 'string', description: 'Optional state key override.' },
+      },
+      required: ['repo', 'pr'],
+    },
+    examples: [
+      {
+        args: { repo: 'clawdbot/clawdbot', pr: 1152 },
+        description: 'Monitor a PR and report when it changes.',
+      },
+    ],
+    sideEffects: [],
+  },
+};
+
+export function listWorkflows() {
+  return Object.values(workflowRegistry).map((w) => ({
+    name: w.name,
+    description: w.description,
+    argsSchema: w.argsSchema,
+    examples: w.examples,
+    sideEffects: w.sideEffects,
+  }));
+}

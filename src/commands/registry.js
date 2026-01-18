@@ -10,6 +10,9 @@ import { gogGmailSendCommand } from './stdlib/gog_gmail_send.js';
 import { emailTriageCommand } from './stdlib/email_triage.js';
 import { clawdInvokeCommand } from './stdlib/clawd_invoke.js';
 import { stateGetCommand, stateSetCommand } from './stdlib/state.js';
+import { diffLastCommand } from './stdlib/diff_last.js';
+import { workflowsListCommand } from './workflows/workflows_list.js';
+import { workflowsRunCommand } from './workflows/workflows_run.js';
 
 export function createDefaultRegistry() {
   const commands = new Map();
@@ -28,6 +31,9 @@ export function createDefaultRegistry() {
     clawdInvokeCommand,
     stateGetCommand,
     stateSetCommand,
+    diffLastCommand,
+    workflowsListCommand,
+    workflowsRunCommand,
   ]) {
     commands.set(cmd.name, cmd);
   }
