@@ -8,6 +8,7 @@ import { approveCommand } from './stdlib/approve.js';
 import { gogGmailSearchCommand } from './stdlib/gog_gmail_search.js';
 import { gogGmailSendCommand } from './stdlib/gog_gmail_send.js';
 import { emailTriageCommand } from './stdlib/email_triage.js';
+import { clawdInvokeCommand } from './stdlib/clawd_invoke.js';
 
 export function createDefaultRegistry() {
   const commands = new Map();
@@ -23,6 +24,7 @@ export function createDefaultRegistry() {
     gogGmailSearchCommand,
     gogGmailSendCommand,
     emailTriageCommand,
+    clawdInvokeCommand,
   ]) {
     commands.set(cmd.name, cmd);
   }

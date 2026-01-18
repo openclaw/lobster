@@ -1,6 +1,8 @@
 import { parsePipeline } from './parser.js';
 import { createDefaultRegistry } from './commands/registry.js';
 import { runPipeline } from './runtime.js';
+import { encodeToken } from './token.js';
+import { decodeResumeToken, parseResumeArgs } from './resume.js';
 
 export async function runCli(argv) {
   const registry = createDefaultRegistry();
@@ -28,6 +30,11 @@ export async function runCli(argv) {
 
   if (argv[0] === 'run') {
     await handleRun({ argv: argv.slice(1), registry });
+    return;
+  }
+
+  if (argv[0] === 'resume') {
+    await handleResume({ argv: argv.slice(1), registry });
     return;
   }
 
@@ -69,11 +76,32 @@ async function handleRun({ argv, registry }) {
         ? output.items[0]
         : null;
 
+      if (approval) {
+        const resumeToken = encodeToken({
+          v: 1,
+          pipeline,
+          resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
+          items: approval.items,
+          prompt: approval.prompt,
+        });
+
+        writeToolEnvelope({
+          ok: true,
+          status: 'needs_approval',
+          output: [],
+          requiresApproval: {
+            ...approval,
+            resumeToken,
+          },
+        });
+        return;
+      }
+
       writeToolEnvelope({
         ok: true,
-        status: approval ? 'needs_approval' : 'ok',
-        output: approval ? [] : output.items,
-        requiresApproval: approval,
+        status: 'ok',
+        output: output.items,
+        requiresApproval: null,
       });
       return;
     }
@@ -121,6 +149,62 @@ function parseModeAndStrip(argv) {
   return { mode, rest };
 }
 
+async function handleResume({ argv, registry }) {
+  const mode = 'tool';
+  const { token, approved } = parseResumeArgs(argv);
+  const payload = decodeResumeToken(token);
+
+  if (!approved) {
+    writeToolEnvelope({ ok: true, status: 'cancelled', output: [], requiresApproval: null });
+    return;
+  }
+
+  const remaining = payload.pipeline.slice(payload.resumeAtIndex);
+  const input = (async function* () {
+    for (const item of payload.items) yield item;
+  })();
+
+  try {
+    const output = await runPipeline({
+      pipeline: remaining,
+      registry,
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env: process.env,
+      mode,
+      input,
+    });
+
+    const approval = output.halted && output.items.length === 1 && output.items[0]?.type === 'approval_request'
+      ? output.items[0]
+      : null;
+
+    if (approval) {
+      const resumeToken = encodeToken({
+        v: 1,
+        pipeline: remaining,
+        resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
+        items: approval.items,
+        prompt: approval.prompt,
+      });
+
+      writeToolEnvelope({
+        ok: true,
+        status: 'needs_approval',
+        output: [],
+        requiresApproval: { ...approval, resumeToken },
+      });
+      return;
+    }
+
+    writeToolEnvelope({ ok: true, status: 'ok', output: output.items, requiresApproval: null });
+  } catch (err) {
+    writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
+    process.exitCode = 1;
+  }
+}
+
 function writeToolEnvelope(payload) {
   process.stdout.write(JSON.stringify(payload, null, 2));
   process.stdout.write('\n');
@@ -143,6 +227,7 @@ function helpText() {
     `  lobster 'exec --json "echo [1,2,3]" | json'\n` +
     `  lobster 'gog.gmail.search --query "newer_than:7d" --max 10 | pick id,subject,from | table'\n` +
     `  lobster run --mode tool 'exec --json "echo [1]" | approve --prompt "ok?"'\n` +
+    `  lobster resume --token <token> --approve yes\n` +
     `\nCommands:\n` +
-    `  exec, head, json, pick, table, where, approve, gog.gmail.search, gog.gmail.send, email.triage\n`;
+    `  exec, head, json, pick, table, where, approve, gog.gmail.search, gog.gmail.send, email.triage, clawd.invoke\n`;
 }

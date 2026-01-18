@@ -1,7 +1,7 @@
 import { createJsonRenderer } from './renderers/json.js';
 
-export async function runPipeline({ pipeline, registry, stdin, stdout, stderr, env, mode = 'human' }) {
-  let stream = emptyStream();
+export async function runPipeline({ pipeline, registry, stdin, stdout, stderr, env, mode = 'human', input }) {
+  let stream = input ?? emptyStream();
   let rendered = false;
   let halted = false;
   let haltedAt = null;
