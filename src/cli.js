@@ -206,7 +206,11 @@ async function handleResume({ argv, registry }) {
 }
 
 function writeToolEnvelope(payload) {
-  process.stdout.write(JSON.stringify(payload, null, 2));
+  const envelope = {
+    protocolVersion: 1,
+    ...payload,
+  };
+  process.stdout.write(JSON.stringify(envelope, null, 2));
   process.stdout.write('\n');
 }
 
