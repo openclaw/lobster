@@ -32,6 +32,7 @@ test('resume token roundtrip and resume pipeline continues', async () => {
   assert.equal(first.items[0].type, 'approval_request');
 
   const token = encodeToken({
+    protocolVersion: 1,
     v: 1,
     pipeline,
     resumeAtIndex: (first.haltedAt?.index ?? -1) + 1,

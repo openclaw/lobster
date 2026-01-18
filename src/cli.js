@@ -88,6 +88,7 @@ async function handleRun({ argv, registry }) {
 
       if (approval) {
         const resumeToken = encodeToken({
+          protocolVersion: 1,
           v: 1,
           pipeline,
           resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
@@ -192,6 +193,7 @@ async function handleResume({ argv, registry }) {
 
     if (approval) {
       const resumeToken = encodeToken({
+        protocolVersion: 1,
         v: 1,
         pipeline: remaining,
         resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,

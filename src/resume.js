@@ -41,6 +41,7 @@ export function parseResumeArgs(argv) {
 export function decodeResumeToken(token) {
   const payload = decodeToken(token);
   if (!payload || typeof payload !== 'object') throw new Error('Invalid token');
+  if (payload.protocolVersion !== 1) throw new Error('Unsupported protocol version');
   if (payload.v !== 1) throw new Error('Unsupported token version');
   if (!Array.isArray(payload.pipeline)) throw new Error('Invalid token');
   if (typeof payload.resumeAtIndex !== 'number') throw new Error('Invalid token');
