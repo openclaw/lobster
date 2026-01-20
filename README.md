@@ -2,8 +2,6 @@
 
 A Clawdbot-native workflow shell: typed (JSON-first) pipelines, jobs, and approval gates.
 
-This repo is an MVP scaffold focused on the core shell runtime and a first Gmail integration via the `steipete/gog` skill/CLI.
-
 
 ## Example of lobster at work
 Clawdbot or any other AI agent can use `lobster` as a workflow engine and not construct a query every time - thus saving tokens, providing room for determinism, and resumability.
