@@ -1,18 +1,15 @@
-import { execCommand } from './stdlib/exec.js';
-import { headCommand } from './stdlib/head.js';
-import { jsonCommand } from './stdlib/json.js';
-import { pickCommand } from './stdlib/pick.js';
-import { tableCommand } from './stdlib/table.js';
-import { whereCommand } from './stdlib/where.js';
-import { approveCommand } from './stdlib/approve.js';
-import { gogGmailSearchCommand } from './stdlib/gog_gmail_search.js';
-import { gogGmailSendCommand } from './stdlib/gog_gmail_send.js';
-import { emailTriageCommand } from './stdlib/email_triage.js';
-import { clawdInvokeCommand } from './stdlib/clawd_invoke.js';
-import { stateGetCommand, stateSetCommand } from './stdlib/state.js';
-import { diffLastCommand } from './stdlib/diff_last.js';
-import { workflowsListCommand } from './workflows/workflows_list.js';
-import { workflowsRunCommand } from './workflows/workflows_run.js';
+import { execCommand } from "./stdlib/exec.js";
+import { headCommand } from "./stdlib/head.js";
+import { jsonCommand } from "./stdlib/json.js";
+import { pickCommand } from "./stdlib/pick.js";
+import { tableCommand } from "./stdlib/table.js";
+import { whereCommand } from "./stdlib/where.js";
+import { approveCommand } from "./stdlib/approve.js";
+import { clawdInvokeCommand } from "./stdlib/clawd_invoke.js";
+import { stateGetCommand, stateSetCommand } from "./stdlib/state.js";
+import { diffLastCommand } from "./stdlib/diff_last.js";
+import { workflowsListCommand } from "./workflows/workflows_list.js";
+import { workflowsRunCommand } from "./workflows/workflows_run.js";
 
 export function createDefaultRegistry() {
   const commands = new Map();
@@ -25,9 +22,6 @@ export function createDefaultRegistry() {
     tableCommand,
     whereCommand,
     approveCommand,
-    gogGmailSearchCommand,
-    gogGmailSendCommand,
-    emailTriageCommand,
     clawdInvokeCommand,
     stateGetCommand,
     stateSetCommand,

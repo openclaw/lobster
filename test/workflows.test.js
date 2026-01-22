@@ -22,5 +22,5 @@ test('workflows.list returns known workflows', async () => {
   for await (const it of res.output) items.push(it);
 
   const names = items.map((x) => x.name).sort();
-  assert.deepEqual(names, ['email.triage', 'github.pr.monitor', 'github.pr.monitor.notify']);
+  assert.deepEqual(names, ['github.pr.monitor', 'github.pr.monitor.notify']);
 });

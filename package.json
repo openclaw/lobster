@@ -1,15 +1,35 @@
 {
   "name": "lobster-shell",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
+  "description": "Workflow runtime for AI agents - deterministic pipelines with approval gates",
   "type": "module",
   "bin": {
     "lobster": "./bin/lobster.js"
   },
+  "exports": {
+    ".": "./src/sdk/index.js",
+    "./sdk": "./src/sdk/index.js",
+    "./recipes/github": "./src/recipes/github/index.js"
+  },
+  "main": "./src/sdk/index.js",
   "scripts": {
     "test": "node --test"
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "keywords": [
+    "workflow",
+    "automation",
+    "ai-agent",
+    "approval",
+    "pipeline",
+    "lobster",
+    "clawdbot"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/clawdbot/lobster"
+  },
+  "license": "MIT"
 }

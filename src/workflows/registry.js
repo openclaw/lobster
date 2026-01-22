@@ -1,24 +1,4 @@
 export const workflowRegistry = {
-  'email.triage': {
-    name: 'email.triage',
-    description: 'Triage recent Gmail messages via gog and classify into buckets.',
-    argsSchema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Gmail search query.', default: 'newer_than:1d' },
-        max: { type: 'number', description: 'Maximum messages to fetch.', default: 20 },
-        account: { type: 'string', description: 'Optional gog account (GOG_ACCOUNT).' },
-      },
-      required: [],
-    },
-    examples: [
-      {
-        args: { query: 'newer_than:1d', max: 20 },
-        description: 'Daily inbox triage for the last day.',
-      },
-    ],
-    sideEffects: [],
-  },
   'github.pr.monitor': {
     name: 'github.pr.monitor',
     description: 'Fetch PR state via gh, diff against last run, emit only on change.',
@@ -56,7 +36,7 @@ export const workflowRegistry = {
     examples: [
       {
         args: { repo: 'clawdbot/clawdbot', pr: 1152 },
-        description: 'Emit “PR updated” message only when changed.',
+        description: 'Emit "PR updated" message only when changed.',
       },
     ],
     sideEffects: [],
