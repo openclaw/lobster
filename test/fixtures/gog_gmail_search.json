@@ -1,0 +1,29 @@
+[
+  {
+    "id": "m1",
+    "threadId": "t1",
+    "from": "Alice <alice@example.com>",
+    "subject": "Quick question",
+    "date": "2026-01-22T07:00:00Z",
+    "snippet": "Hey, can you take a look?",
+    "labels": ["INBOX", "UNREAD"]
+  },
+  {
+    "id": "m2",
+    "threadId": "t2",
+    "from": "no-reply@service.com",
+    "subject": "Your receipt",
+    "date": "2026-01-22T06:00:00Z",
+    "snippet": "Thanks for your purchase",
+    "labels": ["INBOX", "UNREAD"]
+  },
+  {
+    "id": "m3",
+    "threadId": "t3",
+    "from": "Bob <bob@example.com>",
+    "subject": "Action required: NDA",
+    "date": "2026-01-21T23:00:00Z",
+    "snippet": "Please sign",
+    "labels": ["INBOX"]
+  }
+]
