@@ -132,8 +132,6 @@ node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo
 
 ## Goals
 
-> Note: Gmail/gog workflows and other non-Clawdbot integrations have moved to **https://github.com/vignesh07/lobster-integrations**.
-
 
 - Typed pipelines (objects/arrays), not text pipes.
 - Local-first execution.
@@ -165,4 +163,3 @@ From this folder:
 ## Next steps
 
 - Clawdbot integration: ship as an optional Clawdbot plugin tool.
-- More recipes will be added over time; non-Clawdbot/provider-specific integrations live in `lobster-integrations`.
