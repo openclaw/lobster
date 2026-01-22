@@ -1,11 +1,18 @@
 {
-  "name": "lobster-shell",
-  "version": "0.2.0",
+  "name": "lobster",
+  "version": "2026.1.21",
   "description": "Workflow runtime for AI agents - deterministic pipelines with approval gates",
   "type": "module",
   "bin": {
     "lobster": "./bin/lobster.js"
   },
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "LICENSE",
+    "VISION.md"
+  ],
   "exports": {
     ".": "./dist/src/sdk/index.js",
     "./sdk": "./dist/src/sdk/index.js",
@@ -15,6 +22,7 @@
   "scripts": {
     "clean": "rm -rf dist",
     "build": "pnpm clean && tsc -p tsconfig.json",
+    "prepack": "pnpm build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "oxlint --tsconfig tsconfig.json src test",
     "fmt": "oxlint --tsconfig tsconfig.json --fix src test",
