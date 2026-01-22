@@ -14,7 +14,7 @@ export const clawdInvokeCommand = {
   },
   async run({ input, args, ctx }) {
     // Drain input: for now we don't stream input into clawd calls.
-    for await (const _ of input) {
+    for await (const _item of input) {
       // no-op
     }
 
@@ -31,7 +31,7 @@ export const clawdInvokeCommand = {
     if (args['args-json']) {
       try {
         toolArgs = JSON.parse(String(args['args-json']));
-      } catch (err) {
+      } catch (_err) {
         throw new Error('clawd.invoke --args-json must be valid JSON');
       }
     }
@@ -63,7 +63,7 @@ export const clawdInvokeCommand = {
     let parsed;
     try {
       parsed = text ? JSON.parse(text) : null;
-    } catch (err) {
+    } catch (_err) {
       throw new Error('clawd.invoke expected JSON response');
     }
 

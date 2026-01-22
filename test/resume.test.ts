@@ -21,6 +21,7 @@ test('resume token roundtrip and resume pipeline continues', async () => {
   const first = await runPipeline({
     pipeline,
     registry,
+    input: [],
     stdin: process.stdin,
     stdout: process.stdout,
     stderr: process.stderr,

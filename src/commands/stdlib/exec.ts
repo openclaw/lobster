@@ -43,7 +43,7 @@ export const execCommand = {
 };
 
 function runProcess(command, argv, { env, cwd }) {
-  return new Promise((resolve, reject) => {
+  return new Promise<any>((resolve, reject) => {
     const child = spawn(command, argv, {
       env,
       cwd,

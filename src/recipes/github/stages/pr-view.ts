@@ -19,7 +19,7 @@ import { spawn } from 'node:child_process';
  * @returns {Promise<{stdout: string, stderr: string}>}
  */
 function runGh(argv, { env, cwd }) {
-  return new Promise((resolve, reject) => {
+  return new Promise<any>((resolve, reject) => {
     const child = spawn('gh', argv, {
       env,
       cwd,
@@ -35,7 +35,7 @@ function runGh(argv, { env, cwd }) {
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
 
-    child.on('error', (err) => {
+    child.on('error', (err: any) => {
       if (err?.code === 'ENOENT') {
         reject(new Error('gh not found on PATH (install GitHub CLI)'));
         return;
@@ -80,7 +80,7 @@ export function ghPrView(options) {
 
     async run({ input, ctx }) {
       // Drain input
-      for await (const _ of input) {
+      for await (const _item of input) {
         // no-op
       }
 
@@ -91,7 +91,7 @@ export function ghPrView(options) {
         '--json', fields.join(','),
       ];
 
-      const { stdout } = await runGh(argv, { env: ctx.env, cwd: process.cwd() });
+      const { stdout } = (await runGh(argv, { env: ctx.env, cwd: process.cwd() })) as any;
 
       let parsed;
       try {

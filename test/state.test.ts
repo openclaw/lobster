@@ -47,6 +47,7 @@ test('state.get returns null for missing key', async () => {
   const output = await runPipeline({
     pipeline: [{ name: 'state.get', args: { _: ['missing'] }, raw: 'state.get missing' }],
     registry,
+    input: [],
     stdin: process.stdin,
     stdout: process.stdout,
     stderr: process.stderr,

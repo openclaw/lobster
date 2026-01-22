@@ -19,6 +19,7 @@ test('approve halts pipeline in tool mode', async () => {
   const output = await runPipeline({
     pipeline,
     registry,
+    input: [],
     stdin: process.stdin,
     stdout: process.stdout,
     stderr: process.stderr,
