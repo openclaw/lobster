@@ -39,7 +39,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/clawdbot/lobster"
+    "url": "git+https://github.com/clawdbot/lobster.git"
   },
+  "bugs": {
+    "url": "https://github.com/clawdbot/lobster/issues"
+  },
+  "homepage": "https://github.com/clawdbot/lobster#readme",
   "license": "MIT"
 }
