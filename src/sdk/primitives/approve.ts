@@ -18,7 +18,7 @@
  * @param {boolean} [options.preview=true] - Include items in approval request
  * @returns {Object} Stage object with run method
  */
-export function approve(options = {}) {
+export function approve(options: any = {}) {
   const prompt = options.prompt ?? 'Approve?';
   const preview = options.preview !== false;
 
@@ -26,7 +26,7 @@ export function approve(options = {}) {
     type: 'approve',
     prompt,
 
-    async run({ input, ctx }) {
+    async run({ input, ctx: _ctx }) {
       // Collect all items
       const items = [];
       for await (const item of input) {

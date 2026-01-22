@@ -13,7 +13,7 @@ function runProcess(command, argv, { env, cwd }) {
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
 
-    child.on('error', (err) => {
+    child.on('error', (err: any) => {
       if (err?.code === 'ENOENT') {
         reject(new Error('gh not found on PATH (install GitHub CLI)'));
         return;
@@ -97,7 +97,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
     'number,title,url,state,isDraft,mergeable,reviewDecision,author,baseRefName,headRefName,updatedAt',
   ];
 
-  const { stdout } = await runProcess('gh', argv, { env: ctx.env, cwd: process.cwd() });
+  const { stdout } = (await runProcess('gh', argv, { env: ctx.env, cwd: process.cwd() })) as any;
 
   let current;
   try {
@@ -112,7 +112,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
     return {
       kind: 'github.pr.monitor',
       repo,
-      pr: Number(pr),
+      prNumber: Number(pr),
       key,
       changed: false,
       suppressed: true,
@@ -125,7 +125,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
     return {
       kind: 'github.pr.monitor',
       repo,
-      pr: Number(pr),
+      prNumber: Number(pr),
       key,
       changed,
       summary,
@@ -142,7 +142,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
   return {
     kind: 'github.pr.monitor',
     repo,
-    pr: Number(pr),
+    prNumber: Number(pr),
     key,
     changed,
     summary,
@@ -171,7 +171,7 @@ export async function runGithubPrMonitorNotifyWorkflow({ args, ctx }) {
     kind: 'github.pr.monitor.notify',
     changed: Boolean(base.changed),
     repo: args.repo,
-    pr: Number(args.pr),
+    prNumber: Number(args.pr),
     message: formatPrChangeMessage({
       repo: args.repo,
       pr: Number(args.pr),

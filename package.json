@@ -18,7 +18,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "oxlint --tsconfig tsconfig.json src test",
     "fmt": "oxlint --tsconfig tsconfig.json --fix src test",
-    "test": "pnpm build && node --test dist/test"
+    "test": "pnpm build && node --test dist/test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

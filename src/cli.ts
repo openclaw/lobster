@@ -74,6 +74,7 @@ async function handleRun({ argv, registry }) {
     const output = await runPipeline({
       pipeline,
       registry,
+      input: [],
       stdin: process.stdin,
       stdout: process.stdout,
       stderr: process.stderr,
@@ -223,7 +224,7 @@ async function readVersion() {
   const { dirname, join } = await import('node:path');
 
   const here = dirname(fileURLToPath(import.meta.url));
-  const pkgPath = join(here, '..', 'package.json');
+  const pkgPath = join(here, '..', '..', 'package.json');
   const pkg = JSON.parse(await readFile(pkgPath, 'utf8'));
   return pkg.version ?? '0.0.0';
 }
@@ -231,25 +232,29 @@ async function readVersion() {
 async function handleDoctor({ argv, registry }) {
   const mode = 'tool';
   const pipeline = "exec --json --shell 'echo [1]'";
-  const output = await (async () => {
+  const output: any = await (async () => {
     try {
       const parsed = parsePipeline(pipeline);
       return await runPipeline({
         pipeline: parsed,
         registry,
+        input: [],
         stdin: process.stdin,
         stdout: process.stdout,
         stderr: process.stderr,
         env: process.env,
         mode,
       });
-    } catch (err) {
+    } catch (err: any) {
       return { error: err };
     }
   })();
 
   if (output?.error) {
-    writeToolEnvelope({ ok: false, error: { type: 'doctor_error', message: output.error?.message ?? String(output.error) } });
+    writeToolEnvelope({
+      ok: false,
+      error: { type: 'doctor_error', message: output.error?.message ?? String(output.error) },
+    });
     process.exitCode = 1;
     return;
   }

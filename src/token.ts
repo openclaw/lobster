@@ -9,7 +9,7 @@ export function decodeToken(token) {
   try {
     const json = Buffer.from(String(token), 'base64url').toString('utf8');
     return JSON.parse(json);
-  } catch (err) {
+  } catch (_err) {
     throw new Error('Invalid token');
   }
 }

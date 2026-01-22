@@ -1,5 +1,5 @@
 function parsePredicate(expr) {
-  const m = expr.match(/^([a-zA-Z0-9_\.]+)\s*(==|=|!=|<=|>=|<|>)\s*(.+)$/);
+  const m = expr.match(/^([a-zA-Z0-9_.]+)\s*(==|=|!=|<=|>=|<|>)\s*(.+)$/);
   if (!m) throw new Error(`Invalid where expression: ${expr}`);
   const [, path, op, rawValue] = m;
 

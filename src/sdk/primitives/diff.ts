@@ -72,7 +72,7 @@ function stableStringify(value) {
  * @param {boolean} [options.changesOnly=false] - If true, suppress output when unchanged
  * @returns {Object} Stage object with run method
  */
-export function diffLast(key, options = {}) {
+export function diffLast(key, options: any = {}) {
   if (!key) throw new Error('diffLast requires a key');
 
   const changesOnly = options.changesOnly === true;

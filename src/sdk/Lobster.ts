@@ -32,8 +32,8 @@ export class Lobster {
   /** @type {Array<Function|Object>} */
   #stages = [];
 
-  /** @type {LobsterOptions} */
-  #options = {};
+  /** @type {any} */
+  #options: any = {} as any;
 
   /** @type {Object|null} */
   #meta = null;
@@ -42,7 +42,7 @@ export class Lobster {
    * Create a new Lobster workflow builder
    * @param {LobsterOptions} [options]
    */
-  constructor(options = {}) {
+  constructor(options: any = {}) { 
     this.#options = {
       env: options.env ?? process.env,
       stateDir: options.stateDir,

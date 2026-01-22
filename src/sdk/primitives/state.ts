@@ -63,7 +63,7 @@ export function stateGet(key) {
 
     async run({ input, ctx }) {
       // Drain input
-      for await (const _ of input) {
+      for await (const _item of input) {
         // no-op
       }
 

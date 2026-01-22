@@ -10,6 +10,8 @@
     "declaration": false,
     "sourceMap": true,
     "strict": false,
+    "useUnknownInCatchVariables": false,
+    "noImplicitAny": false,
     "skipLibCheck": true,
     "noEmitOnError": true
   },

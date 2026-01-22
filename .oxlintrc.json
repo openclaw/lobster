@@ -5,7 +5,7 @@
     "es2022": true
   },
   "rules": {
-    "eslint/no-unused-vars": "error",
+    "eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_", "caughtErrorsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
     "eslint/no-undef": "error",
     "typescript/no-explicit-any": "off"
   }

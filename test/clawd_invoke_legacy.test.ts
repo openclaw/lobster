@@ -9,7 +9,7 @@ function streamOf(items) {
   })();
 }
 
-test('clawd.invoke posts to /tools/invoke and returns JSON', async () => {
+test('clawd.invoke accepts legacy raw JSON response', async () => {
   const server = http.createServer((req, res) => {
     if (req.method !== 'POST' || req.url !== '/tools/invoke') {
       res.writeHead(404);
@@ -25,12 +25,13 @@ test('clawd.invoke posts to /tools/invoke and returns JSON', async () => {
       assert.equal(parsed.tool, 'demo');
       assert.equal(parsed.action, 'ping');
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, result: [{ ok: true, echo: parsed.args }] }));
+      res.end(JSON.stringify([{ ok: true, legacy: true, echo: parsed.args }]));
     });
   });
 
-  await new Promise((resolve) => server.listen(0, resolve));
-  const port = server.address().port;
+  await new Promise<void>((resolve) => server.listen(0, () => resolve()));
+  const addr = server.address();
+  const port = typeof addr === "string" || addr == null ? 0 : addr.port;
 
   try {
     const registry = createDefaultRegistry();
@@ -58,7 +59,7 @@ test('clawd.invoke posts to /tools/invoke and returns JSON', async () => {
 
     const items = [];
     for await (const it of result.output) items.push(it);
-    assert.deepEqual(items, [{ ok: true, echo: { hello: 'world' } }]);
+    assert.deepEqual(items, [{ ok: true, legacy: true, echo: { hello: 'world' } }]);
   } finally {
     server.close();
   }

@@ -19,7 +19,7 @@ import { spawn } from 'node:child_process';
  * @returns {Promise<{stdout: string, stderr: string}>}
  */
 function runProcess(command, argv, { env, cwd }) {
-  return new Promise((resolve, reject) => {
+  return new Promise<any>((resolve, reject) => {
     const child = spawn(command, argv, {
       env,
       cwd,
@@ -112,7 +112,7 @@ function parseCommand(cmdString) {
  * @param {string} [options.cwd] - Working directory
  * @returns {Object} Stage object with run method
  */
-export function exec(cmdString, options = {}) {
+export function exec(cmdString, options: any = {}) {
   const parseJson = options.json !== false;
   const useShell = options.shell === true;
   const cwd = options.cwd ?? process.cwd();
@@ -123,7 +123,7 @@ export function exec(cmdString, options = {}) {
 
     async run({ input, ctx }) {
       // Drain input (exec doesn't use input stream)
-      for await (const _ of input) {
+      for await (const _item of input) {
         // no-op
       }
 

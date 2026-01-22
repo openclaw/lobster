@@ -7,7 +7,7 @@ export const workflowsListCommand = {
   },
   async run({ input }) {
     // Drain input.
-    for await (const _ of input) {
+    for await (const _item of input) {
       // no-op
     }
 
