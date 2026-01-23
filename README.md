@@ -156,6 +156,7 @@ From this folder:
 ## Commands
 
 - `exec`: run OS commands
+- `exec --stdin raw|json|jsonl`: feed pipeline input into subprocess stdin
 - `where`, `pick`, `head`: data shaping
 - `json`, `table`: renderers
 - `approve`: approval gate (TTY prompt or `--emit` for Clawdbot integration)
@@ -163,3 +164,32 @@ From this folder:
 ## Next steps
 
 - Clawdbot integration: ship as an optional Clawdbot plugin tool.
+
+## Workflow files
+
+Lobster can run YAML/JSON workflow files with `steps`, `env`, `condition`, and approval gates.
+
+```
+lobster run path/to/workflow.lobster
+lobster run --file path/to/workflow.lobster --args-json '{"tag":"family"}'
+```
+
+Example file:
+
+```yaml
+name: inbox-triage
+steps:
+  - id: collect
+    command: inbox list --json
+  - id: categorize
+    command: inbox categorize --json
+    stdin: $collect.stdout
+  - id: approve
+    command: inbox apply --approve
+    stdin: $categorize.stdout
+    approval: required
+  - id: execute
+    command: inbox apply --execute
+    stdin: $categorize.stdout
+    condition: $approve.approved
+```

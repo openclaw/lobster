@@ -1,4 +1,5 @@
 import { decodeToken } from './token.js';
+import { decodeWorkflowResumePayload } from './workflows/file.js';
 
 export function parseResumeArgs(argv) {
   const args = { decision: null, token: null };
@@ -43,6 +44,9 @@ export function decodeResumeToken(token) {
   if (!payload || typeof payload !== 'object') throw new Error('Invalid token');
   if (payload.protocolVersion !== 1) throw new Error('Unsupported protocol version');
   if (payload.v !== 1) throw new Error('Unsupported token version');
+  const workflowPayload = decodeWorkflowResumePayload(payload);
+  if (workflowPayload) return workflowPayload;
+
   if (!Array.isArray(payload.pipeline)) throw new Error('Invalid token');
   if (typeof payload.resumeAtIndex !== 'number') throw new Error('Invalid token');
   if (!Array.isArray(payload.items)) throw new Error('Invalid token');

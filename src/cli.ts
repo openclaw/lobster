@@ -3,6 +3,7 @@ import { createDefaultRegistry } from './commands/registry.js';
 import { runPipeline } from './runtime.js';
 import { encodeToken } from './token.js';
 import { decodeResumeToken, parseResumeArgs } from './resume.js';
+import { runWorkflowFile } from './workflows/file.js';
 
 export async function runCli(argv) {
   const registry = createDefaultRegistry();
@@ -53,7 +54,79 @@ export async function runCli(argv) {
 }
 
 async function handleRun({ argv, registry }) {
-  const { mode, rest } = parseModeAndStrip(argv);
+  const { mode, rest, filePath, argsJson } = parseRunArgs(argv);
+  const normalizedMode = normalizeMode(mode);
+
+  const workflowFile = filePath
+    ? await resolveWorkflowFile(filePath)
+    : await detectWorkflowFile(rest);
+  if (workflowFile) {
+    let parsedArgs = {};
+    if (argsJson) {
+      try {
+        parsedArgs = JSON.parse(argsJson);
+      } catch {
+        if (mode === 'tool') {
+          writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: 'run --args-json must be valid JSON' } });
+          process.exitCode = 2;
+          return;
+        }
+        process.stderr.write('run --args-json must be valid JSON\n');
+        process.exitCode = 2;
+        return;
+      }
+    }
+
+    try {
+      const output = await runWorkflowFile({
+        filePath: workflowFile,
+        args: parsedArgs,
+        ctx: {
+          stdin: process.stdin,
+          stdout: process.stdout,
+          stderr: process.stderr,
+          env: process.env,
+          mode: normalizedMode,
+        },
+      });
+
+      if (normalizedMode === 'tool') {
+        if (output.status === 'needs_approval') {
+          writeToolEnvelope({
+            ok: true,
+            status: 'needs_approval',
+            output: [],
+            requiresApproval: output.requiresApproval ?? null,
+          });
+          return;
+        }
+
+        writeToolEnvelope({
+          ok: true,
+          status: 'ok',
+          output: output.output,
+          requiresApproval: null,
+        });
+        return;
+      }
+
+      if (output.status === 'ok' && output.output.length) {
+        process.stdout.write(JSON.stringify(output.output, null, 2));
+        process.stdout.write('\n');
+      }
+      return;
+    } catch (err) {
+      if (normalizedMode === 'tool') {
+        writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
+        process.exitCode = 1;
+        return;
+      }
+      process.stderr.write(`Error: ${err?.message ?? String(err)}\n`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   const pipelineString = rest.join(' ');
 
   let pipeline;
@@ -79,10 +152,10 @@ async function handleRun({ argv, registry }) {
       stdout: process.stdout,
       stderr: process.stderr,
       env: process.env,
-      mode,
+      mode: normalizedMode,
     });
 
-    if (mode === 'tool') {
+    if (normalizedMode === 'tool') {
       const approval = output.halted && output.items.length === 1 && output.items[0]?.type === 'approval_request'
         ? output.items[0]
         : null;
@@ -124,7 +197,7 @@ async function handleRun({ argv, registry }) {
       process.stdout.write('\n');
     }
   } catch (err) {
-    if (mode === 'tool') {
+    if (normalizedMode === 'tool') {
       writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
       process.exitCode = 1;
       return;
@@ -134,9 +207,11 @@ async function handleRun({ argv, registry }) {
   }
 }
 
-function parseModeAndStrip(argv) {
+function parseRunArgs(argv) {
   const rest = [];
   let mode = 'human';
+  let filePath = null;
+  let argsJson = null;
 
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -155,10 +230,68 @@ function parseModeAndStrip(argv) {
       continue;
     }
 
+    if (tok === '--file') {
+      const value = argv[i + 1];
+      if (value) {
+        filePath = value;
+        i++;
+      }
+      continue;
+    }
+
+    if (tok.startsWith('--file=')) {
+      filePath = tok.slice('--file='.length);
+      continue;
+    }
+
+    if (tok === '--args-json') {
+      const value = argv[i + 1];
+      if (value) {
+        argsJson = value;
+        i++;
+      }
+      continue;
+    }
+
+    if (tok.startsWith('--args-json=')) {
+      argsJson = tok.slice('--args-json='.length);
+      continue;
+    }
+
     rest.push(tok);
   }
 
-  return { mode, rest };
+  return { mode, rest, filePath, argsJson };
+}
+
+function normalizeMode(mode) {
+  return mode === 'tool' ? 'tool' : 'human';
+}
+
+async function detectWorkflowFile(rest) {
+  if (rest.length !== 1) return null;
+  const candidate = rest[0];
+  if (!candidate || candidate.includes('|')) return null;
+  try {
+    return await resolveWorkflowFile(candidate);
+  } catch {
+    return null;
+  }
+}
+
+async function resolveWorkflowFile(candidate) {
+  const { promises: fsp } = await import('node:fs');
+  const { resolve, extname, isAbsolute } = await import('node:path');
+  const resolved = isAbsolute(candidate) ? candidate : resolve(process.cwd(), candidate);
+  const stat = await fsp.stat(resolved);
+  if (!stat.isFile()) throw new Error('Workflow path is not a file');
+
+  const ext = extname(resolved).toLowerCase();
+  if (!['.lobster', '.yaml', '.yml', '.json'].includes(ext)) {
+    throw new Error('Workflow file must end in .lobster, .yaml, .yml, or .json');
+  }
+
+  return resolved;
 }
 
 async function handleResume({ argv, registry }) {
@@ -169,6 +302,40 @@ async function handleResume({ argv, registry }) {
   if (!approved) {
     writeToolEnvelope({ ok: true, status: 'cancelled', output: [], requiresApproval: null });
     return;
+  }
+
+  if (payload.kind === 'workflow-file') {
+    try {
+      const output = await runWorkflowFile({
+        filePath: payload.filePath,
+        ctx: {
+          stdin: process.stdin,
+          stdout: process.stdout,
+          stderr: process.stderr,
+          env: process.env,
+          mode: 'tool',
+        },
+        resume: payload,
+        approved: true,
+      });
+
+      if (output.status === 'needs_approval') {
+        writeToolEnvelope({
+          ok: true,
+          status: 'needs_approval',
+          output: [],
+          requiresApproval: output.requiresApproval ?? null,
+        });
+        return;
+      }
+
+      writeToolEnvelope({ ok: true, status: 'ok', output: output.output, requiresApproval: null });
+      return;
+    } catch (err) {
+      writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
+      process.exitCode = 1;
+      return;
+    }
   }
 
   const remaining = payload.pipeline.slice(payload.resumeAtIndex);
@@ -286,6 +453,8 @@ function helpText() {
     `Usage:\n` +
     `  lobster '<pipeline>'\n` +
     `  lobster run --mode tool '<pipeline>'\n` +
+    `  lobster run path/to/workflow.lobster\n` +
+    `  lobster run --file path/to/workflow.lobster --args-json '{...}'\n` +
     `  lobster resume --token <token> --approve yes|no\n` +
     `  lobster doctor\n` +
     `  lobster version\n` +

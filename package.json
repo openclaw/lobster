@@ -53,5 +53,8 @@
     "url": "https://github.com/clawdbot/lobster/issues"
   },
   "homepage": "https://github.com/clawdbot/lobster#readme",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "yaml": "^2.8.2"
+  }
 }
