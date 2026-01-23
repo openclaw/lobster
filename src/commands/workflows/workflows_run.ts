@@ -12,6 +12,19 @@ const recipeRunners = {};
 
 export const workflowsRunCommand = {
   name: 'workflows.run',
+  meta: {
+    description: 'Run a named Lobster workflow',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Workflow name' },
+        'args-json': { type: 'string', description: 'JSON string of workflow args' },
+        _: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['name'],
+    },
+    sideEffects: [],
+  },
   help() {
     return `workflows.run — run a named Lobster workflow\n\nUsage:\n  workflows.run --name <workflow> [--args-json '{...}']\n\nExample:\n  workflows.run --name github.pr.monitor.notify --args-json '{"repo":"clawdbot/clawdbot","pr":1152}'\n`;
   },

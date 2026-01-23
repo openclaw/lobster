@@ -1,5 +1,20 @@
 export const pickCommand = {
   name: 'pick',
+  meta: {
+    description: 'Project fields from objects',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        _: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'First positional arg is a comma-separated list of fields',
+        },
+      },
+      required: ['_'],
+    },
+    sideEffects: [],
+  },
   help() {
     return `pick — project fields from objects\n\nUsage:\n  ... | pick id,subject,from\n`;
   },

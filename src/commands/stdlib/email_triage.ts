@@ -42,6 +42,18 @@ function isLikelyNoReply(from: string) {
 
 export const emailTriageCommand = {
   name: "email.triage",
+  meta: {
+    description: "Deterministic bucketing + summary for email messages",
+    argsSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Maximum items to consume from input stream", default: 20 },
+        _: { type: "array", items: { type: "string" } },
+      },
+      required: [],
+    },
+    sideEffects: [],
+  },
   help() {
     return (
       `email.triage — deterministic bucketing + summary for email messages\n\n` +

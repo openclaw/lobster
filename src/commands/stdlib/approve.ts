@@ -4,6 +4,19 @@ function isInteractive(stdin) {
 
 export const approveCommand = {
   name: 'approve',
+  meta: {
+    description: 'Require confirmation to continue',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'Approval prompt text', default: 'Approve?' },
+        emit: { type: 'boolean', description: 'Force emit approval request + halt' },
+        _: { type: 'array', items: { type: 'string' } },
+      },
+      required: [],
+    },
+    sideEffects: [],
+  },
   help() {
     return `approve — require confirmation to continue\n\nUsage:\n  ... | approve --prompt "Send these emails?"\n  ... | approve --emit --prompt "Send these emails?"\n\nModes:\n  - Interactive (default): prompts on TTY and passes items through if approved.\n  - Emit (--emit): returns an approval request object and stops the pipeline.\n\nNotes:\n  - In tool mode (or non-interactive), this emits an approval request and halts.\n`;
   },

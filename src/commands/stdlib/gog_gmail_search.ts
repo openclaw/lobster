@@ -29,6 +29,20 @@ function run(cmd: string, argv: string[], env: Record<string, string | undefined
 
 export const gogGmailSearchCommand = {
   name: "gog.gmail.search",
+  meta: {
+    description: "Fetch Gmail threads via gog (JSON)",
+    argsSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Gmail search query", default: "newer_than:1d" },
+        max: { type: "number", description: "Max results", default: 20 },
+        limit: { type: "number", description: "Alias for max" },
+        _: { type: "array", items: { type: "string" } },
+      },
+      required: [],
+    },
+    sideEffects: ['reads_email'],
+  },
   help() {
     return (
       `gog.gmail.search — fetch Gmail messages via gog (JSON)\n\n` +

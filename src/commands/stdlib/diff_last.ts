@@ -2,6 +2,18 @@ import { diffAndStore } from '../../state/store.js';
 
 export const diffLastCommand = {
   name: 'diff.last',
+  meta: {
+    description: 'Compare current items to last stored snapshot',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'State key to diff against' },
+        _: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['key'],
+    },
+    sideEffects: ['writes_state'],
+  },
   help() {
     return `diff.last — compare current items to last stored snapshot\n\nUsage:\n  <items> | diff.last --key <stateKey>\n\nOutput:\n  { changed, key, before, after }\n`;
   },

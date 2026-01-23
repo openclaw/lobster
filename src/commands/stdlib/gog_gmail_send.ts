@@ -46,6 +46,19 @@ function parseDraft(item: any): Draft {
 
 export const gogGmailSendCommand = {
   name: "gog.gmail.send",
+  meta: {
+    description: "Send Gmail messages via gog",
+    argsSchema: {
+      type: "object",
+      properties: {
+        dryRun: { type: "boolean", description: "If true, do not send; echo drafts" },
+        "dry-run": { type: "boolean", description: "Alias for dryRun" },
+        _: { type: "array", items: { type: "string" } },
+      },
+      required: [],
+    },
+    sideEffects: ['sends_email'],
+  },
   help() {
     return (
       `gog.gmail.send — send Gmail messages via gog\n\n` +

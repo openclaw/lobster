@@ -2,6 +2,11 @@ import { listWorkflows } from '../../workflows/registry.js';
 
 export const workflowsListCommand = {
   name: 'workflows.list',
+  meta: {
+    description: 'List available Lobster workflows',
+    argsSchema: { type: 'object', properties: {}, required: [] },
+    sideEffects: [],
+  },
   help() {
     return `workflows.list — list available Lobster workflows\n\nUsage:\n  workflows.list\n\nNotes:\n  - Intended for Clawdbot to discover workflows dynamically.\n`;
   },

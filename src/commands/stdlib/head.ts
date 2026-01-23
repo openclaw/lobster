@@ -1,5 +1,17 @@
 export const headCommand = {
   name: 'head',
+  meta: {
+    description: 'Take first N items',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        n: { type: 'number', description: 'Number of items to take', default: 10 },
+        _: { type: 'array', items: { type: 'string' } },
+      },
+      required: [],
+    },
+    sideEffects: [],
+  },
   help() {
     return `head — take first N items\n\nUsage:\n  head --n 10\n`;
   },

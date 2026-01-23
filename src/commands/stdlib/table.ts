@@ -7,6 +7,11 @@ function stringifyCell(v) {
 
 export const tableCommand = {
   name: 'table',
+  meta: {
+    description: 'Render items as a simple table',
+    argsSchema: { type: 'object', properties: {}, required: [] },
+    sideEffects: [],
+  },
   help() {
     return `table — render items as a simple table\n\nUsage:\n  ... | table\n\nNotes:\n  - If items are objects, columns are union of keys (first 20 items).\n`;
   },

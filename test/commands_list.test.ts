@@ -42,4 +42,6 @@ test('commands.list returns command inventory including stdlib + workflows', asy
   assert.ok(self);
   assert.equal(typeof self.description, 'string');
   assert.ok(self.description.length > 0);
+  // Schema should be present for commands that declare it.
+  assert.ok(self.argsSchema);
 });

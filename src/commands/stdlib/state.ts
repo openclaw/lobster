@@ -4,6 +4,17 @@ import { defaultStateDir, keyToPath } from '../../state/store.js';
 
 export const stateGetCommand = {
   name: 'state.get',
+  meta: {
+    description: 'Read a JSON value from Lobster state',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        _: { type: 'array', items: { type: 'string' }, description: 'Key' },
+      },
+      required: ['_'],
+    },
+    sideEffects: ['reads_state'],
+  },
   help() {
     return `state.get — read a JSON value from Lobster state\n\nUsage:\n  state.get <key>\n\nEnv:\n  LOBSTER_STATE_DIR overrides storage directory\n`;
   },
@@ -32,6 +43,17 @@ export const stateGetCommand = {
 
 export const stateSetCommand = {
   name: 'state.set',
+  meta: {
+    description: 'Write a JSON value to Lobster state',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        _: { type: 'array', items: { type: 'string' }, description: 'Key' },
+      },
+      required: ['_'],
+    },
+    sideEffects: ['writes_state'],
+  },
   help() {
     return `state.set — write a JSON value to Lobster state\n\nUsage:\n  <value> | state.set <key>\n\nNotes:\n  - Consumes the entire input stream; stores a single JSON value.\n`;
   },

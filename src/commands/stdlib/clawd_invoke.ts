@@ -1,5 +1,25 @@
 export const clawdInvokeCommand = {
   name: 'clawd.invoke',
+  meta: {
+    description: 'Call a local Clawdbot tool endpoint',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Clawdbot control URL (or CLAWD_URL)' },
+        token: { type: 'string', description: 'Bearer token (or CLAWD_TOKEN)' },
+        tool: { type: 'string', description: 'Tool name (e.g. message, cron, github, etc.)' },
+        action: { type: 'string', description: 'Tool action' },
+        'args-json': { type: 'string', description: 'JSON string of tool args' },
+        sessionKey: { type: 'string', description: 'Optional session key attribution' },
+        'session-key': { type: 'string', description: 'Alias for sessionKey' },
+        dryRun: { type: 'boolean', description: 'Dry run' },
+        'dry-run': { type: 'boolean', description: 'Alias for dryRun' },
+        _: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['tool', 'action'],
+    },
+    sideEffects: ['calls_clawd_tool'],
+  },
   help() {
     return `clawd.invoke — call a local Clawdbot tool endpoint\n\n` +
       `Usage:\n` +

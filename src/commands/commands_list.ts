@@ -1,4 +1,12 @@
-export const commandsListCommand = {
+import type { CommandMeta, LobsterCommand } from './types.js';
+
+function parseDescriptionFromHelp(helpText: string): string {
+  const firstLine = helpText.split('\n').find((l) => l.trim().length > 0) ?? '';
+  // Expected pattern: "name — description" but fall back to the line as-is.
+  return firstLine.includes('—') ? firstLine.split('—').slice(1).join('—').trim() : firstLine.trim();
+}
+
+export const commandsListCommand: LobsterCommand = {
   name: 'commands.list',
   help() {
     return (
@@ -7,9 +15,14 @@ export const commandsListCommand = {
       `  commands.list\n\n` +
       `Notes:\n` +
       `  - Intended for agents (e.g. Clawdbot) to discover available pipeline stages dynamically.\n` +
-      `  - Output includes the command name and a short description extracted from help().\n`
+      `  - Output includes name/description plus optional metadata (argsSchema/examples/sideEffects) when provided by commands.\n`
     );
   },
+  meta: {
+    description: 'List available Lobster pipeline commands',
+    argsSchema: { type: 'object', properties: {}, required: [] },
+    sideEffects: [],
+  } satisfies CommandMeta,
   async run({ input, ctx }) {
     // Drain input
     for await (const _ of input) {
@@ -18,16 +31,16 @@ export const commandsListCommand = {
 
     const names = ctx.registry.list();
     const output = names.map((name) => {
-      const cmd = ctx.registry.get(name);
+      const cmd = ctx.registry.get(name) as LobsterCommand | undefined;
       const help = typeof cmd?.help === 'function' ? String(cmd.help()) : '';
-      const firstLine = help.split('\n').find((l) => l.trim().length > 0) ?? '';
-
-      // Expected pattern: "name — description" but fall back to the line as-is.
-      const desc = firstLine.includes('—') ? firstLine.split('—').slice(1).join('—').trim() : firstLine.trim();
+      const description = cmd?.meta?.description ?? parseDescriptionFromHelp(help);
 
       return {
         name,
-        description: desc,
+        description,
+        argsSchema: cmd?.meta?.argsSchema ?? null,
+        examples: cmd?.meta?.examples ?? null,
+        sideEffects: cmd?.meta?.sideEffects ?? null,
       };
     });
 

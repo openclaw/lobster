@@ -36,6 +36,21 @@ function compare(left, op, right) {
 
 export const whereCommand = {
   name: 'where',
+  meta: {
+    description: 'Filter objects by a simple predicate',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        _: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'First positional arg is an expression like field=value or minutes>=30',
+        },
+      },
+      required: ['_'],
+    },
+    sideEffects: [],
+  },
   help() {
     return `where — filter objects by a simple predicate\n\nUsage:\n  ... | where unread=true\n  ... | where minutes>=30\n  ... | where sender.domain==example.com\n`;
   },

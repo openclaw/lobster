@@ -2,6 +2,19 @@ import { spawn } from 'node:child_process';
 
 export const execCommand = {
   name: 'exec',
+  meta: {
+    description: 'Run an OS command',
+    argsSchema: {
+      type: 'object',
+      properties: {
+        json: { type: 'boolean', description: 'Parse stdout as JSON (single value).' },
+        shell: { type: 'string', description: 'Run via /bin/sh -lc with this command line.' },
+        _: { type: 'array', items: { type: 'string' }, description: 'Command + args.' },
+      },
+      required: ['_'],
+    },
+    sideEffects: ['local_exec'],
+  },
   help() {
     return `exec — run an OS command\n\n` +
       `Usage:\n` +
