@@ -297,5 +297,5 @@ function helpText() {
     `  lobster 'exec --json "echo [1,2,3]" | json'\n` +
     `  lobster run --mode tool 'exec --json "echo [1]" | approve --prompt "ok?"'\n\n` +
     `Commands:\n` +
-    `  exec, head, json, pick, table, where, approve, clawd.invoke, state.get, state.set, diff.last, workflows.list, workflows.run\n`;
+    `  exec, head, json, pick, table, where, approve, clawd.invoke, state.get, state.set, diff.last, commands.list, workflows.list, workflows.run\n`;
 }
