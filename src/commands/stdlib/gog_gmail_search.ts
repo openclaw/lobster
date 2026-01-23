@@ -50,7 +50,11 @@ export const gogGmailSearchCommand = {
     const max = Number(args.max ?? args.limit ?? 20);
 
     const gogBinRaw = String(ctx.env.GOG_BIN ?? "gog");
-    const argvBase = ["gmail", "search", "--json", "--query", query, "--max", String(max)];
+
+    // gog CLI (v0.9.x) expects the query as a positional argument:
+    //   gog gmail search <query> ... --json
+    // Earlier draft versions used --query; keep Lobster's --query flag but translate it.
+    const argvBase = ["gmail", "search", query, "--json", "--max", String(max)];
 
     // Test-friendly: allow pointing GOG_BIN at a node script.
     const isScript = /\.(mjs|cjs|js|ts)$/i.test(gogBinRaw);
@@ -69,7 +73,16 @@ export const gogGmailSearchCommand = {
       throw new Error("gog.gmail.search expected JSON output");
     }
 
-    const items = Array.isArray(parsed) ? parsed : [parsed];
+    // gog gmail search --json returns either:
+    // - an array of message/thread objects (older versions / some commands), or
+    // - an object like { nextPageToken, threads: [...] } (gog v0.9.x).
+    const items = Array.isArray(parsed)
+      ? // Some gog versions return: [ { nextPageToken, threads: [...] } ]
+        (parsed as any[]).flatMap((x) => (Array.isArray(x?.threads) ? x.threads : [x]))
+      : Array.isArray((parsed as any)?.threads)
+        ? (parsed as any).threads
+        : [parsed];
+
     return {
       output: (async function* () {
         for (const item of items) yield item;
