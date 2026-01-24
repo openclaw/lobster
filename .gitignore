@@ -6,6 +6,8 @@ dist/
 
 # Lobster state
 .lobster/
+.lobster-cache/
+.pnpm-store/
 
 # Private docs
 clawdbot_enhancement.md

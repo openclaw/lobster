@@ -11,6 +11,7 @@ import { mapCommand } from "./stdlib/map.js";
 import { groupByCommand } from "./stdlib/group_by.js";
 import { approveCommand } from "./stdlib/approve.js";
 import { clawdInvokeCommand } from "./stdlib/clawd_invoke.js";
+import { llmTaskInvokeCommand } from "./stdlib/llm_task_invoke.js";
 import { stateGetCommand, stateSetCommand } from "./stdlib/state.js";
 import { diffLastCommand } from "./stdlib/diff_last.js";
 import { workflowsListCommand } from "./workflows/workflows_list.js";
@@ -37,6 +38,7 @@ export function createDefaultRegistry() {
     groupByCommand,
     approveCommand,
     clawdInvokeCommand,
+    llmTaskInvokeCommand,
     stateGetCommand,
     stateSetCommand,
     diffLastCommand,
