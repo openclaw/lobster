@@ -125,7 +125,7 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
 
   const bodyLog: any[] = [];
   const server = http.createServer((req, res) => {
-    if (req.method !== "POST" || req.url !== "/tool/invoke") {
+    if (req.method !== "POST" || req.url !== "/tools/invoke") {
       res.writeHead(404);
       res.end("not found");
       return;
@@ -139,22 +139,26 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
       bodyLog.push(parsed);
 
       res.writeHead(200, { "content-type": "application/json" });
+      // Clawdbot tool router envelope -> llm-task tool envelope
       res.end(
         JSON.stringify({
           ok: true,
           result: {
-            runId: "triage_1",
-            output: {
-              data: {
-                decisions: [
-                  {
-                    id: "m1",
-                    category: "needs_reply",
-                    rationale: "Unclear question",
-                    reply: { body: "Sure — what’s the deadline?" },
-                  },
-                  { id: "m2", category: "needs_action", rationale: "NDA" },
-                ],
+            ok: true,
+            result: {
+              runId: "triage_1",
+              output: {
+                data: {
+                  decisions: [
+                    {
+                      id: "m1",
+                      category: "needs_reply",
+                      rationale: "Unclear question",
+                      reply: { body: "Sure — what’s the deadline?" },
+                    },
+                    { id: "m2", category: "needs_action", rationale: "NDA" },
+                  ],
+                },
               },
             },
           },
@@ -182,7 +186,7 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
       stderr: process.stderr,
       env: {
         ...process.env,
-        LLM_TASK_URL: `http://127.0.0.1:${port}`,
+        CLAWD_URL: `http://127.0.0.1:${port}`,
         LOBSTER_CACHE_DIR: cacheDir,
         LLM_TASK_FORCE_REFRESH: "1",
       },
@@ -215,7 +219,7 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
       stderr: process.stderr,
       env: {
         ...process.env,
-        LLM_TASK_URL: `http://127.0.0.1:${port}`,
+        CLAWD_URL: `http://127.0.0.1:${port}`,
         LOBSTER_CACHE_DIR: cacheDir,
         LLM_TASK_FORCE_REFRESH: "1",
       },
@@ -226,7 +230,7 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
     assert.equal(res2.items[0].to, "alice@example.com");
     assert.ok(res2.items[0].subject.toLowerCase().startsWith("re:"));
     assert.equal(bodyLog.length >= 1, true);
-    assert.equal(bodyLog[0].model, "claude-test");
+    assert.equal(bodyLog[0].args?.model ?? bodyLog[0].model, "claude-test");
     assert.ok(bodyLog[0].prompt || bodyLog[0].args?.prompt);
   } finally {
     await rm(cacheDir, { recursive: true, force: true });

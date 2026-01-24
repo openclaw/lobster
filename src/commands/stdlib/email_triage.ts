@@ -222,9 +222,9 @@ export const emailTriageCommand = {
 
     const wantLlm = Boolean(args.llm ?? false);
     const env = ctx?.env ?? process.env;
-    const hasLlmUrl = Boolean(String(args.url ?? env.LLM_TASK_URL ?? '').trim());
+    const hasClawdUrl = Boolean(String(env.CLAWD_URL ?? '').trim());
 
-    if (!wantLlm || !hasLlmUrl) {
+    if (!wantLlm || !hasClawdUrl) {
       const report = buildDeterministicReport(emails);
       if (emit === 'drafts') {
         return { output: streamOf([]) };

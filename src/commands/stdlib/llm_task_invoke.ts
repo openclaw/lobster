@@ -146,20 +146,18 @@ type CacheEntry = {
   storedAt: string;
 };
 
-type Transport = 'direct' | 'clawd';
+type Transport = 'clawd';
 
 export const llmTaskInvokeCommand = {
   name: 'llm_task.invoke',
   meta: {
-    description: 'Call the llm-task tool with typed payloads and caching (prefers CLAWD_URL when present)',
+    description: 'Call Clawdbot llm-task tool with typed payloads and caching',
     argsSchema: {
       type: 'object',
       properties: {
-        url: { type: 'string', description: 'llm-task base URL (or LLM_TASK_URL). Optional when CLAWD_URL is set.' },
         token: {
           type: 'string',
-          description:
-            'Bearer token (or LLM_TASK_TOKEN in direct mode / CLAWD_TOKEN in CLAWD mode). Optional if unauthenticated.',
+          description: 'Bearer token (or CLAWD_TOKEN). Optional if unauthenticated.',
         },
         prompt: { type: 'string', description: 'Primary prompt / instructions' },
         model: { type: 'string', description: 'Model identifier (optional; Clawdbot default will be used if omitted in CLAWD mode)' },
@@ -181,15 +179,15 @@ export const llmTaskInvokeCommand = {
   },
   help() {
     return (
-      `llm_task.invoke — call llm-task with caching and schema validation\n\n` +
-      `Transports:\n` +
-      `  - Preferred: CLAWD_URL present → call Clawdbot tool router (/tools/invoke, tool=llm-task)\n` +
-      `  - Fallback: LLM_TASK_URL/--url present → call standalone /tool/invoke\n\n` +
+      `llm_task.invoke — call Clawdbot llm-task tool with caching and schema validation\n\n` +
       `Usage:\n` +
       `  llm_task.invoke --prompt 'Write summary'\n` +
       `  llm_task.invoke --model claude-3-sonnet --prompt 'Write summary'\n` +
       `  cat artifacts.json | llm_task.invoke --prompt 'Score each item'\n` +
       `  ... | llm_task.invoke --prompt 'Plan next steps' --output-schema '{"type":"object"}'\n\n` +
+      `Config:\n` +
+      `  - Requires CLAWD_URL (Clawdbot gateway).\n` +
+      `  - Optional CLAWD_TOKEN for auth.\n\n` +
       `Features:\n` +
       `  - Typed payload validation before invoking tool.\n` +
       `  - Run-state + file cache so resumes do not re-call the LLM.\n` +
@@ -199,22 +197,17 @@ export const llmTaskInvokeCommand = {
   async run({ input, args, ctx }) {
     const env = ctx.env ?? process.env;
 
-    const baseUrl = String(args.url ?? env.LLM_TASK_URL ?? '').trim();
     const clawdUrl = String(env.CLAWD_URL ?? '').trim();
-
-    const transport: Transport = baseUrl ? 'direct' : clawdUrl ? 'clawd' : 'direct';
-    if (!baseUrl && !clawdUrl) {
-      throw new Error('llm_task.invoke requires either LLM_TASK_URL/--url (direct) or CLAWD_URL (Clawdbot)');
+    const transport: Transport = 'clawd';
+    if (!clawdUrl) {
+      throw new Error('llm_task.invoke requires CLAWD_URL (run via Clawdbot gateway)');
     }
 
     const prompt = extractPrompt(args);
     if (!prompt) throw new Error('llm_task.invoke requires --prompt or positional text');
 
     const model = String(args.model ?? env.LLM_TASK_MODEL ?? '').trim();
-    if (!model && transport === 'direct') {
-      // Direct mode is assumed to require it; Clawdbot mode uses Clawdbot defaults.
-      throw new Error('llm_task.invoke requires --model (or LLM_TASK_MODEL) in direct mode');
-    }
+    // Model is optional in Clawdbot mode (Clawdbot llm-task tool can use its default model).
 
     const schemaVersion = args['schema-version']
       ? String(args['schema-version']).trim()
@@ -285,10 +278,8 @@ export const llmTaskInvokeCommand = {
       throw new Error(`llm_task.invoke payload invalid: ${ajv.errorsText(validatePayload.errors)}`);
     }
 
-    const endpoint = transport === 'direct' ? buildDirectEndpoint(baseUrl) : buildClawdEndpoint(clawdUrl);
-    const token = String(
-      args.token ?? (transport === 'direct' ? env.LLM_TASK_TOKEN : env.CLAWD_TOKEN) ?? '',
-    ).trim();
+    const endpoint = buildClawdEndpoint(clawdUrl);
+    const token = String(args.token ?? env.CLAWD_TOKEN ?? '').trim();
 
     const validator = userOutputSchema ? ajv.compile(userOutputSchema) : null;
 
@@ -308,10 +299,7 @@ export const llmTaskInvokeCommand = {
 
       let responseEnvelope: LlmTaskResponseEnvelope;
       try {
-        responseEnvelope =
-          transport === 'direct'
-            ? await invokeRemoteDirect({ endpoint, token, payload })
-            : await invokeRemoteViaClawd({ endpoint, token, payload });
+        responseEnvelope = await invokeRemoteViaClawd({ endpoint, token, payload });
       } catch (err: any) {
         throw new Error(`llm_task.invoke request failed: ${err?.message ?? String(err)}`);
       }
@@ -330,7 +318,7 @@ export const llmTaskInvokeCommand = {
         cacheKey,
         schemaVersion,
         artifactHashes,
-        source: transport === 'direct' ? 'remote' : 'clawd',
+        source: 'clawd',
         attempt,
       });
 
@@ -446,39 +434,8 @@ function computeCacheKey({
   return createHash('sha256').update(stableStringify(payload)).digest('hex');
 }
 
-function buildDirectEndpoint(baseUrl: string) {
-  const base = new URL(baseUrl);
-  const cleanBase = base.pathname.endsWith('/') ? base.pathname.slice(0, -1) : base.pathname;
-  base.pathname = `${cleanBase}/tool/invoke`.replace(/\/+/, '/');
-  // Fix any accidental double slashes
-  base.pathname = base.pathname.replace(/\/+/g, '/');
-  return base;
-}
-
 function buildClawdEndpoint(clawdUrl: string) {
   return new URL('/tools/invoke', clawdUrl);
-}
-
-async function invokeRemoteDirect({ endpoint, token, payload }: { endpoint: URL; token: string; payload: any }) {
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : null),
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 400)}`);
-  }
-
-  try {
-    return (text ? JSON.parse(text) : { ok: true, result: {} }) as LlmTaskResponseEnvelope;
-  } catch {
-    throw new Error('Response was not JSON');
-  }
 }
 
 async function invokeRemoteViaClawd({ endpoint, token, payload }: { endpoint: URL; token: string; payload: any }) {
