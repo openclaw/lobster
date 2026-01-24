@@ -157,7 +157,7 @@ test('llm_task.invoke retries when schema validation fails', async () => {
   }
 });
 
-test.skip('llm_task.invoke persists to run state so resume skips remote call', async () => {
+test('llm_task.invoke persists to run state so resume skips remote call', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'lobster-state-'));
   const registry = createDefaultRegistry();
   const cmd = registry.get('llm_task.invoke');
@@ -196,7 +196,7 @@ test.skip('llm_task.invoke persists to run state so resume skips remote call', a
         prompt: 'Do thing',
         'state-key': 'run123',
       },
-      ctx: baseCtx({ ...ctxEnv, CLAWD_URL: `http://localhost:${port}`, LLM_TASK_FORCE_REFRESH: '1' }, registry),
+      ctx: baseCtx({ ...ctxEnv, CLAWD_URL: `http://localhost:${port}` }, registry),
     } as any);
     const firstItems = await collect(first.output!);
     assert.equal(firstItems[0].source, 'clawd');
@@ -211,7 +211,7 @@ test.skip('llm_task.invoke persists to run state so resume skips remote call', a
         prompt: 'Do thing',
         'state-key': 'run123',
       },
-      ctx: baseCtx({ ...ctxEnv, CLAWD_URL: `http://localhost:${port}`, LLM_TASK_FORCE_REFRESH: '1' }, registry),
+      ctx: baseCtx({ ...ctxEnv, CLAWD_URL: `http://localhost:${port}` }, registry),
     } as any);
     const secondItems = await collect(second.output!);
     assert.equal(secondItems.length, 1);
@@ -223,7 +223,7 @@ test.skip('llm_task.invoke persists to run state so resume skips remote call', a
   }
 });
 
-test.skip('llm_task.invoke reuses file cache when URL unavailable', async () => {
+test('llm_task.invoke reuses file cache when URL unavailable', async () => {
   const cacheDir = await mkdtemp(path.join(tmpdir(), 'lobster-cache-'));
   const registry = createDefaultRegistry();
   const cmd = registry.get('llm_task.invoke');
@@ -260,7 +260,7 @@ test.skip('llm_task.invoke reuses file cache when URL unavailable', async () => 
         model: 'claude',
         prompt: 'Cache me',
       },
-      ctx: baseCtx({ ...ctxEnv, CLAWD_URL: `http://localhost:${port}`, LLM_TASK_FORCE_REFRESH: '1' }, registry),
+      ctx: baseCtx({ ...ctxEnv, CLAWD_URL: `http://localhost:${port}` }, registry),
     } as any);
     const firstItems = await collect(first.output!);
     assert.equal(firstItems[0].source, 'clawd');
@@ -274,7 +274,7 @@ test.skip('llm_task.invoke reuses file cache when URL unavailable', async () => 
         model: 'claude',
         prompt: 'Cache me',
       },
-      ctx: baseCtx({ ...ctxEnv, CLAWD_URL: `http://localhost:${port}`, LLM_TASK_FORCE_REFRESH: '1' }, registry),
+      ctx: baseCtx({ ...ctxEnv, CLAWD_URL: `http://localhost:${port}` }, registry),
     } as any);
     const secondItems = await collect(second.output!);
     assert.equal(secondItems.length, 1);
