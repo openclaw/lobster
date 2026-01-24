@@ -5,6 +5,7 @@ import { pickCommand } from "./stdlib/pick.js";
 import { tableCommand } from "./stdlib/table.js";
 import { whereCommand } from "./stdlib/where.js";
 import { sortCommand } from "./stdlib/sort.js";
+import { dedupeCommand } from "./stdlib/dedupe.js";
 import { approveCommand } from "./stdlib/approve.js";
 import { clawdInvokeCommand } from "./stdlib/clawd_invoke.js";
 import { stateGetCommand, stateSetCommand } from "./stdlib/state.js";
@@ -27,6 +28,7 @@ export function createDefaultRegistry() {
     tableCommand,
     whereCommand,
     sortCommand,
+    dedupeCommand,
     approveCommand,
     clawdInvokeCommand,
     stateGetCommand,
