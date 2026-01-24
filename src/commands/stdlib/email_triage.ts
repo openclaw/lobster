@@ -233,7 +233,7 @@ export const emailTriageCommand = {
     }
 
     const model = String(args.model ?? '').trim();
-    if (!model) throw new Error('email.triage --llm requires --model');
+    // Model is optional when running under Clawdbot (llm_task.invoke will use Clawdbot defaults).
 
     if (!ctx?.registry) throw new Error('email.triage (LLM mode) requires ctx.registry');
     const llmCmd = ctx.registry.get('llm_task.invoke');
@@ -245,7 +245,7 @@ export const emailTriageCommand = {
         _: [],
         url: args.url,
         token: args.token,
-        model,
+        ...(model ? { model } : null),
         prompt: triagePrompt(emails),
         'output-schema': JSON.stringify(TRIAGE_OUTPUT_SCHEMA),
         'schema-version': 'email_triage.v1',

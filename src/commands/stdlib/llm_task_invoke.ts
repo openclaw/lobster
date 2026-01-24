@@ -26,6 +26,7 @@ const payloadSchema = {
   type: 'object',
   properties: {
     prompt: { type: 'string', minLength: 1 },
+    // In direct mode, the remote likely requires model; in CLAWD mode, Clawdbot can default.
     model: { type: 'string', minLength: 1 },
     artifacts: { type: 'array', items: artifactSchema },
     artifactHashes: { type: 'array', items: { type: 'string', minLength: 10 } },
@@ -43,7 +44,7 @@ const payloadSchema = {
       additionalProperties: false,
     },
   },
-  required: ['prompt', 'model', 'artifacts', 'artifactHashes'],
+  required: ['prompt', 'artifacts', 'artifactHashes'],
   additionalProperties: false,
 };
 
@@ -145,17 +146,23 @@ type CacheEntry = {
   storedAt: string;
 };
 
+type Transport = 'direct' | 'clawd';
+
 export const llmTaskInvokeCommand = {
   name: 'llm_task.invoke',
   meta: {
-    description: 'Call the llm-task /tool/invoke endpoint with typed payloads and caching',
+    description: 'Call the llm-task tool with typed payloads and caching (prefers CLAWD_URL when present)',
     argsSchema: {
       type: 'object',
       properties: {
-        url: { type: 'string', description: 'llm-task base URL (or LLM_TASK_URL)' },
-        token: { type: 'string', description: 'Bearer token (or LLM_TASK_TOKEN)' },
+        url: { type: 'string', description: 'llm-task base URL (or LLM_TASK_URL). Optional when CLAWD_URL is set.' },
+        token: {
+          type: 'string',
+          description:
+            'Bearer token (or LLM_TASK_TOKEN in direct mode / CLAWD_TOKEN in CLAWD mode). Optional if unauthenticated.',
+        },
         prompt: { type: 'string', description: 'Primary prompt / instructions' },
-        model: { type: 'string', description: 'Model identifier (e.g. claude-3-sonnet)' },
+        model: { type: 'string', description: 'Model identifier (optional; Clawdbot default will be used if omitted in CLAWD mode)' },
         'artifacts-json': { type: 'string', description: 'JSON array of artifacts to send' },
         'metadata-json': { type: 'string', description: 'JSON object of metadata to include' },
         'output-schema': { type: 'string', description: 'JSON schema LLM output must satisfy' },
@@ -168,33 +175,46 @@ export const llmTaskInvokeCommand = {
         'disable-cache': { type: 'boolean', description: 'Skip persistent cache' },
         _: { type: 'array', items: { type: 'string' } },
       },
-      required: ['model'],
+      required: [],
     },
     sideEffects: ['calls_llm_task'],
   },
   help() {
     return (
-      `llm_task.invoke — call llm-task /tool/invoke with caching and schema validation\n\n` +
+      `llm_task.invoke — call llm-task with caching and schema validation\n\n` +
+      `Transports:\n` +
+      `  - Preferred: CLAWD_URL present → call Clawdbot tool router (/tools/invoke, tool=llm-task)\n` +
+      `  - Fallback: LLM_TASK_URL/--url present → call standalone /tool/invoke\n\n` +
       `Usage:\n` +
+      `  llm_task.invoke --prompt 'Write summary'\n` +
       `  llm_task.invoke --model claude-3-sonnet --prompt 'Write summary'\n` +
-      `  cat artifacts.json | llm_task.invoke --model claude-3-sonnet --prompt 'Score each item'\n` +
-      `  ... | llm_task.invoke --model claude-3-sonnet --prompt 'Plan next steps' --output-schema '{"type":"object"}'\n\n` +
+      `  cat artifacts.json | llm_task.invoke --prompt 'Score each item'\n` +
+      `  ... | llm_task.invoke --prompt 'Plan next steps' --output-schema '{"type":"object"}'\n\n` +
       `Features:\n` +
-      `  - Typed payload validation before invoking remote tool.\n` +
+      `  - Typed payload validation before invoking tool.\n` +
       `  - Run-state + file cache so resumes do not re-call the LLM.\n` +
       `  - Optional JSON-schema enforcement with bounded retries.\n`
     );
   },
   async run({ input, args, ctx }) {
     const env = ctx.env ?? process.env;
+
     const baseUrl = String(args.url ?? env.LLM_TASK_URL ?? '').trim();
-    if (!baseUrl) throw new Error('llm_task.invoke requires --url or LLM_TASK_URL');
+    const clawdUrl = String(env.CLAWD_URL ?? '').trim();
+
+    const transport: Transport = baseUrl ? 'direct' : clawdUrl ? 'clawd' : 'direct';
+    if (!baseUrl && !clawdUrl) {
+      throw new Error('llm_task.invoke requires either LLM_TASK_URL/--url (direct) or CLAWD_URL (Clawdbot)');
+    }
 
     const prompt = extractPrompt(args);
     if (!prompt) throw new Error('llm_task.invoke requires --prompt or positional text');
 
-    const model = String(args.model ?? '').trim();
-    if (!model) throw new Error('llm_task.invoke requires --model');
+    const model = String(args.model ?? env.LLM_TASK_MODEL ?? '').trim();
+    if (!model && transport === 'direct') {
+      // Direct mode is assumed to require it; Clawdbot mode uses Clawdbot defaults.
+      throw new Error('llm_task.invoke requires --model (or LLM_TASK_MODEL) in direct mode');
+    }
 
     const schemaVersion = args['schema-version']
       ? String(args['schema-version']).trim()
@@ -221,7 +241,7 @@ export const llmTaskInvokeCommand = {
 
     const stateKey = String(args['state-key'] ?? env.LOBSTER_RUN_STATE_KEY ?? '').trim() || null;
 
-    const inputArtifacts = [] as any[];
+    const inputArtifacts: any[] = [];
     for await (const item of input) inputArtifacts.push(item);
 
     const normalizedArtifacts = [...inputArtifacts, ...providedArtifacts].map(normalizeArtifact);
@@ -250,7 +270,7 @@ export const llmTaskInvokeCommand = {
 
     const payload: Record<string, any> = {
       prompt,
-      model,
+      ...(model ? { model } : null),
       artifacts: normalizedArtifacts,
       artifactHashes,
     };
@@ -265,13 +285,14 @@ export const llmTaskInvokeCommand = {
       throw new Error(`llm_task.invoke payload invalid: ${ajv.errorsText(validatePayload.errors)}`);
     }
 
-    const endpoint = buildEndpoint(baseUrl);
-    const token = String(args.token ?? env.LLM_TASK_TOKEN ?? '').trim();
+    const endpoint = transport === 'direct' ? buildDirectEndpoint(baseUrl) : buildClawdEndpoint(clawdUrl);
+    const token = String(
+      args.token ?? (transport === 'direct' ? env.LLM_TASK_TOKEN : env.CLAWD_TOKEN) ?? '',
+    ).trim();
 
     const validator = userOutputSchema ? ajv.compile(userOutputSchema) : null;
 
     let attempt = 0;
-    let lastError: Error | null = null;
     let lastValidationErrors: string[] = [];
 
     while (true) {
@@ -287,13 +308,16 @@ export const llmTaskInvokeCommand = {
 
       let responseEnvelope: LlmTaskResponseEnvelope;
       try {
-        responseEnvelope = await invokeRemote({ endpoint, token, payload });
+        responseEnvelope =
+          transport === 'direct'
+            ? await invokeRemoteDirect({ endpoint, token, payload })
+            : await invokeRemoteViaClawd({ endpoint, token, payload });
       } catch (err: any) {
         throw new Error(`llm_task.invoke request failed: ${err?.message ?? String(err)}`);
       }
 
       if (!validateResponseEnvelope(responseEnvelope)) {
-        throw new Error('llm_task.invoke received invalid response envelope');
+        throw new Error(`llm_task.invoke received invalid response envelope`);
       }
 
       if (responseEnvelope.ok !== true) {
@@ -306,7 +330,7 @@ export const llmTaskInvokeCommand = {
         cacheKey,
         schemaVersion,
         artifactHashes,
-        source: 'remote',
+        source: transport === 'direct' ? 'remote' : 'clawd',
         attempt,
       });
 
@@ -324,15 +348,14 @@ export const llmTaskInvokeCommand = {
       }
 
       lastValidationErrors = collectAjvErrors(validator.errors);
-      lastError = new Error(`llm_task.invoke output failed schema validation: ${lastValidationErrors.join('; ')}`);
-      if (attempt > maxValidationRetries) {
-        throw lastError;
+      if (attempt > maxValidationRetries + 1) {
+        throw new Error(`llm_task.invoke output failed schema validation: ${lastValidationErrors.join('; ')}`);
       }
     }
   },
 };
 
-function extractPrompt(args) {
+function extractPrompt(args: any) {
   if (args.prompt) return String(args.prompt);
   if (Array.isArray(args._) && args._.length) {
     return args._.join(' ');
@@ -340,7 +363,7 @@ function extractPrompt(args) {
   return '';
 }
 
-function parseJsonArray(raw, label) {
+function parseJsonArray(raw: any, label: string) {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(String(raw));
@@ -351,7 +374,7 @@ function parseJsonArray(raw, label) {
   }
 }
 
-function parseJsonObject(raw, label) {
+function parseJsonObject(raw: any, label: string) {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(String(raw));
@@ -364,13 +387,13 @@ function parseJsonObject(raw, label) {
   }
 }
 
-function parseOptionalNumber(value) {
+function parseOptionalNumber(value: any) {
   if (value === undefined || value === null) return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
 }
 
-function flag(value) {
+function flag(value: any) {
   if (value === undefined || value === null) return false;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') {
@@ -381,7 +404,7 @@ function flag(value) {
   return Boolean(value);
 }
 
-function normalizeArtifact(raw) {
+function normalizeArtifact(raw: any) {
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     return raw;
   }
@@ -394,15 +417,28 @@ function normalizeArtifact(raw) {
   return { kind: 'json', data: raw };
 }
 
-function hashArtifact(artifact) {
+function hashArtifact(artifact: any) {
   const stable = stableStringify(artifact);
   return createHash('sha256').update(stable).digest('hex');
 }
 
-function computeCacheKey({ prompt, model, schemaVersion, artifactHashes, outputSchema }) {
+function computeCacheKey({
+  prompt,
+  model,
+  schemaVersion,
+  artifactHashes,
+  outputSchema,
+}: {
+  prompt: string;
+  model: string;
+  schemaVersion: string;
+  artifactHashes: string[];
+  outputSchema: any;
+}) {
   const payload = {
     prompt,
-    model,
+    // If model is omitted (Clawdbot default), keep caching stable but explicit.
+    model: model || 'clawd-default',
     schemaVersion,
     artifactHashes,
     outputSchema: outputSchema ?? null,
@@ -410,22 +446,20 @@ function computeCacheKey({ prompt, model, schemaVersion, artifactHashes, outputS
   return createHash('sha256').update(stableStringify(payload)).digest('hex');
 }
 
-function buildEndpoint(baseUrl: string) {
+function buildDirectEndpoint(baseUrl: string) {
   const base = new URL(baseUrl);
   const cleanBase = base.pathname.endsWith('/') ? base.pathname.slice(0, -1) : base.pathname;
-  base.pathname = `${cleanBase}/tool/invoke`.replace(/\/+/g, '/');
+  base.pathname = `${cleanBase}/tool/invoke`.replace(/\/+/, '/');
+  // Fix any accidental double slashes
+  base.pathname = base.pathname.replace(/\/+/g, '/');
   return base;
 }
 
-async function invokeRemote({
-  endpoint,
-  token,
-  payload,
-}: {
-  endpoint: URL;
-  token: string;
-  payload: Record<string, unknown>;
-}): Promise<LlmTaskResponseEnvelope> {
+function buildClawdEndpoint(clawdUrl: string) {
+  return new URL('/tools/invoke', clawdUrl);
+}
+
+async function invokeRemoteDirect({ endpoint, token, payload }: { endpoint: URL; token: string; payload: any }) {
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -441,12 +475,58 @@ async function invokeRemote({
   }
 
   try {
-    return text
-      ? (JSON.parse(text) as LlmTaskResponseEnvelope)
-      : ({ ok: true, result: {} as LlmTaskResponse } satisfies LlmTaskResponseEnvelope);
+    return (text ? JSON.parse(text) : { ok: true, result: {} }) as LlmTaskResponseEnvelope;
   } catch {
     throw new Error('Response was not JSON');
   }
+}
+
+async function invokeRemoteViaClawd({ endpoint, token, payload }: { endpoint: URL; token: string; payload: any }) {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { authorization: `Bearer ${token}` } : null),
+    },
+    body: JSON.stringify({
+      tool: 'llm-task',
+      action: 'invoke',
+      args: payload,
+    }),
+  });
+
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 400)}`);
+  }
+
+  let parsed: any;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error('Response was not JSON');
+  }
+
+  // Clawdbot tool router envelope: { ok, result, error }
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'ok' in parsed) {
+    if (parsed.ok !== true) {
+      const msg = parsed?.error?.message ?? 'Unknown error';
+      throw new Error(`clawd tool error: ${msg}`);
+    }
+
+    const inner = parsed.result;
+
+    // llm-task tool likely returns its own { ok, result } envelope.
+    if (inner && typeof inner === 'object' && !Array.isArray(inner) && 'ok' in inner) {
+      return inner as LlmTaskResponseEnvelope;
+    }
+
+    // Otherwise treat it as raw result.
+    return { ok: true, result: inner } as LlmTaskResponseEnvelope;
+  }
+
+  // Compatibility: raw JSON
+  return { ok: true, result: parsed } as LlmTaskResponseEnvelope;
 }
 
 function normalizeResult({
@@ -468,25 +548,25 @@ function normalizeResult({
   const output = result.output ?? {};
   const item: NormalizedInvocationItem = {
     kind: 'llm_task.invoke',
-    runId: result.runId ?? null,
-    prompt: result.prompt ?? null,
-    model: result.model ?? null,
+    runId: (result.runId ?? null) as any,
+    prompt: (result.prompt ?? null) as any,
+    model: (result.model ?? null) as any,
     schemaVersion,
-    status: result.status ?? 'completed',
+    status: String(result.status ?? 'completed'),
     cacheKey,
     artifactHashes,
     output: {
-      format: output.format ?? (output.data ? 'json' : 'text'),
-      text: output.text ?? null,
-      data: output.data ?? null,
+      format: (output.format ?? (output.data ? 'json' : 'text')) as any,
+      text: (output.text ?? null) as any,
+      data: (output.data ?? null) as any,
     },
-    usage: (result.usage as Record<string, unknown>) ?? null,
-    metadata: (result.metadata as Record<string, unknown>) ?? null,
-    warnings: (result.warnings as string[]) ?? null,
-    diagnostics: (result.diagnostics as Record<string, unknown>) ?? null,
+    usage: (result.usage ?? null) as any,
+    metadata: (result.metadata ?? null) as any,
+    warnings: (result.warnings ?? null) as any,
+    diagnostics: (result.diagnostics ?? null) as any,
     createdAt: new Date().toISOString(),
     source,
-    cached: source !== 'remote',
+    cached: source !== 'remote' && source !== 'clawd',
     attemptCount: attempt,
   };
   return [item];
@@ -498,7 +578,7 @@ async function persistOutputs({
   cacheKey,
   items,
 }: {
-  env: Record<string, string | undefined>;
+  env: any;
   stateKey: string | null;
   cacheKey: string;
   items: NormalizedInvocationItem[];
@@ -519,7 +599,7 @@ function pickReusableState(stored: any, cacheKey: string) {
   if (stored.type !== 'llm_task.invoke') return null;
   if (stored.cacheKey !== cacheKey) return null;
   if (!Array.isArray(stored.items)) return null;
-  return { items: stored.items };
+  return { items: stored.items as NormalizedInvocationItem[] };
 }
 
 function collectAjvErrors(errors: ErrorObject[] | null | undefined) {
@@ -527,7 +607,7 @@ function collectAjvErrors(errors: ErrorObject[] | null | undefined) {
   return errors.map((err) => `${err.instancePath || '/'} ${err.message ?? ''}`.trim());
 }
 
-async function readCacheEntry(env: Record<string, string | undefined>, key: string): Promise<CacheEntry | null> {
+async function readCacheEntry(env: any, key: string): Promise<CacheEntry | null> {
   const filePath = path.join(getCacheDir(env), 'llm_task.invoke', `${key}.json`);
   try {
     const text = await fsp.readFile(filePath, 'utf8');
@@ -538,24 +618,21 @@ async function readCacheEntry(env: Record<string, string | undefined>, key: stri
   }
 }
 
-async function writeCacheEntry(
-  env: Record<string, string | undefined>,
-  key: string,
-  items: NormalizedInvocationItem[],
-) {
+async function writeCacheEntry(env: any, key: string, items: NormalizedInvocationItem[]) {
   const dir = path.join(getCacheDir(env), 'llm_task.invoke');
   await fsp.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, `${key}.json`);
-  await fsp.writeFile(filePath, JSON.stringify({ items, cacheKey: key, storedAt: new Date().toISOString() }, null, 2));
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify({ items, cacheKey: key, storedAt: new Date().toISOString() }, null, 2),
+  );
 }
 
-function getCacheDir(env: Record<string, string | undefined>) {
-  if (env?.LOBSTER_CACHE_DIR) return env.LOBSTER_CACHE_DIR;
+function getCacheDir(env: any) {
+  if (env?.LOBSTER_CACHE_DIR) return String(env.LOBSTER_CACHE_DIR);
   return path.join(process.cwd(), '.lobster-cache');
 }
 
-async function* streamOf(items: NormalizedInvocationItem[]) {
-  for (const item of items) {
-    yield item;
-  }
+async function* streamOf(items: any[]) {
+  for (const item of items) yield item;
 }

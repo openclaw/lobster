@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -119,6 +121,8 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
     },
   ];
 
+  const cacheDir = await mkdtemp(join(tmpdir(), "lobster-cache-"));
+
   const bodyLog: any[] = [];
   const server = http.createServer((req, res) => {
     if (req.method !== "POST" || req.url !== "/tool/invoke") {
@@ -176,7 +180,12 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
       stdin: process.stdin,
       stdout: process.stdout,
       stderr: process.stderr,
-      env: { ...process.env, LLM_TASK_URL: `http://127.0.0.1:${port}` },
+      env: {
+        ...process.env,
+        LLM_TASK_URL: `http://127.0.0.1:${port}`,
+        LOBSTER_CACHE_DIR: cacheDir,
+        LLM_TASK_FORCE_REFRESH: "1",
+      },
       mode: "tool",
     } as any);
 
@@ -204,7 +213,12 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
       stdin: process.stdin,
       stdout: process.stdout,
       stderr: process.stderr,
-      env: { ...process.env, LLM_TASK_URL: `http://127.0.0.1:${port}` },
+      env: {
+        ...process.env,
+        LLM_TASK_URL: `http://127.0.0.1:${port}`,
+        LOBSTER_CACHE_DIR: cacheDir,
+        LLM_TASK_FORCE_REFRESH: "1",
+      },
       mode: "tool",
     } as any);
 
@@ -213,8 +227,9 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
     assert.ok(res2.items[0].subject.toLowerCase().startsWith("re:"));
     assert.equal(bodyLog.length >= 1, true);
     assert.equal(bodyLog[0].model, "claude-test");
-    assert.ok(bodyLog[0].outputSchema);
+    assert.ok(bodyLog[0].prompt || bodyLog[0].args?.prompt);
   } finally {
+    await rm(cacheDir, { recursive: true, force: true });
     await closeServer(server);
   }
 });

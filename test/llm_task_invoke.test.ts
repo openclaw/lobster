@@ -258,6 +258,79 @@ test('llm_task.invoke reuses file cache when URL unavailable', async () => {
   }
 });
 
+test('llm_task.invoke uses CLAWD_URL (/tools/invoke) without requiring --url/--model', async () => {
+  const registry = createDefaultRegistry();
+  const cmd = registry.get('llm_task.invoke');
+  assert.ok(cmd);
+
+  const cacheDir = await mkdtemp(path.join(tmpdir(), 'lobster-cache-'));
+
+  const bodyLog: any[] = [];
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/tools/invoke') {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+
+    let buf = '';
+    req.setEncoding('utf8');
+    req.on('data', (d) => (buf += d));
+    req.on('end', () => {
+      const parsed = JSON.parse(buf || '{}');
+      bodyLog.push(parsed);
+
+      // This is the Clawdbot tool router envelope.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          result: {
+            ok: true,
+            result: {
+              runId: 'task_clawd_1',
+              output: { data: { hello: 'world' } },
+            },
+          },
+        }),
+      );
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const addr = server.address();
+  const port = typeof addr === 'object' && addr ? addr.port : 0;
+
+  try {
+    const result = await cmd.run({
+      input: streamOf([{ kind: 'text', text: 'doc' }]),
+      args: {
+        _: [],
+        // no url, no model
+        prompt: 'Summarize',
+        refresh: true,
+      },
+      ctx: baseCtx({ CLAWD_URL: `http://127.0.0.1:${port}`, LOBSTER_CACHE_DIR: cacheDir }, registry),
+    } as any);
+
+    const items = await collect(result.output!);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].source, 'clawd');
+    assert.equal(items[0].cached, false);
+    assert.equal(items[0].runId, 'task_clawd_1');
+    assert.equal(items[0].output.data.hello, 'world');
+
+    assert.equal(bodyLog.length, 1);
+    assert.equal(bodyLog[0].tool, 'llm-task');
+    assert.equal(bodyLog[0].action, 'invoke');
+    assert.equal(bodyLog[0].args.prompt, 'Summarize');
+    assert.ok(Array.isArray(bodyLog[0].args.artifactHashes));
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+    await closeServer(server);
+  }
+});
+
 function baseCtx(envOverrides: Record<string, string>, registry?) {
   return {
     stdin: process.stdin,
