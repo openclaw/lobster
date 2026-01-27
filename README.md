@@ -1,20 +1,20 @@
 # Lobster
 
-A Clawdbot-native workflow shell: typed (JSON-first) pipelines, jobs, and approval gates.
+A Moltbot-native workflow shell: typed (JSON-first) pipelines, jobs, and approval gates.
 
 
 ## Example of lobster at work
-Clawdbot or any other AI agent can use `lobster` as a workflow engine and not construct a query every time - thus saving tokens, providing room for determinism, and resumability.
+Moltbot or any other AI agent can use `lobster` as a workflow engine and not construct a query every time - thus saving tokens, providing room for determinism, and resumability.
 
 ### Watching a PR that hasn't had changes
 ```
-node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo\":\"clawdbot/clawdbot\",\"pr\":1152}'"
+node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo\":\"moltbot/moltbot\",\"pr\":1152}'"
 [
   {
     "kind": "github.pr.monitor",
-    "repo": "clawdbot/clawdbot",
+    "repo": "moltbot/moltbot",
     "prNumber": 1152,
-    "key": "github.pr:clawdbot/clawdbot#1152",
+    "key": "github.pr:moltbot/moltbot#1152",
     "changed": false,
     "summary": {
       "changedFields": [],
@@ -36,7 +36,7 @@ node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo
       "state": "OPEN",
       "title": "feat: Add optional lobster plugin tool (typed workflows, approvals/resume)",
       "updatedAt": "2026-01-18T20:16:56Z",
-      "url": "https://github.com/clawdbot/clawdbot/pull/1152"
+      "url": "https://github.com/moltbot/moltbot/pull/1152"
     }
   }
 ]
@@ -44,13 +44,13 @@ node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo
 ### And a PR that has a state change (in this case an approved PR)
 
 ```
- node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo\":\"clawdbot/clawdbot\",\"pr\":1200}'"
+ node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo\":\"moltbot/moltbot\",\"pr\":1200}'"
 [
   {
     "kind": "github.pr.monitor",
-    "repo": "clawdbot/clawdbot",
+    "repo": "moltbot/moltbot",
     "prNumber": 1200,
-    "key": "github.pr:clawdbot/clawdbot#1200",
+    "key": "github.pr:moltbot/moltbot#1200",
     "changed": true,
     "summary": {
       "changedFields": [
@@ -76,7 +76,7 @@ node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo
         },
         "url": {
           "from": null,
-          "to": "https://github.com/clawdbot/clawdbot/pull/1200"
+          "to": "https://github.com/moltbot/moltbot/pull/1200"
         },
         "state": {
           "from": null,
@@ -124,7 +124,7 @@ node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo
       "state": "MERGED",
       "title": "feat(tui): add syntax highlighting for code blocks",
       "updatedAt": "2026-01-19T05:06:09Z",
-      "url": "https://github.com/clawdbot/clawdbot/pull/1200"
+      "url": "https://github.com/moltbot/moltbot/pull/1200"
     }
   }
 ]
@@ -136,7 +136,7 @@ node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo
 - Typed pipelines (objects/arrays), not text pipes.
 - Local-first execution.
 - No new auth surface: Lobster must not own OAuth/tokens.
-- Composable macros that Clawdbot can invoke in one step to save tokens.
+- Composable macros that Moltbot can invoke in one step to save tokens.
 
 ## Quick start
 
@@ -159,11 +159,11 @@ From this folder:
 - `exec --stdin raw|json|jsonl`: feed pipeline input into subprocess stdin
 - `where`, `pick`, `head`: data shaping
 - `json`, `table`: renderers
-- `approve`: approval gate (TTY prompt or `--emit` for Clawdbot integration)
+- `approve`: approval gate (TTY prompt or `--emit` for Moltbot integration)
 
 ## Next steps
 
-- Clawdbot integration: ship as an optional Clawdbot plugin tool.
+- Moltbot integration: ship as an optional Moltbot plugin tool.
 
 ## Workflow files
 
