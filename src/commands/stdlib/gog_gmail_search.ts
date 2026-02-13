@@ -15,7 +15,7 @@ function run(cmd: string, argv: string[], env: Record<string, string | undefined
 
     child.on("error", (err: any) => {
       if (err?.code === "ENOENT") {
-        reject(new Error("gog not found on PATH (install: https://github.com/steipete/gog)"));
+        reject(new Error("gog not found on PATH (install: https://github.com/steipete/gogcli)"));
         return;
       }
       reject(err);
@@ -49,7 +49,7 @@ export const gogGmailSearchCommand = {
       `Usage:\n` +
       `  gog.gmail.search --query 'newer_than:1d' --max 20\n\n` +
       `Notes:\n` +
-      `  - Requires the gog CLI: https://github.com/steipete/gog\n` +
+      `  - Requires the gog CLI: https://github.com/steipete/gogcli\n` +
       `  - Set GOG_BIN to override the executable used (default: gog).\n` +
       `  - This command outputs an array of message objects (as a stream).\n`
     );
