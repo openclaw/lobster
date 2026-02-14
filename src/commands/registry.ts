@@ -21,7 +21,13 @@ import { gogGmailSearchCommand } from "./stdlib/gog_gmail_search.js";
 import { gogGmailSendCommand } from "./stdlib/gog_gmail_send.js";
 import { emailTriageCommand } from "./stdlib/email_triage.js";
 
-export function createDefaultRegistry() {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export interface Registry {
+  get(name: string): any;
+  list(): string[];
+}
+
+export function createDefaultRegistry(): Registry {
   const commands = new Map();
 
   for (const cmd of [
