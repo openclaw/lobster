@@ -27,7 +27,10 @@ export const fileWriteCommand = {
       `  text:  items joined with newline; non-strings JSON-serialized\n\n` +
       `Notes:\n` +
       `  - Tee semantics: all collected items are yielded downstream after write.\n` +
-      `  - --mkdir (default true) creates parent directories if needed.\n`;
+      `  - --mkdir (default true) creates parent directories if needed.\n\n` +
+      `Security:\n` +
+      `  Paths are unrestricted (same as exec). This command can write to any path\n` +
+      `  accessible to the process.\n`;
   },
   async run({ input, args }) {
     const filePath = args._[0] || args.path;

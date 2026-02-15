@@ -139,3 +139,58 @@ test('file.write throws on unknown format', async () => {
     (err: any) => err.message.includes("unknown format 'xml'"),
   );
 });
+
+test('file.write empty input produces empty array for JSON', async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'lobster-fwrite-'));
+  const filePath = path.join(tmp, 'empty.json');
+
+  const cmd = createDefaultRegistry().get('file.write');
+  const res = await cmd.run({ input: streamOf([]), args: { _: [filePath], format: 'json' }, ctx: makeCtx() });
+
+  const content = readFileSync(filePath, 'utf8');
+  assert.deepEqual(JSON.parse(content), []);
+
+  const items = await collect(res.output);
+  assert.deepEqual(items, []);
+});
+
+test('file.write empty input produces empty string for JSONL', async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'lobster-fwrite-'));
+  const filePath = path.join(tmp, 'empty.jsonl');
+
+  const cmd = createDefaultRegistry().get('file.write');
+  await cmd.run({ input: streamOf([]), args: { _: [filePath], format: 'jsonl' }, ctx: makeCtx() });
+
+  const content = readFileSync(filePath, 'utf8');
+  assert.equal(content, '');
+});
+
+test('file.write empty input produces empty string for text', async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'lobster-fwrite-'));
+  const filePath = path.join(tmp, 'empty.txt');
+
+  const cmd = createDefaultRegistry().get('file.write');
+  await cmd.run({ input: streamOf([]), args: { _: [filePath], format: 'text' }, ctx: makeCtx() });
+
+  const content = readFileSync(filePath, 'utf8');
+  assert.equal(content, '');
+});
+
+test('file.write text format serializes non-string items as JSON', async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'lobster-fwrite-'));
+  const filePath = path.join(tmp, 'mixed.txt');
+
+  const cmd = createDefaultRegistry().get('file.write');
+  await cmd.run({
+    input: streamOf(['plain', 42, { key: 'val' }, true]),
+    args: { _: [filePath], format: 'text' },
+    ctx: makeCtx(),
+  });
+
+  const content = readFileSync(filePath, 'utf8');
+  const lines = content.trimEnd().split('\n');
+  assert.equal(lines[0], 'plain');
+  assert.equal(lines[1], '42');
+  assert.equal(lines[2], '{"key":"val"}');
+  assert.equal(lines[3], 'true');
+});

@@ -24,7 +24,12 @@ export const fileReadCommand = {
       `  auto (default): try JSON parse; if array yield elements; else try JSONL; else text\n` +
       `  json:  parse as JSON; yield elements if array, else single item\n` +
       `  jsonl: split lines, parse each as JSON\n` +
-      `  text:  yield entire content as a single string\n`;
+      `  text:  yield entire content as a single string\n\n` +
+      `Notes:\n` +
+      `  - Replaces the pipeline stream; upstream items are discarded.\n\n` +
+      `Security:\n` +
+      `  Paths are unrestricted (same as exec). This command can read any file\n` +
+      `  accessible to the process.\n`;
   },
   async run({ input, args }) {
     // Drain input (file replaces pipeline input).

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, truncateSync } from 'node:fs';
 import { createDefaultRegistry } from '../src/commands/registry.js';
 
 function streamOf(items) {
@@ -156,4 +156,42 @@ test('file.read --format json throws on invalid JSON content', async () => {
   await assert.rejects(
     () => cmd.run({ input: streamOf([]), args: { _: [filePath], format: 'json' }, ctx: makeCtx() }),
   );
+});
+
+test('file.read throws when file exceeds MAX_FILE_SIZE', async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'lobster-fread-'));
+  const filePath = path.join(tmp, 'huge.json');
+  writeFileSync(filePath, '');
+  // Create a sparse file that reports > 50 MB without writing actual data
+  const MAX_FILE_SIZE = 50 * 1024 * 1024;
+  truncateSync(filePath, MAX_FILE_SIZE + 1);
+
+  const cmd = createDefaultRegistry().get('file.read');
+  await assert.rejects(
+    () => cmd.run({ input: streamOf([]), args: { _: [filePath] }, ctx: makeCtx() }),
+    (err: any) => err.message.includes('file exceeds maximum size'),
+  );
+});
+
+test('file.read --format jsonl throws on invalid line', async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'lobster-fread-'));
+  const filePath = path.join(tmp, 'bad.jsonl');
+  writeFileSync(filePath, '{"valid":true}\nnot valid json\n{"also":true}\n');
+
+  const cmd = createDefaultRegistry().get('file.read');
+  await assert.rejects(
+    () => cmd.run({ input: streamOf([]), args: { _: [filePath], format: 'jsonl' }, ctx: makeCtx() }),
+  );
+});
+
+test('file.read auto-detects JSON object (not array) as single item', async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'lobster-fread-'));
+  const filePath = path.join(tmp, 'auto-obj.json');
+  writeFileSync(filePath, JSON.stringify({ key: 'value', nested: { a: 1 } }));
+
+  const cmd = createDefaultRegistry().get('file.read');
+  const res = await cmd.run({ input: streamOf([]), args: { _: [filePath] }, ctx: makeCtx() });
+  const items = await collect(res.output);
+  assert.equal(items.length, 1);
+  assert.deepEqual(items[0], { key: 'value', nested: { a: 1 } });
 });
