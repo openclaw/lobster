@@ -146,8 +146,6 @@ type CacheEntry = {
   storedAt: string;
 };
 
-type Transport = 'clawd';
-
 export const llmTaskInvokeCommand = {
   name: 'llm_task.invoke',
   meta: {
@@ -198,7 +196,6 @@ export const llmTaskInvokeCommand = {
     const env = ctx.env ?? process.env;
 
     const clawdUrl = String(env.CLAWD_URL ?? '').trim();
-    const transport: Transport = 'clawd';
     if (!clawdUrl) {
       throw new Error('llm_task.invoke requires CLAWD_URL (run via Clawdbot gateway)');
     }

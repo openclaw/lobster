@@ -6,6 +6,9 @@ import { randomUUID } from 'node:crypto';
 
 import { encodeToken } from '../token.js';
 import { readStateJson, writeStateJson } from '../state/store.js';
+import { parsePipeline } from '../parser.js';
+import { runPipeline } from '../runtime.js';
+import type { Registry } from '../commands/registry.js';
 
 export type WorkflowFile = {
   name?: string;
@@ -18,7 +21,8 @@ export type WorkflowFile = {
 
 export type WorkflowStep = {
   id: string;
-  command: string;
+  command?: string;
+  pipeline?: string;
   env?: Record<string, string>;
   cwd?: string;
   stdin?: unknown;
@@ -53,6 +57,7 @@ type RunContext = {
   stderr: NodeJS.WritableStream;
   env: Record<string, string | undefined>;
   mode: 'human' | 'tool' | 'sdk';
+  registry?: Registry;
 };
 
 export type WorkflowResumePayload = {
@@ -98,8 +103,13 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (!step.id || typeof step.id !== 'string') {
       throw new Error('Workflow step requires an id');
     }
-    if (!step.command || typeof step.command !== 'string') {
-      throw new Error(`Workflow step ${step.id} requires a command string`);
+    const hasCommand = step.command && typeof step.command === 'string';
+    const hasPipeline = step.pipeline && typeof step.pipeline === 'string';
+    if (!hasCommand && !hasPipeline) {
+      throw new Error(`Workflow step "${step.id}" requires either a "command" or "pipeline" field`);
+    }
+    if (hasCommand && hasPipeline) {
+      throw new Error(`Workflow step "${step.id}" has both "command" and "pipeline" -- use exactly one`);
     }
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
@@ -174,15 +184,29 @@ export async function runWorkflowFile({
       continue;
     }
 
-    const command = resolveTemplate(step.command, resolvedArgs, results);
     const stdinValue = resolveStdin(step.stdin, resolvedArgs, results);
     const env = mergeEnv(ctx.env, workflow.env, step.env, resolvedArgs, results);
-    const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs);
 
-    const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd });
-    const json = parseJson(stdout);
+    let stepStdout: string;
+    let stepJson: unknown;
 
-    results[step.id] = { id: step.id, stdout, json };
+    if (step.pipeline) {
+      if (step.cwd !== undefined || workflow.cwd !== undefined) {
+        throw new Error(`Workflow step "${step.id}": "cwd" is not supported for pipeline steps`);
+      }
+      const expr = resolveTemplate(step.pipeline, resolvedArgs, results);
+      const result = await runPipelineStep({ pipelineExpr: expr, stdin: stdinValue, env, ctx });
+      stepStdout = result.stdout;
+      stepJson = result.json;
+    } else {
+      const command = resolveTemplate(step.command!, resolvedArgs, results);
+      const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs);
+      const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd });
+      stepStdout = stdout;
+      stepJson = parseJson(stdout);
+    }
+
+    results[step.id] = { id: step.id, stdout: stepStdout, json: stepJson };
     lastStepId = step.id;
 
     if (isApprovalStep(step.approval)) {
@@ -461,6 +485,63 @@ function readLine(stdin: NodeJS.ReadableStream) {
 
     stdin.on('data', onData);
   });
+}
+
+async function runPipelineStep({
+  pipelineExpr,
+  stdin,
+  env,
+  ctx,
+}: {
+  pipelineExpr: string;
+  stdin: string | null;
+  env: Record<string, string | undefined>;
+  ctx: RunContext;
+}): Promise<{ stdout: string; json: unknown }> {
+  if (!ctx.registry) {
+    throw new Error('pipeline step requires a registry in the run context');
+  }
+
+  const pipeline = parsePipeline(pipelineExpr);
+  const input = stdinToStream(stdin);
+
+  const result = await runPipeline({
+    pipeline,
+    registry: ctx.registry,
+    input,
+    stdin: ctx.stdin,
+    stdout: ctx.stdout,
+    stderr: ctx.stderr,
+    env,
+    mode: ctx.mode,
+  });
+
+  const items = result.items;
+  if (items.length === 0) {
+    return { stdout: '', json: undefined };
+  }
+  const json = items.length === 1 ? items[0] : items;
+  return { stdout: JSON.stringify(json), json };
+}
+
+async function* stdinToStream(stdin: string | null): AsyncGenerator<unknown> {
+  if (stdin === null || stdin === '') return;
+  const trimmed = stdin.trim();
+  if (!trimmed) return;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) yield item;
+    } else {
+      yield parsed;
+    }
+    return;
+  } catch {
+    // Not valid JSON -- yield as a single string item.
+  }
+
+  yield stdin;
 }
 
 async function runShellCommand({
