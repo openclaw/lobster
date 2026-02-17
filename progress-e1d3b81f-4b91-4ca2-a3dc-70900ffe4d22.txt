@@ -1,0 +1,20 @@
+# Progress Log
+Run: e1d3b81f-4b91-4ca2-a3dc-70900ffe4d22
+Task: Build a production-ready daily workflow that extracts latest applicants from LinkedIn Recruiter and syncs to Salesforce
+Started: 2026-02-17 12:01:00 CST
+
+## Codebase Patterns
+- Project uses TypeScript NodeNext ESM; test files import source modules with `.js` extension paths and run through compiled `dist/test/*.test.js`.
+- Validation utilities commonly use `ajv` with `{ allErrors: true, strict: false }` and throw `Error` with explicit context.
+- Package scripts are pnpm-oriented (`build` invokes `pnpm clean`), so local CI equivalents are `npm run clean && npx tsc -p tsconfig.json && node --test dist/test/*.test.js` when pnpm is unavailable.
+
+---
+
+## 2026-02-17 12:01:49 CST - US-001: Define LinkedIn applicant sync data contracts and config schema
+- Implemented `src/workflows/linkedin_recruiter_salesforce/contracts.ts` with typed applicant record + batch contracts, JSON schemas, and assertion validators that emit explicit AJV error messages.
+- Implemented `src/workflows/linkedin_recruiter_salesforce/config.ts` with env schema, typed runtime config schema, env-to-config loader, and config assertions for runtime validation.
+- Added shared validation error formatter in `src/workflows/linkedin_recruiter_salesforce/validation.ts` and barrel export in `src/workflows/linkedin_recruiter_salesforce/index.ts`.
+- Added `.env.example` with placeholder-only settings for LinkedIn relay, Salesforce, scheduler, and artifact paths.
+- Added tests in `test/linkedin_applicant_contracts.test.ts` and `test/linkedin_applicant_config.test.ts` for required fields, success paths, and failure/error-message coverage.
+- **Learnings:** Build script shells out to `pnpm`; in environments without pnpm installed, `npm run clean && npx tsc -p tsconfig.json && node --test dist/test/*.test.js` is an equivalent local verification flow.
+---
