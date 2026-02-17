@@ -12,6 +12,9 @@ dist/
 # Private docs
 clawdbot_enhancement.md
 
+# Pack artifacts
+*.tgz
+
 # OS files
 .DS_Store
 
