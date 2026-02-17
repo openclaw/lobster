@@ -15,6 +15,9 @@ clawdbot_enhancement.md
 # OS files
 .DS_Store
 
+# Package tarballs
+*.tgz
+
 # Logs
 *.log
 

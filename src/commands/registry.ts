@@ -13,6 +13,9 @@ import { approveCommand } from "./stdlib/approve.js";
 import { clawdInvokeCommand } from "./stdlib/clawd_invoke.js";
 import { llmTaskInvokeCommand } from "./stdlib/llm_task_invoke.js";
 import { stateGetCommand, stateSetCommand } from "./stdlib/state.js";
+import { fileReadCommand } from "./stdlib/file_read.js";
+import { fileWriteCommand } from "./stdlib/file_write.js";
+import { jqFilterCommand } from "./stdlib/jq_filter.js";
 import { diffLastCommand } from "./stdlib/diff_last.js";
 import { workflowsListCommand } from "./workflows/workflows_list.js";
 import { workflowsRunCommand } from "./workflows/workflows_run.js";
@@ -41,6 +44,9 @@ export function createDefaultRegistry() {
     llmTaskInvokeCommand,
     stateGetCommand,
     stateSetCommand,
+    fileReadCommand,
+    fileWriteCommand,
+    jqFilterCommand,
     diffLastCommand,
     workflowsListCommand,
     workflowsRunCommand,
