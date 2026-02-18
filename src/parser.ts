@@ -61,6 +61,11 @@ function tokenizeCommand(input) {
 
     if (quote) {
       if (quote === "'") {
+        if (ch === '\\' && input[i + 1] === quote) {
+          current += quote;
+          i++;
+          continue;
+        }
         if (ch === quote) {
           quote = null;
           continue;
