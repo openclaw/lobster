@@ -193,3 +193,38 @@ steps:
     stdin: $categorize.stdout
     condition: $approve.approved
 ```
+
+### Step fields
+
+| Field | Required | Description |
+|---|---|---|
+| `id` | yes | Unique step identifier; used to reference the step's output in subsequent steps via `$id.stdout` or `$id.json`. |
+| `command` | yes (for regular steps) | Shell command to run. Mutually exclusive with `lobster`. |
+| `lobster` | yes (for sub-workflow steps) | Path to a `.lobster` file to run as a sub-workflow (resolved relative to the parent workflow). Mutually exclusive with `command`. |
+| `args` | no | Key/value map of input arguments passed to the sub-workflow. Values support `${arg}` and `$stepId.stdout`/`$stepId.json` template syntax. Only valid when `lobster` is set. |
+| `loop` | no | Repeat the sub-workflow step in a loop. Only valid when `lobster` is set. |
+| `loop.maxIterations` | yes (when `loop` is set) | Maximum number of iterations. |
+| `loop.condition` | no | Shell command evaluated after each iteration. Exit code 0 continues the loop; non-zero stops it early. Receives `LOBSTER_LOOP_STDOUT`, `LOBSTER_LOOP_JSON`, and `LOBSTER_LOOP_ITERATION` as environment variables. |
+| `stdin` | no | Pass a previous step's output as stdin. |
+| `approval` | no | Set to `required` to insert an approval gate before the step runs. |
+| `condition` | no | Expression that must be truthy for the step to run. |
+
+### Sub-workflow step example
+
+Use the `lobster` field to embed another `.lobster` file as a step in your workflow, optionally passing arguments and looping until a condition is met:
+
+```yaml
+steps:
+  - id: prepare
+    command: echo "hello"
+
+  - id: process
+    lobster: ./sub_workflow.lobster
+    args:
+      input: $prepare.stdout
+    loop:
+      maxIterations: 10
+      condition: '! echo "$LOBSTER_LOOP_STDOUT" | grep -q "^done"'
+```
+
+The sub-workflow's last step result (stdout/json) is stored as the step result and is accessible via `$process.stdout` / `$process.json` in subsequent steps.
