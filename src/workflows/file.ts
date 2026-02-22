@@ -16,9 +16,20 @@ export type WorkflowFile = {
   steps: WorkflowStep[];
 };
 
+export type LoopConfig = {
+  maxIterations: number;
+  condition?: string;
+};
+
 export type WorkflowStep = {
   id: string;
-  command: string;
+  kind?: 'lobster';
+  // For kind === 'lobster':
+  file?: string;
+  args?: Record<string, unknown>;
+  loop?: LoopConfig;
+  // For regular shell steps:
+  command?: string;
   env?: Record<string, string>;
   cwd?: string;
   stdin?: unknown;
@@ -98,11 +109,17 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (!step.id || typeof step.id !== 'string') {
       throw new Error('Workflow step requires an id');
     }
-    if (!step.command || typeof step.command !== 'string') {
-      throw new Error(`Workflow step ${step.id} requires a command string`);
-    }
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
+    }
+    if (step.kind === 'lobster') {
+      if (!step.file || typeof step.file !== 'string') {
+        throw new Error(`Workflow step ${step.id} with kind 'lobster' requires a file string`);
+      }
+    } else {
+      if (!step.command || typeof step.command !== 'string') {
+        throw new Error(`Workflow step ${step.id} requires a command string`);
+      }
     }
     seen.add(step.id);
   }
@@ -174,7 +191,14 @@ export async function runWorkflowFile({
       continue;
     }
 
-    const command = resolveTemplate(step.command, resolvedArgs, results);
+    if (step.kind === 'lobster') {
+      const stepResult = await runLobsterSubStep(step, resolvedArgs, results, resolvedFilePath, ctx);
+      results[step.id] = stepResult;
+      lastStepId = step.id;
+      continue;
+    }
+
+    const command = resolveTemplate(step.command!, resolvedArgs, results);
     const stdinValue = resolveStdin(step.stdin, resolvedArgs, results);
     const env = mergeEnv(ctx.env, workflow.env, step.env, resolvedArgs, results);
     const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs);
@@ -504,4 +528,105 @@ async function runShellCommand({
       reject(new Error(`workflow command failed (${code}): ${stderr.trim() || stdout.trim() || command}`));
     });
   });
+}
+
+async function runLobsterSubStep(
+  step: WorkflowStep,
+  parentArgs: Record<string, unknown>,
+  parentResults: Record<string, WorkflowStepResult>,
+  parentFilePath: string,
+  ctx: RunContext,
+): Promise<WorkflowStepResult> {
+  const resolvedFile = resolveSubWorkflowPath(step.file!, parentFilePath, parentArgs, parentResults);
+  const subArgs = resolveSubWorkflowArgs(step.args, parentArgs, parentResults);
+
+  if (step.loop) {
+    return runLobsterSubStepLoop(step.id, resolvedFile, subArgs, step.loop, ctx);
+  }
+
+  const result = await runWorkflowFile({ filePath: resolvedFile, args: subArgs, ctx });
+  if (result.status !== 'ok') {
+    throw new Error(`Sub-workflow step '${step.id}' did not complete: ${result.status}`);
+  }
+  return subWorkflowResultToStepResult(step.id, result);
+}
+
+async function runLobsterSubStepLoop(
+  stepId: string,
+  filePath: string,
+  args: Record<string, unknown>,
+  loop: LoopConfig,
+  ctx: RunContext,
+): Promise<WorkflowStepResult> {
+  let lastResult: WorkflowStepResult = { id: stepId };
+
+  for (let i = 0; i < loop.maxIterations; i++) {
+    const result = await runWorkflowFile({ filePath, args, ctx });
+    if (result.status !== 'ok') {
+      throw new Error(`Sub-workflow loop iteration ${i + 1} did not complete: ${result.status}`);
+    }
+    lastResult = subWorkflowResultToStepResult(stepId, result);
+
+    if (loop.condition) {
+      const continueLoop = await evaluateLoopCondition(loop.condition, lastResult, i + 1, ctx.env);
+      if (!continueLoop) break;
+    }
+  }
+
+  return lastResult;
+}
+
+async function evaluateLoopCondition(
+  condition: string,
+  lastResult: WorkflowStepResult,
+  iteration: number,
+  env: Record<string, string | undefined>,
+): Promise<boolean> {
+  const loopEnv: Record<string, string | undefined> = {
+    ...env,
+    LOBSTER_LOOP_STDOUT: lastResult.stdout ?? '',
+    LOBSTER_LOOP_JSON: lastResult.json !== undefined ? JSON.stringify(lastResult.json) : '',
+    LOBSTER_LOOP_ITERATION: String(iteration),
+  };
+  try {
+    await runShellCommand({ command: condition, stdin: null, env: loopEnv });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveSubWorkflowPath(
+  file: string,
+  parentFilePath: string,
+  parentArgs: Record<string, unknown>,
+  parentResults: Record<string, WorkflowStepResult>,
+): string {
+  const resolved = resolveTemplate(file, parentArgs, parentResults);
+  if (path.isAbsolute(resolved)) return resolved;
+  return path.resolve(path.dirname(parentFilePath), resolved);
+}
+
+function resolveSubWorkflowArgs(
+  args: Record<string, unknown> | undefined,
+  parentArgs: Record<string, unknown>,
+  parentResults: Record<string, WorkflowStepResult>,
+): Record<string, unknown> {
+  if (!args) return {};
+  const resolved: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    resolved[key] = typeof value === 'string' ? resolveTemplate(value, parentArgs, parentResults) : value;
+  }
+  return resolved;
+}
+
+function subWorkflowResultToStepResult(id: string, result: WorkflowRunResult): WorkflowStepResult {
+  const output = result.output;
+  if (output.length === 0) return { id };
+  if (output.length === 1) {
+    const item = output[0];
+    if (typeof item === 'string') return { id, stdout: item };
+    return { id, json: item, stdout: JSON.stringify(item) };
+  }
+  return { id, json: output, stdout: JSON.stringify(output) };
 }
