@@ -23,12 +23,11 @@ export type LoopConfig = {
 
 export type WorkflowStep = {
   id: string;
-  kind?: 'lobster';
-  // For kind === 'lobster':
-  file?: string;
+  // Sub-lobster step: lobster holds the path to the sub-workflow file
+  lobster?: string;
   args?: Record<string, unknown>;
   loop?: LoopConfig;
-  // For regular shell steps:
+  // Regular shell step:
   command?: string;
   env?: Record<string, string>;
   cwd?: string;
@@ -112,9 +111,9 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
     }
-    if (step.kind === 'lobster') {
-      if (!step.file || typeof step.file !== 'string') {
-        throw new Error(`Workflow step ${step.id} with kind 'lobster' requires a file string`);
+    if (step.lobster !== undefined) {
+      if (typeof step.lobster !== 'string' || !step.lobster) {
+        throw new Error(`Workflow step ${step.id} 'lobster' must be a non-empty file path string`);
       }
     } else {
       if (!step.command || typeof step.command !== 'string') {
@@ -191,7 +190,7 @@ export async function runWorkflowFile({
       continue;
     }
 
-    if (step.kind === 'lobster') {
+    if (step.lobster !== undefined) {
       const stepResult = await runLobsterSubStep(step, resolvedArgs, results, resolvedFilePath, ctx);
       results[step.id] = stepResult;
       lastStepId = step.id;
@@ -537,7 +536,7 @@ async function runLobsterSubStep(
   parentFilePath: string,
   ctx: RunContext,
 ): Promise<WorkflowStepResult> {
-  const resolvedFile = resolveSubWorkflowPath(step.file!, parentFilePath, parentArgs, parentResults);
+  const resolvedFile = resolveSubWorkflowPath(step.lobster!, parentFilePath, parentArgs, parentResults);
   const subArgs = resolveSubWorkflowArgs(step.args, parentArgs, parentResults);
 
   if (step.loop) {

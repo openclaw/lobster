@@ -33,7 +33,7 @@ test('lobster sub-step runs a sub-workflow and captures its output', async () =>
 
   const mainWorkflow = {
     steps: [
-      { id: 'greet', kind: 'lobster', file: './sub.lobster', args: { greeting: 'hi' } },
+      { id: 'greet', lobster: './sub.lobster', args: { greeting: 'hi' } },
     ],
   };
   const mainPath = await writeTmp(tmpDir, 'main.lobster', mainWorkflow);
@@ -57,7 +57,7 @@ test('lobster sub-step passes parent step output as args', async () => {
   const mainWorkflow = {
     steps: [
       { id: 'produce', command: 'echo "myvalue"' },
-      { id: 'consume', kind: 'lobster', file: './sub.lobster', args: { value: '$produce.stdout' } },
+      { id: 'consume', lobster: './sub.lobster', args: { value: '$produce.stdout' } },
     ],
   };
   const mainPath = await writeTmp(tmpDir, 'main.lobster', mainWorkflow);
@@ -82,7 +82,7 @@ test('lobster sub-step loop runs exactly maxIterations times when no condition',
 
   const mainWorkflow = {
     steps: [
-      { id: 'loop', kind: 'lobster', file: './sub.lobster', loop: { maxIterations: 3 } },
+      { id: 'loop', lobster: './sub.lobster', loop: { maxIterations: 3 } },
     ],
   };
   const mainPath = await writeTmp(tmpDir, 'main.lobster', mainWorkflow);
@@ -112,8 +112,7 @@ test('lobster sub-step loop stops when condition exits non-zero', async () => {
     steps: [
       {
         id: 'loop',
-        kind: 'lobster',
-        file: './sub.lobster',
+        lobster: './sub.lobster',
         loop: {
           maxIterations: 10,
           condition: '[ "$LOBSTER_LOOP_ITERATION" -lt 2 ]',
@@ -152,8 +151,7 @@ test('lobster sub-step loop condition uses LOBSTER_LOOP_STDOUT', async () => {
     steps: [
       {
         id: 'loop',
-        kind: 'lobster',
-        file: './sub.lobster',
+        lobster: './sub.lobster',
         loop: {
           maxIterations: 10,
           condition: '! echo "$LOBSTER_LOOP_STDOUT" | grep -q "^done"',
@@ -176,13 +174,13 @@ test('loadWorkflowFile rejects lobster step without file', async () => {
 
   const workflow = {
     steps: [
-      { id: 'bad', kind: 'lobster' },
+      { id: 'bad', lobster: '' },
     ],
   };
   const filePath = await writeTmp(tmpDir, 'workflow.lobster', workflow);
 
   await assert.rejects(
     () => runWorkflowFile({ filePath, ctx }),
-    /kind 'lobster' requires a file/,
+    /'lobster' must be a non-empty file path/,
   );
 });
