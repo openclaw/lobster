@@ -4,6 +4,7 @@ import { runPipeline } from './runtime.js';
 import { encodeToken } from './token.js';
 import { decodeResumeToken, parseResumeArgs } from './resume.js';
 import { runWorkflowFile } from './workflows/file.js';
+import { encode as encodeToon } from '@toon-format/toon';
 
 export async function runCli(argv) {
   const registry = createDefaultRegistry();
@@ -54,7 +55,10 @@ export async function runCli(argv) {
 }
 
 async function handleRun({ argv, registry }) {
-  const { mode, rest, filePath, argsJson } = parseRunArgs(argv);
+  const { mode, format, rest, filePath, argsJson } = parseRunArgs(argv);
+  const serialize = format === 'toon'
+    ? (data: unknown) => encodeToon(data)
+    : (data: unknown) => JSON.stringify(data, null, 2);
   const normalizedMode = normalizeMode(mode);
 
   const workflowFile = filePath
@@ -67,7 +71,7 @@ async function handleRun({ argv, registry }) {
         parsedArgs = JSON.parse(argsJson);
       } catch {
         if (mode === 'tool') {
-          writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: 'run --args-json must be valid JSON' } });
+          writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: 'run --args-json must be valid JSON' } }, serialize);
           process.exitCode = 2;
           return;
         }
@@ -97,7 +101,7 @@ async function handleRun({ argv, registry }) {
             status: 'needs_approval',
             output: [],
             requiresApproval: output.requiresApproval ?? null,
-          });
+          }, serialize);
           return;
         }
 
@@ -106,18 +110,18 @@ async function handleRun({ argv, registry }) {
           status: 'ok',
           output: output.output,
           requiresApproval: null,
-        });
+        }, serialize);
         return;
       }
 
       if (output.status === 'ok' && output.output.length) {
-        process.stdout.write(JSON.stringify(output.output, null, 2));
+        process.stdout.write(serialize(output.output));
         process.stdout.write('\n');
       }
       return;
     } catch (err) {
       if (normalizedMode === 'tool') {
-        writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
+        writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } }, serialize);
         process.exitCode = 1;
         return;
       }
@@ -134,7 +138,7 @@ async function handleRun({ argv, registry }) {
     pipeline = parsePipeline(pipelineString);
   } catch (err) {
     if (mode === 'tool') {
-      writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: err?.message ?? String(err) } });
+      writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: err?.message ?? String(err) } }, serialize);
       process.exitCode = 2;
       return;
     }
@@ -178,7 +182,7 @@ async function handleRun({ argv, registry }) {
             ...approval,
             resumeToken,
           },
-        });
+        }, serialize);
         return;
       }
 
@@ -187,18 +191,18 @@ async function handleRun({ argv, registry }) {
         status: 'ok',
         output: output.items,
         requiresApproval: null,
-      });
+      }, serialize);
       return;
     }
 
-    // Human mode: if the last command didn't render, print JSON.
+    // Human mode: if the last command didn't render, print the output.
     if (!output.rendered) {
-      process.stdout.write(JSON.stringify(output.items, null, 2));
+      process.stdout.write(serialize(output.items));
       process.stdout.write('\n');
     }
   } catch (err) {
     if (normalizedMode === 'tool') {
-      writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
+      writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } }, serialize);
       process.exitCode = 1;
       return;
     }
@@ -210,6 +214,7 @@ async function handleRun({ argv, registry }) {
 function parseRunArgs(argv) {
   const rest = [];
   let mode = 'human';
+  let format = 'json';
   let filePath = null;
   let argsJson = null;
 
@@ -227,6 +232,20 @@ function parseRunArgs(argv) {
 
     if (tok.startsWith('--mode=')) {
       mode = tok.slice('--mode='.length) || 'human';
+      continue;
+    }
+
+    if (tok === '--format') {
+      const value = argv[i + 1];
+      if (value) {
+        format = value;
+        i++;
+      }
+      continue;
+    }
+
+    if (tok.startsWith('--format=')) {
+      format = tok.slice('--format='.length) || 'json';
       continue;
     }
 
@@ -261,7 +280,7 @@ function parseRunArgs(argv) {
     rest.push(tok);
   }
 
-  return { mode, rest, filePath, argsJson };
+  return { mode, format, rest, filePath, argsJson };
 }
 
 function normalizeMode(mode) {
@@ -287,8 +306,8 @@ async function resolveWorkflowFile(candidate) {
   if (!stat.isFile()) throw new Error('Workflow path is not a file');
 
   const ext = extname(resolved).toLowerCase();
-  if (!['.lobster', '.yaml', '.yml', '.json'].includes(ext)) {
-    throw new Error('Workflow file must end in .lobster, .yaml, .yml, or .json');
+  if (!['.lobster', '.yaml', '.yml', '.json', '.toon'].includes(ext)) {
+    throw new Error('Workflow file must end in .lobster, .yaml, .yml, .json, or .toon');
   }
 
   return resolved;
@@ -439,12 +458,13 @@ async function handleDoctor({ argv, registry }) {
   });
 }
 
-function writeToolEnvelope(payload) {
+function writeToolEnvelope(payload, serialize?: (data: unknown) => string) {
   const envelope = {
     protocolVersion: 1,
     ...payload,
   };
-  process.stdout.write(JSON.stringify(envelope, null, 2));
+  const fn = serialize ?? ((data: unknown) => JSON.stringify(data, null, 2));
+  process.stdout.write(fn(envelope));
   process.stdout.write('\n');
 }
 
@@ -454,6 +474,7 @@ function helpText() {
     `  lobster '<pipeline>'\n` +
     `  lobster run --mode tool '<pipeline>'\n` +
     `  lobster run path/to/workflow.lobster\n` +
+    `  lobster run path/to/workflow.toon\n` +
     `  lobster run --file path/to/workflow.lobster --args-json '{...}'\n` +
     `  lobster resume --token <token> --approve yes|no\n` +
     `  lobster doctor\n` +

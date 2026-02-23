@@ -1,6 +1,7 @@
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { decode as decodeToon } from '@toon-format/toon';
 
 import { randomUUID } from 'node:crypto';
 
@@ -79,10 +80,17 @@ type WorkflowResumeState = {
 export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> {
   const text = await fsp.readFile(filePath, 'utf8');
   const ext = path.extname(filePath).toLowerCase();
-  const parsed = ext === '.json' ? JSON.parse(text) : parseYaml(text);
+  let parsed: unknown;
+  if (ext === '.json') {
+    parsed = JSON.parse(text);
+  } else if (ext === '.toon') {
+    parsed = decodeToon(text);
+  } else {
+    parsed = parseYaml(text);
+  }
 
   if (!parsed || typeof parsed !== 'object') {
-    throw new Error('Workflow file must be a JSON/YAML object');
+    throw new Error('Workflow file must be a JSON/YAML/TOON object');
   }
 
   const steps = (parsed as WorkflowFile).steps;

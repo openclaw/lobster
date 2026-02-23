@@ -55,6 +55,7 @@
   "homepage": "https://github.com/clawdbot/lobster#readme",
   "license": "MIT",
   "dependencies": {
+    "@toon-format/toon": "^1.0.0",
     "ajv": "^8.17.1",
     "yaml": "^2.8.2"
   }
