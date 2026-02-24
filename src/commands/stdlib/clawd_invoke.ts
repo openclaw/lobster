@@ -1,11 +1,14 @@
 export const clawdInvokeCommand = {
   name: 'clawd.invoke',
   meta: {
-    description: 'Call a local Clawdbot tool endpoint',
+    description: 'Call a local OpenClaw tool endpoint',
     argsSchema: {
       type: 'object',
       properties: {
-        url: { type: 'string', description: 'Clawdbot control URL (or CLAWD_URL)' },
+        url: {
+          type: 'string',
+          description: 'OpenClaw control URL (or OPENCLAW_URL / CLAWD_URL)',
+        },
         token: { type: 'string', description: 'Bearer token (or CLAWD_TOKEN)' },
         tool: { type: 'string', description: 'Tool name (e.g. message, cron, github, etc.)' },
         action: { type: 'string', description: 'Tool action' },
@@ -21,14 +24,16 @@ export const clawdInvokeCommand = {
     sideEffects: ['calls_clawd_tool'],
   },
   help() {
-    return `clawd.invoke — call a local Clawdbot tool endpoint\n\n` +
+    return `clawd.invoke — call a local OpenClaw tool endpoint\n\n` +
       `Usage:\n` +
       `  clawd.invoke --tool message --action send --args-json '{"provider":"telegram","to":"...","message":"..."}'\n` +
       `  clawd.invoke --tool message --action send --args-json '{...}' --dry-run\n` +
       `  ... | clawd.invoke --tool message --action send --each --item-key message --args-json '{"provider":"telegram","to":"..."}'\n\n` +
       `Config:\n` +
-      `  - Uses CLAWD_URL env var by default (or pass --url).\n` +
-      `  - Optional Bearer token via CLAWD_TOKEN env var (or pass --token).\n` +
+      `  - Uses OPENCLAW_URL env var by default (or pass --url).\n` +
+      `  - Backward compatible: CLAWD_URL is also supported.\n` +
+      `  - Optional Bearer token via OPENCLAW_TOKEN env var (or pass --token).\n` +
+      `  - Backward compatible: CLAWD_TOKEN is also supported.\n` +
       `  - Optional attribution via --session-key <sessionKey>.\n\n` +
       `Notes:\n` +
       `  - This is a thin transport bridge. Lobster should not own OAuth/secrets.\n`;
@@ -37,14 +42,14 @@ export const clawdInvokeCommand = {
     const each = Boolean(args.each);
     const itemKey = String(args.itemKey ?? args['item-key'] ?? 'item');
 
-    const url = String(args.url ?? ctx.env.CLAWD_URL ?? '').trim();
-    if (!url) throw new Error('clawd.invoke requires --url or CLAWD_URL');
+    const url = String(args.url ?? ctx.env.OPENCLAW_URL ?? ctx.env.CLAWD_URL ?? '').trim();
+    if (!url) throw new Error('clawd.invoke requires --url or OPENCLAW_URL');
 
     const tool = args.tool;
     const action = args.action;
     if (!tool || !action) throw new Error('clawd.invoke requires --tool and --action');
 
-    const token = String(args.token ?? ctx.env.CLAWD_TOKEN ?? '').trim();
+    const token = String(args.token ?? ctx.env.OPENCLAW_TOKEN ?? ctx.env.CLAWD_TOKEN ?? '').trim();
 
     let toolArgs = {};
     if (args['args-json']) {

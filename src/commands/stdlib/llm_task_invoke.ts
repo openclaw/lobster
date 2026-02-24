@@ -26,7 +26,7 @@ const payloadSchema = {
   type: 'object',
   properties: {
     prompt: { type: 'string', minLength: 1 },
-    // In direct mode, the remote likely requires model; in CLAWD mode, Clawdbot can default.
+    // In direct mode, the remote likely requires model; in OPENCLAW mode, OpenClaw can default.
     model: { type: 'string', minLength: 1 },
     artifacts: { type: 'array', items: artifactSchema },
     artifactHashes: { type: 'array', items: { type: 'string', minLength: 10 } },
@@ -151,7 +151,7 @@ type Transport = 'clawd';
 export const llmTaskInvokeCommand = {
   name: 'llm_task.invoke',
   meta: {
-    description: 'Call Clawdbot llm-task tool with typed payloads and caching',
+    description: 'Call OpenClaw llm-task tool with typed payloads and caching',
     argsSchema: {
       type: 'object',
       properties: {
@@ -160,7 +160,11 @@ export const llmTaskInvokeCommand = {
           description: 'Bearer token (or CLAWD_TOKEN). Optional if unauthenticated.',
         },
         prompt: { type: 'string', description: 'Primary prompt / instructions' },
-        model: { type: 'string', description: 'Model identifier (optional; Clawdbot default will be used if omitted in CLAWD mode)' },
+        model: {
+          type: 'string',
+          description:
+            'Model identifier (optional; OpenClaw default will be used if omitted in OPENCLAW mode)',
+        },
         'artifacts-json': { type: 'string', description: 'JSON array of artifacts to send' },
         'metadata-json': { type: 'string', description: 'JSON object of metadata to include' },
         'output-schema': { type: 'string', description: 'JSON schema LLM output must satisfy' },
@@ -179,15 +183,17 @@ export const llmTaskInvokeCommand = {
   },
   help() {
     return (
-      `llm_task.invoke — call Clawdbot llm-task tool with caching and schema validation\n\n` +
+      `llm_task.invoke — call OpenClaw llm-task tool with caching and schema validation\n\n` +
       `Usage:\n` +
       `  llm_task.invoke --prompt 'Write summary'\n` +
       `  llm_task.invoke --model claude-3-sonnet --prompt 'Write summary'\n` +
       `  cat artifacts.json | llm_task.invoke --prompt 'Score each item'\n` +
       `  ... | llm_task.invoke --prompt 'Plan next steps' --output-schema '{"type":"object"}'\n\n` +
       `Config:\n` +
-      `  - Requires CLAWD_URL (Clawdbot gateway).\n` +
-      `  - Optional CLAWD_TOKEN for auth.\n\n` +
+      `  - Requires OPENCLAW_URL (OpenClaw gateway).\n` +
+      `  - Backward compatible: CLAWD_URL is also supported.\n` +
+      `  - Optional OPENCLAW_TOKEN for auth.\n` +
+      `  - Backward compatible: CLAWD_TOKEN is also supported.\n\n` +
       `Features:\n` +
       `  - Typed payload validation before invoking tool.\n` +
       `  - Run-state + file cache so resumes do not re-call the LLM.\n` +
@@ -197,17 +203,17 @@ export const llmTaskInvokeCommand = {
   async run({ input, args, ctx }) {
     const env = ctx.env ?? process.env;
 
-    const clawdUrl = String(env.CLAWD_URL ?? '').trim();
+    const clawdUrl = String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? '').trim();
     const transport: Transport = 'clawd';
     if (!clawdUrl) {
-      throw new Error('llm_task.invoke requires CLAWD_URL (run via Clawdbot gateway)');
+      throw new Error('llm_task.invoke requires OPENCLAW_URL (run via OpenClaw gateway)');
     }
 
     const prompt = extractPrompt(args);
     if (!prompt) throw new Error('llm_task.invoke requires --prompt or positional text');
 
     const model = String(args.model ?? env.LLM_TASK_MODEL ?? '').trim();
-    // Model is optional in Clawdbot mode (Clawdbot llm-task tool can use its default model).
+    // Model is optional in OpenClaw mode (OpenClaw llm-task tool can use its default model).
 
     const schemaVersion = args['schema-version']
       ? String(args['schema-version']).trim()
@@ -279,7 +285,7 @@ export const llmTaskInvokeCommand = {
     }
 
     const endpoint = buildClawdEndpoint(clawdUrl);
-    const token = String(args.token ?? env.CLAWD_TOKEN ?? '').trim();
+    const token = String(args.token ?? env.OPENCLAW_TOKEN ?? env.CLAWD_TOKEN ?? '').trim();
 
     const validator = userOutputSchema ? ajv.compile(userOutputSchema) : null;
 
@@ -425,7 +431,7 @@ function computeCacheKey({
 }) {
   const payload = {
     prompt,
-    // If model is omitted (Clawdbot default), keep caching stable but explicit.
+    // If model is omitted (OpenClaw default), keep caching stable but explicit.
     model: model || 'clawd-default',
     schemaVersion,
     artifactHashes,
@@ -464,7 +470,7 @@ async function invokeRemoteViaClawd({ endpoint, token, payload }: { endpoint: UR
     throw new Error('Response was not JSON');
   }
 
-  // Clawdbot tool router envelope: { ok, result, error }
+  // OpenClaw tool router envelope: { ok, result, error }
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'ok' in parsed) {
     if (parsed.ok !== true) {
       const msg = parsed?.error?.message ?? 'Unknown error';
