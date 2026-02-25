@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { resolveShell } from '../../shell.js';
 
 export const execCommand = {
   name: 'exec',
@@ -49,7 +50,7 @@ export const execCommand = {
     }
 
     const result = useShell
-      ? await runProcess('/bin/sh', ['-lc', shellLine ?? cmd[0] ?? ''], { env: ctx.env, cwd: process.cwd(), stdin: stdinPayload })
+      ? await runProcess(...resolveShell(shellLine ?? cmd[0] ?? ''), { env: ctx.env, cwd: process.cwd(), stdin: stdinPayload })
       : await runProcess(cmd[0], cmd.slice(1), { env: ctx.env, cwd: process.cwd(), stdin: stdinPayload });
 
     if (args.json) {

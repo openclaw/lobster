@@ -10,6 +10,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { resolveShell } from '../../shell.js';
 
 /**
  * Run a process and capture output
@@ -133,7 +134,8 @@ export function exec(cmdString, options: any = {}) {
 
       if (useShell) {
         // Shell execution
-        const result = await runProcess('/bin/sh', ['-c', cmdString], { env, cwd });
+        const [shellCmd, shellArgs] = resolveShell(cmdString);
+        const result = await runProcess(shellCmd, shellArgs, { env, cwd });
         stdout = result.stdout;
       } else {
         // Direct execution
