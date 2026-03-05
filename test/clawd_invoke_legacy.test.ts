@@ -9,7 +9,7 @@ function streamOf(items) {
   })();
 }
 
-test('clawd.invoke accepts legacy raw JSON response', async () => {
+test('openclaw.invoke accepts legacy raw JSON response', async () => {
   const server = http.createServer((req, res) => {
     if (req.method !== 'POST' || req.url !== '/tools/invoke') {
       res.writeHead(404);
@@ -35,7 +35,7 @@ test('clawd.invoke accepts legacy raw JSON response', async () => {
 
   try {
     const registry = createDefaultRegistry();
-    const cmd = registry.get('clawd.invoke');
+    const cmd = registry.get('openclaw.invoke');
 
     const result = await cmd.run({
       input: streamOf([]),

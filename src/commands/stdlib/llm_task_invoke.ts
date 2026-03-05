@@ -146,7 +146,7 @@ type CacheEntry = {
   storedAt: string;
 };
 
-type Transport = 'clawd';
+// (reserved) transport type removed
 
 export const llmTaskInvokeCommand = {
   name: 'llm_task.invoke',
@@ -204,7 +204,6 @@ export const llmTaskInvokeCommand = {
     const env = ctx.env ?? process.env;
 
     const clawdUrl = String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? '').trim();
-    const transport: Transport = 'clawd';
     if (!clawdUrl) {
       throw new Error('llm_task.invoke requires OPENCLAW_URL (run via OpenClaw gateway)');
     }

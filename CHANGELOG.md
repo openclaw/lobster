@@ -8,7 +8,7 @@ All notable changes to Lobster will be documented in this file.
 - Add compact workflow resume tokens backed by Lobster state storage.
 - Add `exec --stdin raw|json|jsonl` to pipe workflow output into subprocess stdin.
 - Add `approve --preview-from-stdin --limit N` for approval previews without extra glue.
-- Add `clawd.invoke --each` to map pipeline input items into tool calls.
+- Add `openclaw.invoke --each` to map pipeline input items into tool calls. (`clawd.invoke` remains supported as an alias.)
 - Extend CLI to run workflow files with `lobster run <file>` or `--file` + `--args-json`.
 
 ## 2026.1.21-1
