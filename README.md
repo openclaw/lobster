@@ -193,3 +193,40 @@ steps:
     stdin: $categorize.stdout
     condition: $approve.approved
 ```
+
+## Calling OpenClaw tools from workflows
+
+Workflow `steps[].command` runs in `/bin/sh`, so *tool calls must be real executables*.
+
+If you install Lobster via npm/pnpm, it installs a small shim executable named:
+
+- `openclaw.invoke` (preferred)
+- `clawd.invoke` (alias)
+
+These shims forward to the Lobster pipeline command of the same name.
+
+### Example: invoke llm-task
+
+Prereqs:
+
+- `OPENCLAW_URL` points at a running OpenClaw gateway
+- optionally `OPENCLAW_TOKEN` if auth is enabled
+
+```bash
+export OPENCLAW_URL=http://127.0.0.1:18789
+# export OPENCLAW_TOKEN=...
+```
+
+In a workflow:
+
+```yaml
+name: hello-world
+steps:
+  - id: greeting
+    command: >
+      openclaw.invoke --tool llm-task --action json --args-json '{"prompt":"Hello"}'
+```
+
+### Passing data between steps (no temp files)
+
+Use `stdin: $stepId.stdout` to pipe output from one step into the next.
