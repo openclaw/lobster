@@ -49,6 +49,21 @@ export async function runCli(argv) {
     return;
   }
 
+  if (argv[0] === 'list') {
+    await handleList({ argv: argv.slice(1) });
+    return;
+  }
+
+  if (argv[0] === 'status') {
+    await handleStatus({ argv: argv.slice(1) });
+    return;
+  }
+
+  if (argv[0] === 'cancel') {
+    await handleCancel({ argv: argv.slice(1) });
+    return;
+  }
+
   // Default: treat argv as a pipeline string.
   await handleRun({ argv, registry });
 }
@@ -439,6 +454,89 @@ async function handleDoctor({ argv, registry }) {
   });
 }
 
+function isQueryToolMode(argv) {
+  if (process.env.LOBSTER_MODE === 'tool') return true;
+  const modeIdx = argv.indexOf('--mode');
+  if (modeIdx !== -1 && argv[modeIdx + 1] === 'tool') return true;
+  if (argv.includes('--mode=tool')) return true;
+  return false;
+}
+
+async function handleList({ argv }) {
+  const { listRuns } = await import('./query.js');
+  const runs = await listRuns(process.env);
+
+  if (isQueryToolMode(argv)) {
+    writeToolEnvelope({ ok: true, status: 'ok', output: runs, requiresApproval: null });
+    return;
+  }
+
+  if (runs.length === 0) {
+    process.stdout.write('No halted workflows.\n');
+    return;
+  }
+
+  for (const run of runs) {
+    process.stdout.write(
+      `${run.id}  ${run.status}  ${run.workflowName}  ` +
+      `(step: ${run.approvalStepId}, created: ${run.createdAt})\n`
+    );
+  }
+}
+
+async function handleStatus({ argv }) {
+  const id = argv.find((a) => !a.startsWith('--'));
+  if (!id) {
+    process.stderr.write('status requires an instance id\n');
+    process.exitCode = 2;
+    return;
+  }
+
+  const { getRunDetail } = await import('./query.js');
+  const detail = await getRunDetail(id, process.env);
+
+  if (!detail) {
+    if (isQueryToolMode(argv)) {
+      writeToolEnvelope({ ok: false, error: { type: 'not_found', message: `Instance ${id} not found` } });
+    } else {
+      process.stderr.write(`Instance ${id} not found\n`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  if (isQueryToolMode(argv)) {
+    writeToolEnvelope({ ok: true, status: 'ok', output: [detail], requiresApproval: null });
+    return;
+  }
+
+  process.stdout.write(JSON.stringify(detail, null, 2) + '\n');
+}
+
+async function handleCancel({ argv }) {
+  const id = argv.find((a) => !a.startsWith('--'));
+  if (!id) {
+    process.stderr.write('cancel requires an instance id\n');
+    process.exitCode = 2;
+    return;
+  }
+
+  const { cancelRun } = await import('./query.js');
+  const deleted = await cancelRun(id, process.env);
+
+  if (isQueryToolMode(argv)) {
+    writeToolEnvelope({
+      ok: true,
+      status: 'ok',
+      output: [{ id, cancelled: deleted }],
+      requiresApproval: null,
+    });
+    return;
+  }
+
+  process.stdout.write(deleted ? `Cancelled ${id}\n` : `Instance ${id} not found\n`);
+}
+
 function writeToolEnvelope(payload) {
   const envelope = {
     protocolVersion: 1,
@@ -456,15 +554,24 @@ function helpText() {
     `  lobster run path/to/workflow.lobster\n` +
     `  lobster run --file path/to/workflow.lobster --args-json '{...}'\n` +
     `  lobster resume --token <token> --approve yes|no\n` +
+    `  lobster list\n` +
+    `  lobster status <id>\n` +
+    `  lobster cancel <id>\n` +
     `  lobster doctor\n` +
     `  lobster version\n` +
     `  lobster help <command>\n\n` +
     `Modes:\n` +
     `  - human (default): renderers can write to stdout\n` +
     `  - tool: prints a single JSON envelope for easy integration\n\n` +
-    `Examples:\n` +
-    `  lobster 'exec --json "echo [1,2,3]" | json'\n` +
-    `  lobster run --mode tool 'exec --json "echo [1]" | approve --prompt "ok?"'\n\n` +
     `Commands:\n` +
+    `  run       Run a pipeline or workflow file\n` +
+    `  resume    Continue a halted workflow\n` +
+    `  list      Show halted workflow instances\n` +
+    `  status    Inspect a workflow instance\n` +
+    `  cancel    Cancel and remove a halted workflow\n` +
+    `  doctor    Health check\n` +
+    `  version   Show version\n` +
+    `  help      Command help\n\n` +
+    `Pipeline commands:\n` +
     `  exec, head, json, pick, table, where, approve, clawd.invoke, state.get, state.set, diff.last, commands.list, workflows.list, workflows.run\n`;
 }
