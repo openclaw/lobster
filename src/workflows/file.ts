@@ -497,9 +497,11 @@ async function runShellCommand({
   cwd?: string;
 }) {
   const { spawn } = await import('node:child_process');
+  const { resolveShell } = await import('../shell.js');
+  const [shellCmd, shellArgs] = resolveShell(command);
 
   return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn('/bin/sh', ['-lc', command], {
+    const child = spawn(shellCmd, shellArgs, {
       env,
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
