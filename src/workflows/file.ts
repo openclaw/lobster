@@ -90,6 +90,7 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     throw new Error('Workflow file requires a non-empty steps array');
   }
 
+  // First pass: collect step IDs for flow target validation
   const seen = new Set<string>();
   for (const step of steps) {
     if (!step || typeof step !== 'object') {
@@ -105,6 +106,41 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       throw new Error(`Duplicate workflow step id: ${step.id}`);
     }
     seen.add(step.id);
+  }
+
+  // Second pass: validate flow rules and max_iterations
+  for (const step of steps) {
+    if (step.flow !== undefined) {
+      if (!Array.isArray(step.flow)) {
+        throw new Error(`Step ${step.id}: flow must be an array`);
+      }
+      for (let i = 0; i < step.flow.length; i++) {
+        const rule = step.flow[i];
+        if ('default' in rule) {
+          if (i !== step.flow.length - 1) {
+            throw new Error(`Step ${step.id}: default must be the last flow rule`);
+          }
+          if (!seen.has(rule.default)) {
+            throw new Error(`Step ${step.id}: goto target '${rule.default}' not found`);
+          }
+        } else if ('when' in rule && 'goto' in rule) {
+          if (!seen.has(rule.goto)) {
+            throw new Error(`Step ${step.id}: goto target '${rule.goto}' not found`);
+          }
+        } else {
+          throw new Error(`Step ${step.id}: invalid flow rule at index ${i}`);
+        }
+      }
+    }
+    if (step.max_iterations !== undefined) {
+      if (
+        typeof step.max_iterations !== 'number' ||
+        step.max_iterations < 1 ||
+        !Number.isInteger(step.max_iterations)
+      ) {
+        throw new Error(`Step ${step.id}: max_iterations must be a positive integer`);
+      }
+    }
   }
 
   return parsed as WorkflowFile;
