@@ -349,10 +349,10 @@ function getStepRefValue(
   return step.json !== undefined ? JSON.stringify(step.json) : '';
 }
 
-function evaluateCondition(
+export function evaluateCondition(
   condition: unknown,
   results: Record<string, WorkflowStepResult>,
-) {
+): boolean {
   if (condition === undefined || condition === null) return true;
   if (typeof condition === 'boolean') return condition;
   if (typeof condition !== 'string') throw new Error('Unsupported condition type');
@@ -361,13 +361,78 @@ function evaluateCondition(
   if (trimmed === 'true') return true;
   if (trimmed === 'false') return false;
 
-  const match = trimmed.match(/^\$([A-Za-z0-9_-]+)\.(approved|skipped)$/);
-  if (!match) throw new Error(`Unsupported condition: ${condition}`);
+  const parsed = parseConditionExpression(trimmed);
+  const resolvedValue = resolveDeepRef(parsed.ref, results);
 
-  const step = results[match[1]];
-  if (!step) return false;
+  if (parsed.op === null) {
+    return isTruthy(resolvedValue);
+  }
 
-  return match[2] === 'approved' ? step.approved === true : step.skipped === true;
+  return compareValues(resolvedValue, parsed.op, parsed.literal);
+}
+
+function parseConditionExpression(input: string): { ref: string; op: string | null; literal: unknown } {
+  // Try comparison: <ref> <op> <literal>
+  const compMatch = input.match(/^(\$[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)\s*(==|!=|>=?|<=?)\s*(.+)$/);
+  if (compMatch) {
+    return { ref: compMatch[1], op: compMatch[2], literal: parseLiteral(compMatch[3].trim()) };
+  }
+  // Try bare ref
+  const refMatch = input.match(/^(\$[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)$/);
+  if (refMatch) {
+    return { ref: refMatch[1], op: null, literal: null };
+  }
+  throw new Error(`Unsupported condition: ${input}`);
+}
+
+function parseLiteral(raw: string): unknown {
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (raw === 'null') return null;
+  if (raw.startsWith('"') && raw.endsWith('"')) return raw.slice(1, -1);
+  const num = Number(raw);
+  if (!Number.isNaN(num)) return num;
+  throw new Error(`Cannot parse literal: ${raw}`);
+}
+
+export function resolveDeepRef(
+  ref: string,
+  results: Record<string, WorkflowStepResult>,
+): unknown {
+  const match = ref.match(/^\$([A-Za-z0-9_-]+)\.(.+)$/);
+  if (!match) throw new Error(`Invalid ref: ${ref}`);
+
+  const [, stepId, path] = match;
+  const step = results[stepId];
+  if (!step) return undefined;
+
+  const segments = path.split('.');
+  let current: unknown = step;
+
+  for (const seg of segments) {
+    if (current === null || current === undefined) return undefined;
+    if (typeof current !== 'object') return undefined;
+    current = (current as Record<string, unknown>)[seg];
+  }
+
+  return current;
+}
+
+function isTruthy(value: unknown): boolean {
+  if (value === null || value === undefined || value === false || value === 0 || value === '') return false;
+  return true;
+}
+
+function compareValues(left: unknown, op: string, right: unknown): boolean {
+  switch (op) {
+    case '==': return left === right;
+    case '!=': return left !== right;
+    case '>':  return typeof left === 'number' && typeof right === 'number' && left > right;
+    case '<':  return typeof left === 'number' && typeof right === 'number' && left < right;
+    case '>=': return typeof left === 'number' && typeof right === 'number' && left >= right;
+    case '<=': return typeof left === 'number' && typeof right === 'number' && left <= right;
+    default: throw new Error(`Unknown operator: ${op}`);
+  }
 }
 
 function isApprovalStep(approval: WorkflowStep['approval']) {
