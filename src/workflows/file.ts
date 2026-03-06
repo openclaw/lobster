@@ -71,6 +71,8 @@ export type WorkflowResumePayload = {
   steps?: Record<string, WorkflowStepResult>;
   args?: Record<string, unknown>;
   approvalStepId?: string;
+  visitCounts?: Record<string, number>;
+  flowPending?: boolean;
 };
 
 type WorkflowResumeState = {
@@ -80,6 +82,8 @@ type WorkflowResumeState = {
   args: Record<string, unknown>;
   approvalStepId?: string;
   createdAt: string;
+  visitCounts?: Record<string, number>;
+  flowPending?: boolean;
 };
 
 export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> {
@@ -200,21 +204,59 @@ export async function runWorkflowFile({
     : {};
   const startIndex = resumeState?.resumeAtIndex ?? 0;
 
-  if (resumeState?.approvalStepId && typeof approved === 'boolean') {
+  if (resumeState?.approvalStepId && typeof approved === 'boolean' && !resumeState.flowPending) {
     const previous = results[resumeState.approvalStepId] ?? { id: resumeState.approvalStepId };
     previous.approved = approved;
     results[resumeState.approvalStepId] = previous;
   }
 
-  let lastStepId: string | null = null;
+  // Build step index map for flow jump resolution
+  const stepIndexMap = new Map<string, number>();
+  for (let i = 0; i < steps.length; i++) {
+    stepIndexMap.set(steps[i].id, i);
+  }
 
-  for (let idx = startIndex; idx < steps.length; idx++) {
+  // Restore visit counts from resume state (for halt/resume across loops)
+  const visitCounts = new Map<string, number>(
+    Object.entries(resumeState?.visitCounts ?? {}),
+  );
+
+  let lastStepId: string | null = null;
+  let idx = startIndex;
+
+  while (idx >= 0 && idx < steps.length) {
     const step = steps[idx];
+
+    // Handle flowPending resume: skip re-execution, just set approval and evaluate flow
+    if (resumeState?.flowPending && idx === startIndex) {
+      if (resumeState.approvalStepId === step.id && typeof approved === 'boolean') {
+        results[step.id] = { ...(results[step.id] ?? { id: step.id }), approved };
+      }
+      lastStepId = step.id;
+      const flowTarget = evaluateFlowRules(step.flow, results);
+      if (flowTarget !== null) {
+        idx = stepIndexMap.get(flowTarget)!;
+      } else {
+        idx++;
+      }
+      // flowPending only applies to the first step on resume
+      (resumeState as WorkflowResumeState).flowPending = false;
+      continue;
+    }
 
     if (!evaluateCondition(step.when ?? step.condition, results)) {
       results[step.id] = { id: step.id, skipped: true };
+      idx++;
       continue;
     }
+
+    // Check visit counter
+    const visits = (visitCounts.get(step.id) ?? 0) + 1;
+    const maxIter = step.max_iterations ?? 10;
+    if (visits > maxIter) {
+      throw new Error(`Step '${step.id}' exceeded max_iterations (${maxIter})`);
+    }
+    visitCounts.set(step.id, visits);
 
     const command = resolveTemplate(step.command, resolvedArgs, results);
     const stdinValue = resolveStdin(step.stdin, resolvedArgs, results);
@@ -231,13 +273,17 @@ export async function runWorkflowFile({
       const approval = extractApprovalRequest(step, results[step.id]);
 
       if (ctx.mode === 'tool' || !isInteractive(ctx.stdin)) {
+        // If step has flow, resume at same index with flowPending so flow evaluates on resume
+        const hasFlow = step.flow && step.flow.length > 0;
         const stateKey = await saveWorkflowResumeState(ctx.env, {
           filePath: resolvedFilePath,
-          resumeAtIndex: idx + 1,
+          resumeAtIndex: hasFlow ? idx : idx + 1,
           steps: results,
           args: resolvedArgs,
           approvalStepId: step.id,
           createdAt: new Date().toISOString(),
+          visitCounts: Object.fromEntries(visitCounts),
+          flowPending: hasFlow ? true : undefined,
         });
 
         const resumeToken = encodeToken({
@@ -263,6 +309,14 @@ export async function runWorkflowFile({
         throw new Error('Not approved');
       }
       results[step.id].approved = true;
+    }
+
+    // Evaluate flow rules after execution (and approval if interactive)
+    const flowTarget = evaluateFlowRules(step.flow, results);
+    if (flowTarget !== null) {
+      idx = stepIndexMap.get(flowTarget)!;
+    } else {
+      idx++;
     }
   }
 
@@ -458,6 +512,18 @@ export function resolveDeepRef(
   }
 
   return current;
+}
+
+export function evaluateFlowRules(
+  flow: FlowRule[] | undefined,
+  results: Record<string, WorkflowStepResult>,
+): string | null {
+  if (!flow) return null;
+  for (const rule of flow) {
+    if ('default' in rule) return rule.default;
+    if (evaluateCondition(rule.when, results)) return rule.goto;
+  }
+  return null;
 }
 
 function isTruthy(value: unknown): boolean {
