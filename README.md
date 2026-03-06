@@ -230,3 +230,26 @@ steps:
 ### Passing data between steps (no temp files)
 
 Use `stdin: $stepId.stdout` to pipe output from one step into the next.
+
+## Args and shell-safety
+
+`${arg}` substitution is a raw string replace into the shell command text.
+
+For anything that may contain quotes, `$`, backticks, or newlines, prefer env vars:
+
+- every resolved workflow arg is exposed as `LOBSTER_ARG_<NAME>` (uppercased, non-alnum → `_`)
+- the full args object is also available as `LOBSTER_ARGS_JSON`
+
+Example:
+
+```yaml
+args:
+  text:
+    default: ""
+steps:
+  - id: safe
+    env:
+      TEXT: "$LOBSTER_ARG_TEXT"
+    command: |
+      jq -n --arg text "$TEXT" '{"result": $text}'
+```

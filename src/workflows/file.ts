@@ -270,6 +270,17 @@ function mergeEnv(
   results: Record<string, WorkflowStepResult>,
 ) {
   const env = { ...base } as Record<string, string | undefined>;
+
+  // Expose resolved args as env vars so shell commands can safely reference them
+  // without embedding raw values into the command string.
+  // Example: $LOBSTER_ARG_TEXT
+  env.LOBSTER_ARGS_JSON = JSON.stringify(args ?? {});
+  for (const [key, value] of Object.entries(args ?? {})) {
+    const normalized = normalizeArgEnvKey(key);
+    if (!normalized) continue;
+    env[`LOBSTER_ARG_${normalized}`] = String(value);
+  }
+
   const apply = (source?: Record<string, string>) => {
     if (!source) return;
     for (const [key, value] of Object.entries(source)) {
@@ -278,9 +289,20 @@ function mergeEnv(
       }
     }
   };
+
+  // Allow explicit env blocks to override injected defaults.
   apply(workflowEnv);
   apply(stepEnv);
   return env;
+}
+
+function normalizeArgEnvKey(key: string): string | null {
+  const trimmed = String(key ?? '').trim();
+  if (!trimmed) return null;
+  // Keep it predictable for shells: uppercase and [A-Z0-9_]
+  const up = trimmed.toUpperCase();
+  const normalized = up.replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return normalized || null;
 }
 
 function resolveCwd(cwd: string | undefined, args: Record<string, unknown>) {
