@@ -1,4 +1,5 @@
-import { test, expect } from 'vitest';
+import test from 'node:test';
+import assert from 'node:assert/strict';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -50,8 +51,8 @@ test('lobster.run: basic child execution with args', async () => {
   });
 
   const result = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
-  expect(result.status).toBe('ok');
-  expect(result.output).toEqual([{ value: 42 }]);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ value: 42 }]);
 });
 
 test('lobster.run: child output as parent step result — single item unwrapped', async () => {
@@ -73,8 +74,8 @@ test('lobster.run: child output as parent step result — single item unwrapped'
   });
 
   const result = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
-  expect(result.status).toBe('ok');
-  expect(result.output).toEqual([{ done: true }]);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ done: true }]);
 });
 
 test('lobster.run: child halt bubbles to parent', async () => {
@@ -84,7 +85,7 @@ test('lobster.run: child halt bubbles to parent', async () => {
     steps: [
       {
         id: 'approve',
-        command: 'node -e "process.stdout.write(JSON.stringify({requiresApproval:{prompt:\'Approve child?\',items:[]}}))"',
+        command: "node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Approve child?',items:[]}}))\"",
         approval: 'required',
       },
       {
@@ -103,9 +104,9 @@ test('lobster.run: child halt bubbles to parent', async () => {
   });
 
   const result = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
-  expect(result.status).toBe('needs_approval');
-  expect(result.requiresApproval?.prompt).toBe('Approve child?');
-  expect(result.requiresApproval?.resumeToken).toBeTruthy();
+  assert.equal(result.status, 'needs_approval');
+  assert.equal(result.requiresApproval?.prompt, 'Approve child?');
+  assert.ok(result.requiresApproval?.resumeToken);
 });
 
 test('lobster.run: resume after child halt', async () => {
@@ -115,7 +116,7 @@ test('lobster.run: resume after child halt', async () => {
     steps: [
       {
         id: 'approve',
-        command: 'node -e "process.stdout.write(JSON.stringify({requiresApproval:{prompt:\'Approve?\',items:[]}}))"',
+        command: "node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Approve?',items:[]}}))\"",
         approval: 'required',
       },
       {
@@ -134,7 +135,7 @@ test('lobster.run: resume after child halt', async () => {
   });
 
   const first = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
-  expect(first.status).toBe('needs_approval');
+  assert.equal(first.status, 'needs_approval');
 
   const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? '');
   const second = await runWorkflowFile({
@@ -144,8 +145,8 @@ test('lobster.run: resume after child halt', async () => {
     approved: true,
   });
 
-  expect(second.status).toBe('ok');
-  expect(second.output).toEqual([{ parentDone: true }]);
+  assert.equal(second.status, 'ok');
+  assert.deepEqual(second.output, [{ parentDone: true }]);
 });
 
 test('lobster.run: --file flag with explicit path', async () => {
@@ -164,8 +165,8 @@ test('lobster.run: --file flag with explicit path', async () => {
   });
 
   const result = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
-  expect(result.status).toBe('ok');
-  expect(result.output).toEqual([{ explicit: true }]);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ explicit: true }]);
 });
 
 test('lobster.run: depth limit', async () => {
@@ -179,12 +180,13 @@ test('lobster.run: depth limit', async () => {
     ],
   }), 'utf8');
 
-  await expect(
-    runWorkflowFile({ filePath: selfPath, ctx: { ...testCtx, env } }),
-  ).rejects.toThrow(/depth exceeded|nesting depth/i);
+  await assert.rejects(
+    () => runWorkflowFile({ filePath: selfPath, ctx: { ...testCtx, env } }),
+    /depth exceeded|nesting depth/i,
+  );
 });
 
-test('lobster.run: env inheritance — child sees parent env', async () => {
+test('lobster.run: env inheritance — child sees parent step env', async () => {
   const { dir, env } = await makeTestEnv();
 
   await writeWorkflow(dir, 'child', {
@@ -203,8 +205,8 @@ test('lobster.run: env inheritance — child sees parent env', async () => {
   });
 
   const result = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
-  expect(result.status).toBe('ok');
-  expect(result.output).toEqual([{ val: 'hello' }]);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ val: 'hello' }]);
 });
 
 test('lobster.run: child env overrides parent env', async () => {
@@ -227,6 +229,6 @@ test('lobster.run: child env overrides parent env', async () => {
   });
 
   const result = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
-  expect(result.status).toBe('ok');
-  expect(result.output).toEqual([{ val: 'from-child-workflow' }]);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ val: 'from-child-workflow' }]);
 });

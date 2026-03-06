@@ -51,30 +51,26 @@ test('flow: forward jump skips intermediate steps', async () => {
 });
 
 test('flow: backward jump creates a loop', async () => {
-  const { filePath, env } = await writeTmpWorkflow('loop', (d) => ({
-    steps: [
-      {
-        id: 'counter',
-        command: [
-          'node -e "',
-          `const fs=require('fs');`,
-          `const f=String.raw\`${path.join(d, 'cnt.txt')}\`;`,
-          `const c=(fs.existsSync(f)?parseInt(fs.readFileSync(f,'utf8')):0)+1;`,
-          `fs.writeFileSync(f,String(c));`,
-          `process.stdout.write(JSON.stringify({count:c}))"`,
-        ].join(''),
-        flow: [
-          { when: '$counter.json.count >= 3', goto: 'done' },
-          { default: 'counter' },
-        ],
-        max_iterations: 10,
-      },
-      {
-        id: 'done',
-        command: 'node -e "process.stdout.write(JSON.stringify({finished:true}))"',
-      },
-    ],
-  }));
+  const { filePath, env } = await writeTmpWorkflow('loop', (d) => {
+    const cntFile = path.join(d, 'cnt.txt');
+    return {
+      steps: [
+        {
+          id: 'counter',
+          command: `node -e "const fs=require('fs'); const f='${cntFile}'; const c=(fs.existsSync(f)?parseInt(fs.readFileSync(f,'utf8')):0)+1; fs.writeFileSync(f,String(c)); process.stdout.write(JSON.stringify({count:c}))"`,
+          flow: [
+            { when: '$counter.json.count >= 3', goto: 'done' },
+            { default: 'counter' },
+          ],
+          max_iterations: 10,
+        },
+        {
+          id: 'done',
+          command: 'node -e "process.stdout.write(JSON.stringify({finished:true}))"',
+        },
+      ],
+    };
+  });
 
   const result = await runWorkflowFile({ filePath, ctx: { ...testCtx, env } });
   assert.equal(result.status, 'ok');
@@ -143,29 +139,38 @@ test('flow: max_iterations hard error', async () => {
 });
 
 test('flow: skipped steps do not evaluate flow', async () => {
-  const { filePath, env } = await writeTmpWorkflow('skip-flow', () => ({
-    steps: [
-      {
-        id: 'a',
-        command: 'node -e "process.stdout.write(JSON.stringify({x:1}))"',
-        when: false,
-        flow: [{ default: 'c' }],
-      },
-      {
-        id: 'b',
-        command: 'node -e "process.stdout.write(JSON.stringify({ran:true}))"',
-      },
-      {
-        id: 'c',
-        command: 'node -e "process.stdout.write(JSON.stringify({jumped:true}))"',
-      },
-    ],
-  }));
+  // A is skipped (when=false). Its flow [default:'c'] should NOT fire.
+  // If flow fires: jump to C, B is invisible → B marker file NOT written
+  // If flow doesn't fire: B runs → B marker file written, then C runs
+  const { filePath, env, dir } = await writeTmpWorkflow('skip-flow', (d) => {
+    const markerFile = path.join(d, 'b_ran');
+    return {
+      steps: [
+        {
+          id: 'a',
+          command: 'node -e "process.stdout.write(JSON.stringify({x:1}))"',
+          when: false,
+          flow: [{ default: 'c' }],
+        },
+        {
+          id: 'b',
+          command: `node -e "require('fs').writeFileSync('${markerFile}','1'); process.stdout.write(JSON.stringify({ran:true}))"`,
+        },
+        {
+          id: 'c',
+          command: 'node -e "process.stdout.write(JSON.stringify({jumped:true}))"',
+        },
+      ],
+    };
+  });
 
   const result = await runWorkflowFile({ filePath, ctx: { ...testCtx, env } });
   assert.equal(result.status, 'ok');
-  // 'b' should have run (a was skipped, flow on a not evaluated)
-  assert.deepEqual(result.output, [{ ran: true }]);
+  // C is last step (runs after B in correct case)
+  assert.deepEqual(result.output, [{ jumped: true }]);
+  // Verify B actually ran (proves flow on A was NOT evaluated)
+  const bRan = await fsp.access(path.join(dir, 'b_ran')).then(() => true, () => false);
+  assert.equal(bRan, true, 'Step B should have run (A was skipped, its flow not evaluated)');
 });
 
 test('flow: visit counters persist across halt/resume', async () => {

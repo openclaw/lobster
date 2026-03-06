@@ -1,4 +1,5 @@
-import { test, expect } from 'vitest';
+import test from 'node:test';
+import assert from 'node:assert/strict';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -9,37 +10,37 @@ import { parseLobsterRunCommand, resolveWorkflowByName } from '../src/workflows/
 
 test('parseLobsterRunCommand: parses --name', () => {
   const result = parseLobsterRunCommand('lobster.run --name my-workflow');
-  expect(result).toEqual({ name: 'my-workflow', file: undefined, argsJson: undefined });
+  assert.deepEqual(result, { name: 'my-workflow', file: undefined, argsJson: undefined });
 });
 
 test('parseLobsterRunCommand: parses --file and --args-json', () => {
-  const result = parseLobsterRunCommand('lobster.run --file ./path.lobster --args-json \'{"a":1}\'');
-  expect(result).toEqual({ name: undefined, file: './path.lobster', argsJson: '{"a":1}' });
+  const result = parseLobsterRunCommand("lobster.run --file ./path.lobster --args-json '{\"a\":1}'");
+  assert.deepEqual(result, { name: undefined, file: './path.lobster', argsJson: '{"a":1}' });
 });
 
 test('parseLobsterRunCommand: parses --name with --args-json', () => {
-  const result = parseLobsterRunCommand('lobster.run --name child --args-json \'{"x":42}\'');
-  expect(result).toEqual({ name: 'child', file: undefined, argsJson: '{"x":42}' });
+  const result = parseLobsterRunCommand("lobster.run --name child --args-json '{\"x\":42}'");
+  assert.deepEqual(result, { name: 'child', file: undefined, argsJson: '{"x":42}' });
 });
 
 test('parseLobsterRunCommand: returns null for non-lobster commands', () => {
-  expect(parseLobsterRunCommand('exec --shell "echo hi"')).toBe(null);
-  expect(parseLobsterRunCommand('echo lobster.run')).toBe(null);
-  expect(parseLobsterRunCommand('')).toBe(null);
+  assert.equal(parseLobsterRunCommand('exec --shell "echo hi"'), null);
+  assert.equal(parseLobsterRunCommand('echo lobster.run'), null);
+  assert.equal(parseLobsterRunCommand(''), null);
 });
 
 test('parseLobsterRunCommand: errors on both --name and --file', () => {
-  expect(() => parseLobsterRunCommand('lobster.run --name x --file y.lobster')).toThrow();
+  assert.throws(() => parseLobsterRunCommand('lobster.run --name x --file y.lobster'));
 });
 
 test('parseLobsterRunCommand: errors on neither --name nor --file', () => {
-  expect(() => parseLobsterRunCommand('lobster.run --args-json \'{"a":1}\'')).toThrow();
+  assert.throws(() => parseLobsterRunCommand("lobster.run --args-json '{\"a\":1}'"));
 });
 
-test('parseLobsterRunCommand: handles args-json with double quotes', () => {
+test('parseLobsterRunCommand: handles args-json without quotes', () => {
   const result = parseLobsterRunCommand('lobster.run --name child --args-json {"a":1}');
-  expect(result?.name).toBe('child');
-  expect(result?.argsJson).toBe('{"a":1}');
+  assert.equal(result?.name, 'child');
+  assert.equal(result?.argsJson, '{"a":1}');
 });
 
 // resolveWorkflowByName tests
@@ -51,7 +52,7 @@ test('resolveWorkflowByName: finds .lobster in parent dir', async () => {
 
   const parentFilePath = path.join(dir, 'parent.lobster');
   const result = await resolveWorkflowByName('my-workflow', parentFilePath, undefined, undefined);
-  expect(result).toBe(wfFile);
+  assert.equal(result, wfFile);
 });
 
 test('resolveWorkflowByName: finds .yaml extension', async () => {
@@ -61,7 +62,7 @@ test('resolveWorkflowByName: finds .yaml extension', async () => {
 
   const parentFilePath = path.join(dir, 'parent.lobster');
   const result = await resolveWorkflowByName('my-workflow', parentFilePath, undefined, undefined);
-  expect(result).toBe(wfFile);
+  assert.equal(result, wfFile);
 });
 
 test('resolveWorkflowByName: falls back to LOBSTER_WORKFLOW_PATH', async () => {
@@ -72,7 +73,7 @@ test('resolveWorkflowByName: falls back to LOBSTER_WORKFLOW_PATH', async () => {
 
   const parentFilePath = path.join(parentDir, 'parent.lobster');
   const result = await resolveWorkflowByName('my-workflow', parentFilePath, searchDir, undefined);
-  expect(result).toBe(wfFile);
+  assert.equal(result, wfFile);
 });
 
 test('resolveWorkflowByName: falls back to cwd', async () => {
@@ -83,7 +84,7 @@ test('resolveWorkflowByName: falls back to cwd', async () => {
 
   const parentFilePath = path.join(parentDir, 'parent.lobster');
   const result = await resolveWorkflowByName('my-workflow', parentFilePath, undefined, cwdDir);
-  expect(result).toBe(wfFile);
+  assert.equal(result, wfFile);
 });
 
 test('resolveWorkflowByName: parent dir takes priority over LOBSTER_WORKFLOW_PATH', async () => {
@@ -96,13 +97,14 @@ test('resolveWorkflowByName: parent dir takes priority over LOBSTER_WORKFLOW_PAT
 
   const parentFilePath = path.join(parentDir, 'parent.lobster');
   const result = await resolveWorkflowByName('my-workflow', parentFilePath, searchDir, undefined);
-  expect(result).toBe(wfInParent);
+  assert.equal(result, wfInParent);
 });
 
 test('resolveWorkflowByName: throws when not found', async () => {
-  await expect(
+  await assert.rejects(
     resolveWorkflowByName('nonexistent', '/tmp/parent.lobster', undefined, undefined),
-  ).rejects.toThrow(/not found/i);
+    /not found/i,
+  );
 });
 
 test('resolveWorkflowByName: colon-separated LOBSTER_WORKFLOW_PATH', async () => {
@@ -113,5 +115,5 @@ test('resolveWorkflowByName: colon-separated LOBSTER_WORKFLOW_PATH', async () =>
 
   const parentFilePath = path.join(os.tmpdir(), 'parent.lobster');
   const result = await resolveWorkflowByName('my-workflow', parentFilePath, `${dir1}:${dir2}`, undefined);
-  expect(result).toBe(wfFile);
+  assert.equal(result, wfFile);
 });
