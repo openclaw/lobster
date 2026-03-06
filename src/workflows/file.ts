@@ -543,6 +543,69 @@ function compareValues(left: unknown, op: string, right: unknown): boolean {
   }
 }
 
+export function parseLobsterRunCommand(command: string): {
+  name?: string;
+  file?: string;
+  argsJson?: string;
+} | null {
+  const trimmed = command.trim();
+  if (!trimmed.startsWith('lobster.run')) return null;
+  // Must be followed by end-of-string or whitespace
+  if (trimmed.length > 'lobster.run'.length && !/\s/.test(trimmed['lobster.run'.length])) return null;
+
+  const rest = trimmed.slice('lobster.run'.length).trim();
+
+  let name: string | undefined;
+  let file: string | undefined;
+  let argsJson: string | undefined;
+
+  // Parse --name <value>
+  const nameMatch = rest.match(/(?:^|\s)--name\s+([^\s]+)/);
+  if (nameMatch) name = nameMatch[1];
+
+  // Parse --file <value>
+  const fileMatch = rest.match(/(?:^|\s)--file\s+([^\s]+)/);
+  if (fileMatch) file = fileMatch[1];
+
+  // Parse --args-json '<json>' or --args-json <json>
+  const argsJsonMatch = rest.match(/(?:^|\s)--args-json\s+'([^']*)'/) ?? rest.match(/(?:^|\s)--args-json\s+(\S+)/);
+  if (argsJsonMatch) argsJson = argsJsonMatch[1];
+
+  if (name && file) {
+    throw new Error('lobster.run: --name and --file are mutually exclusive');
+  }
+  if (!name && !file) {
+    throw new Error('lobster.run: one of --name or --file is required');
+  }
+
+  return { name, file, argsJson };
+}
+
+export async function resolveWorkflowByName(
+  name: string,
+  parentFilePath: string,
+  workflowPath: string | undefined,
+  cwd: string | undefined,
+): Promise<string> {
+  const extensions = ['.lobster', '.yaml', '.yml', '.json'];
+  const dirs = [
+    path.dirname(parentFilePath),
+    ...(workflowPath ? workflowPath.split(':') : []),
+    ...(cwd ? [cwd] : []),
+  ];
+
+  for (const dir of dirs) {
+    for (const ext of extensions) {
+      const candidate = path.join(dir, name + ext);
+      try {
+        await fsp.access(candidate);
+        return candidate;
+      } catch { /* continue */ }
+    }
+  }
+  throw new Error(`Workflow not found: ${name}`);
+}
+
 function isApprovalStep(approval: WorkflowStep['approval']) {
   if (approval === true) return true;
   if (typeof approval === 'string' && approval.toLowerCase() === 'required') return true;
