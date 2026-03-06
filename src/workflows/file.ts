@@ -16,6 +16,10 @@ export type WorkflowFile = {
   steps: WorkflowStep[];
 };
 
+export type FlowRule =
+  | { when: string; goto: string }
+  | { default: string };
+
 export type WorkflowStep = {
   id: string;
   command: string;
@@ -25,6 +29,8 @@ export type WorkflowStep = {
   approval?: boolean | 'required';
   condition?: unknown;
   when?: unknown;
+  flow?: FlowRule[];
+  max_iterations?: number;
 };
 
 export type WorkflowStepResult = {
