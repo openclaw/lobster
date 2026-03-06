@@ -4,7 +4,7 @@ import { parse as parseYaml } from 'yaml';
 
 import { randomUUID } from 'node:crypto';
 
-import { encodeToken } from '../token.js';
+import { encodeToken, decodeToken } from '../token.js';
 import { readStateJson, writeStateJson } from '../state/store.js';
 
 export type WorkflowFile = {
@@ -84,6 +84,8 @@ type WorkflowResumeState = {
   createdAt: string;
   visitCounts?: Record<string, number>;
   flowPending?: boolean;
+  childStateKey?: string;
+  childFilePath?: string;
 };
 
 export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> {
@@ -182,12 +184,14 @@ export async function runWorkflowFile({
   ctx,
   resume,
   approved,
+  _depth = 0,
 }: {
   filePath?: string;
   args?: Record<string, unknown>;
   ctx: RunContext;
   resume?: WorkflowResumePayload;
   approved?: boolean;
+  _depth?: number;
 }): Promise<WorkflowRunResult> {
   const resumeState = resume?.stateKey
     ? await loadWorkflowResumeState(ctx.env, resume.stateKey)
@@ -228,7 +232,9 @@ export async function runWorkflowFile({
     const step = steps[idx];
 
     // Handle flowPending resume: skip re-execution, just set approval and evaluate flow
-    if (resumeState?.flowPending && idx === startIndex) {
+    // (Only when no childStateKey — child resume takes precedence)
+    const hasChildResume = !!(resumeState as WorkflowResumeState | null)?.childStateKey;
+    if (resumeState?.flowPending && idx === startIndex && !hasChildResume) {
       if (resumeState.approvalStepId === step.id && typeof approved === 'boolean') {
         results[step.id] = { ...(results[step.id] ?? { id: step.id }), approved };
       }
@@ -263,11 +269,68 @@ export async function runWorkflowFile({
     const env = mergeEnv(ctx.env, workflow.env, step.env, resolvedArgs, results);
     const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs);
 
-    const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd });
-    const json = parseJson(stdout);
+    // Intercept lobster.run (or resume a halted child)
+    const lobsterRun = parseLobsterRunCommand(command);
+    const childResumeKey = (resumeState as WorkflowResumeState | null)?.childStateKey;
+    const childResumeFilePath = (resumeState as WorkflowResumeState | null)?.childFilePath;
 
-    results[step.id] = { id: step.id, stdout, json };
-    lastStepId = step.id;
+    if (lobsterRun || childResumeKey) {
+      const childResult = await executeChildWorkflow(
+        lobsterRun ?? { file: childResumeFilePath },
+        {
+          parentFilePath: resolvedFilePath,
+          env,
+          cwd,
+          ctx,
+          depth: _depth + 1,
+          resumeChildStateKey: childResumeKey,
+          resumeApproved: approved,
+        },
+      );
+
+      // Once we've used the child resume key, clear it so we don't re-use it
+      if (resumeState) (resumeState as WorkflowResumeState).childStateKey = undefined;
+
+      if (childResult.halted) {
+        const hasFlow = step.flow && step.flow.length > 0;
+        const stateKey = await saveWorkflowResumeState(ctx.env, {
+          filePath: resolvedFilePath,
+          resumeAtIndex: idx,
+          steps: results,
+          args: resolvedArgs,
+          approvalStepId: childResult.approvalStepId,
+          createdAt: new Date().toISOString(),
+          visitCounts: Object.fromEntries(visitCounts),
+          childStateKey: childResult.childStateKey,
+          childFilePath: childResult.childFilePath,
+          flowPending: hasFlow ? true : undefined,
+        });
+
+        const resumeToken = encodeToken({
+          protocolVersion: 1,
+          v: 1,
+          kind: 'workflow-file',
+          stateKey,
+        } satisfies WorkflowResumePayload);
+
+        return {
+          status: 'needs_approval',
+          output: [],
+          requiresApproval: {
+            ...(childResult.requiresApproval!),
+            resumeToken,
+          },
+        };
+      }
+
+      results[step.id] = { ...childResult.stepResult!, id: step.id };
+      lastStepId = step.id;
+    } else {
+      const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd });
+      const json = parseJson(stdout);
+      results[step.id] = { id: step.id, stdout, json };
+      lastStepId = step.id;
+    }
 
     if (isApprovalStep(step.approval)) {
       const approval = extractApprovalRequest(step, results[step.id]);
@@ -540,6 +603,116 @@ function compareValues(left: unknown, op: string, right: unknown): boolean {
     case '>=': return typeof left === 'number' && typeof right === 'number' && left >= right;
     case '<=': return typeof left === 'number' && typeof right === 'number' && left <= right;
     default: throw new Error(`Unknown operator: ${op}`);
+  }
+}
+
+type ChildExecutionResult =
+  | { halted: false; stepResult: WorkflowStepResult }
+  | {
+      halted: true;
+      childStateKey: string;
+      childFilePath: string;
+      approvalStepId?: string;
+      requiresApproval: WorkflowRunResult['requiresApproval'];
+      stepResult?: never;
+    };
+
+async function executeChildWorkflow(
+  parsed: { name?: string; file?: string; argsJson?: string },
+  context: {
+    parentFilePath: string;
+    env: Record<string, string | undefined>;
+    cwd?: string;
+    ctx: RunContext;
+    depth: number;
+    resumeChildStateKey?: string;
+    resumeApproved?: boolean;
+  },
+): Promise<ChildExecutionResult> {
+  const maxDepth = parseInt((context.env.LOBSTER_MAX_WORKFLOW_DEPTH as string | undefined) ?? '10', 10);
+  if (context.depth > maxDepth) {
+    throw new Error(`Workflow nesting depth exceeded (max: ${maxDepth})`);
+  }
+
+  let childPath: string;
+  if (context.resumeChildStateKey) {
+    // Resuming a halted child — path comes from resumeChildFilePath
+    childPath = parsed.file!;
+  } else if (parsed.file) {
+    childPath = path.resolve(context.cwd ?? '.', parsed.file);
+  } else {
+    childPath = await resolveWorkflowByName(
+      parsed.name!,
+      context.parentFilePath,
+      context.env.LOBSTER_WORKFLOW_PATH as string | undefined,
+      context.cwd,
+    );
+  }
+
+  const childArgs = parsed.argsJson ? JSON.parse(parsed.argsJson) : {};
+
+  // Build resume payload for child if we have a child state key
+  let childResume: WorkflowResumePayload | undefined;
+  if (context.resumeChildStateKey) {
+    childResume = {
+      protocolVersion: 1,
+      v: 1,
+      kind: 'workflow-file',
+      stateKey: context.resumeChildStateKey,
+    };
+  }
+
+  const childCtx: RunContext = {
+    ...context.ctx,
+    env: context.env as Record<string, string | undefined>,
+  };
+
+  const childResult = await runWorkflowFile({
+    filePath: childPath,
+    args: childArgs,
+    ctx: childCtx,
+    resume: childResume,
+    approved: context.resumeApproved,
+    _depth: context.depth,
+  });
+
+  if (childResult.status === 'needs_approval') {
+    // Child halted — extract the child state key from the resume token
+    const childPayload = childResult.requiresApproval?.resumeToken
+      ? decodeResumeTokenInternal(childResult.requiresApproval.resumeToken)
+      : null;
+
+    return {
+      halted: true,
+      childStateKey: childPayload?.stateKey ?? '',
+      childFilePath: childPath,
+      approvalStepId: childPayload?.approvalStepId,
+      requiresApproval: childResult.requiresApproval,
+    };
+  }
+
+  // Child completed — map output to step result
+  return { halted: false, stepResult: childOutputToStepResult(childPath, childResult) };
+}
+
+function childOutputToStepResult(stepId: string, childResult: WorkflowRunResult): WorkflowStepResult {
+  const output = childResult.output;
+  if (output.length === 0) {
+    return { id: stepId, stdout: '', json: undefined };
+  }
+  const value = output.length === 1 ? output[0] : output;
+  return {
+    id: stepId,
+    stdout: JSON.stringify(value),
+    json: value,
+  };
+}
+
+function decodeResumeTokenInternal(token: string): WorkflowResumePayload | null {
+  try {
+    return decodeToken(token) as WorkflowResumePayload | null;
+  } catch {
+    return null;
   }
 }
 
