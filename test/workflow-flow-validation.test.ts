@@ -1,4 +1,5 @@
-import { test, expect } from 'vitest';
+import test from 'node:test';
+import assert from 'node:assert/strict';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -19,7 +20,7 @@ test('loadWorkflowFile: validates flow goto targets exist', async () => {
       { id: 'b', command: 'echo bye' },
     ],
   });
-  await expect(loadWorkflowFile(file)).rejects.toThrow(/goto target.*nonexistent/i);
+  await assert.rejects(loadWorkflowFile(file), /goto target.*nonexistent/i);
 });
 
 test('loadWorkflowFile: validates default goto target exists', async () => {
@@ -28,7 +29,7 @@ test('loadWorkflowFile: validates default goto target exists', async () => {
       { id: 'a', command: 'echo hi', flow: [{ default: 'nonexistent' }] },
     ],
   });
-  await expect(loadWorkflowFile(file)).rejects.toThrow(/goto target.*nonexistent/i);
+  await assert.rejects(loadWorkflowFile(file), /goto target.*nonexistent/i);
 });
 
 test('loadWorkflowFile: validates default is last rule', async () => {
@@ -45,7 +46,7 @@ test('loadWorkflowFile: validates default is last rule', async () => {
       { id: 'b', command: 'echo bye' },
     ],
   });
-  await expect(loadWorkflowFile(file)).rejects.toThrow(/default.*last/i);
+  await assert.rejects(loadWorkflowFile(file), /default.*last/i);
 });
 
 test('loadWorkflowFile: accepts valid flow rules', async () => {
@@ -63,7 +64,7 @@ test('loadWorkflowFile: accepts valid flow rules', async () => {
     ],
   });
   const wf = await loadWorkflowFile(file);
-  expect(wf.steps[0].flow).toHaveLength(2);
+  assert.equal(wf.steps[0].flow?.length, 2);
 });
 
 test('loadWorkflowFile: validates max_iterations is positive integer', async () => {
@@ -72,7 +73,7 @@ test('loadWorkflowFile: validates max_iterations is positive integer', async () 
       { id: 'a', command: 'echo hi', max_iterations: 0 },
     ],
   });
-  await expect(loadWorkflowFile(file)).rejects.toThrow(/max_iterations/i);
+  await assert.rejects(loadWorkflowFile(file), /max_iterations/i);
 });
 
 test('loadWorkflowFile: validates max_iterations is integer not float', async () => {
@@ -81,7 +82,7 @@ test('loadWorkflowFile: validates max_iterations is integer not float', async ()
       { id: 'a', command: 'echo hi', max_iterations: 1.5 },
     ],
   });
-  await expect(loadWorkflowFile(file)).rejects.toThrow(/max_iterations/i);
+  await assert.rejects(loadWorkflowFile(file), /max_iterations/i);
 });
 
 test('loadWorkflowFile: accepts valid max_iterations', async () => {
@@ -91,7 +92,7 @@ test('loadWorkflowFile: accepts valid max_iterations', async () => {
     ],
   });
   const wf = await loadWorkflowFile(file);
-  expect(wf.steps[0].max_iterations).toBe(5);
+  assert.equal(wf.steps[0].max_iterations, 5);
 });
 
 test('loadWorkflowFile: flow must be array', async () => {
@@ -100,7 +101,7 @@ test('loadWorkflowFile: flow must be array', async () => {
       { id: 'a', command: 'echo hi', flow: 'not-an-array' },
     ],
   });
-  await expect(loadWorkflowFile(file)).rejects.toThrow(/flow must be an array/i);
+  await assert.rejects(loadWorkflowFile(file), /flow must be an array/i);
 });
 
 test('loadWorkflowFile: flow rule must be valid shape', async () => {
@@ -109,5 +110,5 @@ test('loadWorkflowFile: flow rule must be valid shape', async () => {
       { id: 'a', command: 'echo hi', flow: [{ invalid: 'rule' }] },
     ],
   });
-  await expect(loadWorkflowFile(file)).rejects.toThrow(/invalid flow rule/i);
+  await assert.rejects(loadWorkflowFile(file), /invalid flow rule/i);
 });
