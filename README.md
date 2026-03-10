@@ -205,9 +205,7 @@ If you install Lobster via npm/pnpm, it installs a small shim executable named:
 
 These shims forward to the Lobster pipeline command of the same name.
 
-### Example: invoke llm-task
-
-Prereqs:
+### Prerequisites
 
 - `OPENCLAW_URL` points at a running OpenClaw gateway
 - optionally `OPENCLAW_TOKEN` if auth is enabled
@@ -217,19 +215,265 @@ export OPENCLAW_URL=http://127.0.0.1:18789
 # export OPENCLAW_TOKEN=...
 ```
 
-In a workflow:
+### openclaw.invoke — Call any OpenClaw tool
 
+The `openclaw.invoke` command calls any OpenClaw tool with typed arguments.
+
+**Basic syntax:**
+```bash
+openclaw.invoke --tool <tool-name> --action <action> --args-json '<json-args>'
+```
+
+**Example: Send a message via OpenClaw**
 ```yaml
-name: hello-world
+name: send-notification
 steps:
-  - id: greeting
+  - id: notify
     command: >
-      openclaw.invoke --tool llm-task --action json --args-json '{"prompt":"Hello"}'
+      openclaw.invoke --tool message --action send --args-json '{"provider":"discord","channel":"alerts","message":"Build completed!"}'
+```
+
+**Example: List Discord channels**
+```yaml
+name: list-channels
+steps:
+  - id: list
+    command: >
+      openclaw.invoke --tool message --action channel-list --args-json '{"guildId":"123456789"}'
+```
+
+**Using --each to process pipeline items:**
+```yaml
+name: broadcast
+steps:
+  - id: users
+    command: echo '[{"user":"alice"},{"user":"bob"}]'
+  - id: notify-each
+    command: >
+      lobster 'exec --json --stdin json | openclaw.invoke --tool message --action send --each --item-key to --args-json "{\"provider\":\"discord\",\"message\":\"Hello!\"}"'
+    stdin: $users.stdout
+```
+
+### llm_task.invoke — Call the LLM task tool
+
+The `llm_task.invoke` command sends prompts to the LLM with automatic caching and schema validation.
+
+**Basic syntax:**
+```bash
+llm_task.invoke --prompt 'Your prompt here'
+llm_task.invoke --model claude-3-sonnet --prompt 'Your prompt'
+```
+
+**Example: Simple LLM call in a workflow**
+```yaml
+name: daily-summary
+args:
+  topic:
+    default: "project updates"
+steps:
+  - id: generate
+    command: >
+      llm_task.invoke --prompt "Write a brief summary of today's ${topic}"
+```
+
+**Example: LLM with structured output (JSON schema)**
+```yaml
+name: classify-tickets
+steps:
+  - id: classify
+    command: >
+      llm_task.invoke --prompt "Classify this feedback as positive, negative, or neutral" --output-schema '{"type":"object","required":["sentiment"],"properties":{"sentiment":{"type":"string","enum":["positive","negative","neutral"]}}}'
+```
+
+**Example: LLM with input artifacts**
+```yaml
+name: summarize-article
+args:
+  article:
+    default: ""
+steps:
+  - id: prepare
+    env:
+      ARTICLE: "$LOBSTER_ARG_ARTICLE"
+    command: |
+      jq -n --arg text "$ARTICLE" '{"kind":"text","text":$text}'
+  - id: summarize
+    command: >
+      lobster 'exec --json --stdin json | llm_task.invoke --prompt "Summarize this article in 3 bullet points"'
+    stdin: $prepare.stdout
+```
+
+**Example: Daily standup with Jira tickets (from issue #26)**
+```yaml
+name: daily-standup
+args:
+  team:
+    default: "CLAW"
+  project:
+    default: "E-commerce"
+  limit:
+    default: "10"
+
+steps:
+  - id: list-tickets
+    command: >
+      jira issues search "" --status Todo 2>/dev/null |
+      jq -s '[.[][] | {id: .identifier, title, status: .state.name, priority: .priority, assignee: (.assignee.name // "unassigned")}] | sort_by(.priority) | .[:20]'
+
+  - id: summarize
+    command: >
+      lobster 'exec --json --stdin json | llm_task.invoke --prompt "Summarize the top ${limit} most urgent tickets for the daily standup. Team: ${team}, Project: ${project}"'
+    stdin: $list-tickets.stdout
 ```
 
 ### Passing data between steps (no temp files)
 
-Use `stdin: $stepId.stdout` to pipe output from one step into the next.
+Use `stdin: $stepId.stdout` to pipe output from one step into the next:
+
+```yaml
+steps:
+  - id: fetch
+    command: curl -s https://api.example.com/data
+  - id: transform
+    command: jq '.items'
+    stdin: $fetch.stdout  # Pipe previous step's output to stdin
+  - id: analyze
+    command: llm_task.invoke --prompt "Analyze this data"
+    stdin: $transform.stdout  # Chain multiple steps
+```
+
+Access JSON output with `$stepId.json`:
+```yaml
+steps:
+  - id: parse
+    command: echo '{"count": 42}'
+  - id: report
+    command: >
+      llm_task.invoke --prompt "The count is $(echo '$parse.json' | jq -r '.count'). Write a brief status report."
+```
+
+### Accessing workflow arguments safely
+
+For shell-safe argument handling, use environment variables:
+
+```yaml
+args:
+  text:
+    default: ""
+  user:
+    default: "unknown"
+steps:
+  - id: safe
+    env:
+      TEXT: "$LOBSTER_ARG_TEXT"
+      USER: "$LOBSTER_ARG_USER"
+    command: |
+      # These are safe even if $TEXT contains quotes or special chars
+      llm_task.invoke --prompt "Process this: $TEXT for user $USER"
+```
+
+## Cookbook: Common Patterns
+
+### Pattern 1: Fetch → LLM → Notify
+
+```yaml
+name: fetch-analyze-notify
+args:
+  url:
+    default: "https://api.example.com/news"
+  channel:
+    default: "general"
+steps:
+  - id: fetch
+    command: curl -s "$LOBSTER_ARG_URL"
+
+  - id: analyze
+    command: >
+      lobster 'exec --stdin raw | llm_task.invoke --prompt "Summarize this content in 3 key points"'
+    stdin: $fetch.stdout
+
+  - id: notify
+    env:
+      MSG: "$analyze.stdout"
+    command: >
+      openclaw.invoke --tool message --action send --args-json "{\"provider\":\"discord\",\"channel\":\"$LOBSTER_ARG_CHANNEL\",\"message\":\"$MSG\"}"
+```
+
+### Pattern 2: Approval workflow with LLM recommendation
+
+```yaml
+name: approve-with-llm
+steps:
+  - id: gather
+    command: echo '{"amount": 5000, "requester": "alice", "reason": "New equipment"}'
+
+  - id: recommend
+    command: >
+      lobster 'exec --json --stdin json | llm_task.invoke --prompt "Should this expense request be approved? Answer yes or no with a brief reason."'
+    stdin: $gather.stdout
+
+  - id: approve
+    command: >
+      echo '{"requiresApproval":{"prompt":"Approve expense based on LLM recommendation?","items":[]}}'
+    stdin: $recommend.stdout
+    approval: required
+
+  - id: finalize
+    command: echo "Expense processed"
+    condition: $approve.approved
+```
+
+### Pattern 3: Batch processing with --each
+
+```yaml
+name: batch-translate
+args:
+  texts:
+    default: '["Hello", "Goodbye", "Thank you"]'
+  target_lang:
+    default: "Spanish"
+steps:
+  - id: prepare-items
+    command: echo "$LOBSTER_ARG_TEXTS"
+
+  - id: translate-all
+    command: >
+      lobster 'exec --json --stdin json | openclaw.invoke --tool llm-task --action invoke --each --item-key text --args-json "{\"prompt\":\"Translate to ${target_lang}:\"}"'
+    stdin: $prepare-items.stdout
+```
+
+### Pattern 4: Conditional steps based on LLM output
+
+```yaml
+name: smart-router
+steps:
+  - id: classify
+    command: >
+      llm_task.invoke --prompt "Classify this message as 'urgent' or 'normal'" --output-schema '{"type":"object","required":["priority"],"properties":{"priority":{"type":"string"}}}'
+
+  - id: handle-urgent
+    command: openclaw.invoke --tool message --action send --args-json '{"provider":"discord","channel":"urgent","message":"Urgent item detected!"}'
+    condition: 'test "$classify.json.priority" = "urgent"'
+
+  - id: handle-normal
+    command: echo "Added to normal queue"
+    condition: 'test "$classify.json.priority" = "normal"'
+```
+
+### Pattern 5: Retry with different models
+
+```yaml
+name: robust-llm-call
+steps:
+  - id: try-primary
+    command: >
+      llm_task.invoke --model claude-3-opus --prompt "Complex analysis task" || echo '{"error": true}'
+
+  - id: fallback
+    command: >
+      llm_task.invoke --model claude-3-sonnet --prompt "Complex analysis task"
+    condition: 'test -n "$(echo $try-primary.stdout | jq -r .error // empty)"'
+```
 
 ## Args and shell-safety
 
