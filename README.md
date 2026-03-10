@@ -319,9 +319,11 @@ steps:
       TEAM: "$LOBSTER_ARG_TEAM"
       PROJECT: "$LOBSTER_ARG_PROJECT"
       LIMIT: "$LOBSTER_ARG_LIMIT"
-    command: >
-      jq -n --argjson tickets "$cat" --arg team "$TEAM" --arg project "$PROJECT" --arg limit "$LIMIT" '{"prompt":("Summarize the top " + $limit + " most urgent tickets for the daily standup. Team: " + $team + ", Project: " + $project),"context":$tickets}' |
-      openclaw.invoke --tool llm_task --action invoke --args-json @/dev/stdin
+    command: |
+      # Read ticket data from stdin, build args JSON safely with jq
+      TICKETS=$(cat)
+      ARGS=$(jq -n --argjson tickets "$TICKETS" --arg team "$TEAM" --arg project "$PROJECT" --arg limit "$LIMIT" '{"prompt":("Summarize the top " + $limit + " most urgent tickets for the daily standup. Team: " + $team + ", Project: " + $project),"context":$tickets}')
+      openclaw.invoke --tool llm_task --action invoke --args-json "$ARGS"
     stdin: $list-tickets.stdout
 ```
 
@@ -479,7 +481,9 @@ steps:
 
 **Note:** For more complex branching, consider using separate workflows or shell logic within a single step.
 
-### Pattern 5: Retry with different models
+### Pattern 5: Retry with different models (manual approval on failure)
+
+This pattern requires manual approval before using the fallback model. The `approval: required` step always pauses for user confirmation, so you'll be prompted even when the primary succeeds (simply approve to continue).
 
 ```yaml
 name: robust-llm-call
@@ -488,19 +492,34 @@ steps:
     command: |
       openclaw.invoke --tool llm_task --action invoke --args-json '{"model":"claude-3-opus","prompt":"Complex analysis task"}' || echo '{"error": true}'
 
-  - id: check-error
+  - id: on-error
+    # This step always pauses for approval. Approve to continue (primary succeeded) 
+    # or to retry with fallback (primary failed). Reject to stop the workflow.
     command: |
       if echo '$try-primary.json' | jq -e '.error' > /dev/null 2>&1; then
-        echo '{"requiresApproval":{"prompt":"Primary model failed. Retry with fallback model?","items":[]}}'
+        echo '{"requiresApproval":{"prompt":"Primary model failed. Approve to retry with fallback model?","items":[]}}'
       else
-        echo '{"success": true}'
+        echo '{"requiresApproval":{"prompt":"Primary model succeeded. Approve to finish, or reject to try fallback?","items":[]}}'
       fi
     approval: required
 
   - id: fallback
     command: >
       openclaw.invoke --tool llm_task --action invoke --args-json '{"model":"claude-3-sonnet","prompt":"Complex analysis task"}'
-    condition: $check-error.approved
+    # Only run fallback if error was detected AND user approved retry
+    condition: $on-error.approved
+```
+
+**Automatic retry without approval** (uses shell fallback logic):
+
+```yaml
+name: auto-retry-llm-call
+steps:
+  - id: call-with-fallback
+    command: |
+      # Try primary model; if it fails, automatically use fallback
+      openclaw.invoke --tool llm_task --action invoke --args-json '{"model":"claude-3-opus","prompt":"Complex analysis task"}' || \
+      openclaw.invoke --tool llm_task --action invoke --args-json '{"model":"claude-3-sonnet","prompt":"Complex analysis task"}'
 ```
 
 ## Args and shell-safety
