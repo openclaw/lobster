@@ -35,6 +35,7 @@ test('commands.list returns command inventory including stdlib + workflows', asy
   // A couple representative commands we always expect.
   assert.ok(names.includes('exec'));
   assert.ok(names.includes('json'));
+  assert.ok(names.includes('llm.invoke'));
   assert.ok(names.includes('workflows.list'));
   assert.ok(names.includes('commands.list'));
 

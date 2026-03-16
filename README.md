@@ -194,6 +194,30 @@ steps:
     condition: $approve.approved
 ```
 
+## Calling LLMs from workflows
+
+Lobster exposes a generic `llm.invoke` stage for model-backed steps:
+
+```bash
+llm.invoke --prompt 'Summarize this diff'
+llm.invoke --provider openclaw --prompt 'Summarize this diff'
+llm.invoke --provider pi --prompt 'Summarize this diff'
+```
+
+Provider resolution order:
+
+- `--provider`
+- `LOBSTER_LLM_PROVIDER`
+- auto-detect from environment
+
+Built-in providers today:
+
+- `openclaw` via `OPENCLAW_URL` / `OPENCLAW_TOKEN`
+- `pi` via `LOBSTER_PI_LLM_ADAPTER_URL` (typically supplied by the Pi extension)
+- `http` via `LOBSTER_LLM_ADAPTER_URL`
+
+`llm_task.invoke` remains available as a backward-compatible alias for the OpenClaw provider.
+
 ## Calling OpenClaw tools from workflows
 
 Workflow `steps[].command` runs in `/bin/sh`, so *tool calls must be real executables*.

@@ -177,19 +177,19 @@ const TRIAGE_OUTPUT_SCHEMA = {
 export const emailTriageCommand = {
   name: 'email.triage',
   meta: {
-    description: 'Email triage (deterministic by default, optionally LLM-assisted via llm_task.invoke)',
+    description: 'Email triage (deterministic by default, optionally LLM-assisted via llm.invoke)',
     argsSchema: {
       type: 'object',
       properties: {
         limit: { type: 'number', description: 'Maximum items to consume from input stream', default: 20 },
-        llm: { type: 'boolean', description: 'Use llm_task.invoke for categorization + draft replies (requires OPENCLAW_URL or CLAWD_URL)' },
-        model: { type: 'string', description: 'Model for llm_task.invoke (required when --llm true)' },
+        llm: { type: 'boolean', description: 'Use llm.invoke for categorization + draft replies' },
+        model: { type: 'string', description: 'Model for llm.invoke (optional; adapter defaults may apply)' },
         url: { type: 'string', description: 'Reserved for compatibility (ignored in OpenClaw mode)' },
         token: { type: 'string', description: 'Bearer token (or OPENCLAW_TOKEN/CLAWD_TOKEN)' },
         temperature: { type: 'number', description: 'LLM temperature' },
         'max-output-tokens': { type: 'number', description: 'Max completion tokens' },
         emit: { type: 'string', description: "Output mode: 'report' (default) or 'drafts'", default: 'report' },
-        'state-key': { type: 'string', description: 'Run-state key forwarded to llm_task.invoke' },
+        'state-key': { type: 'string', description: 'Run-state key forwarded to llm.invoke' },
         _: { type: 'array', items: { type: 'string' } },
       },
       required: [],
@@ -207,7 +207,7 @@ export const emailTriageCommand = {
       `  ... | email.triage --llm --model <model> --emit drafts | approve --prompt 'Send replies?' | gog.gmail.send\n\n` +
       `Notes:\n` +
       `  - Read-only by default: does not send anything.\n` +
-      `  - LLM mode uses llm_task.invoke (and its cache/resume semantics).\n`
+      `  - LLM mode uses llm.invoke (and its cache/resume semantics).\n`
     );
   },
   async run({ input, args, ctx }) {
@@ -222,9 +222,14 @@ export const emailTriageCommand = {
 
     const wantLlm = Boolean(args.llm ?? false);
     const env = ctx?.env ?? process.env;
-    const hasGatewayUrl = Boolean(String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? '').trim());
+    const hasLlmProvider = Boolean(
+      String(env.LOBSTER_LLM_PROVIDER ?? '').trim() ||
+      String(env.LOBSTER_PI_LLM_ADAPTER_URL ?? '').trim() ||
+      String(env.LOBSTER_LLM_ADAPTER_URL ?? '').trim() ||
+      String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? '').trim(),
+    );
 
-    if (!wantLlm || !hasGatewayUrl) {
+    if (!wantLlm || !hasLlmProvider) {
       const report = buildDeterministicReport(emails);
       if (emit === 'drafts') {
         return { output: streamOf([]) };
@@ -233,11 +238,10 @@ export const emailTriageCommand = {
     }
 
     const model = String(args.model ?? '').trim();
-    // Model is optional when running under OpenClaw (llm_task.invoke will use OpenClaw defaults).
 
     if (!ctx?.registry) throw new Error('email.triage (LLM mode) requires ctx.registry');
-    const llmCmd = ctx.registry.get('llm_task.invoke');
-    if (!llmCmd) throw new Error('email.triage requires llm_task.invoke to be registered');
+    const llmCmd = ctx.registry.get('llm.invoke') ?? ctx.registry.get('llm_task.invoke');
+    if (!llmCmd) throw new Error('email.triage requires llm.invoke to be registered');
 
     const llmRes = await llmCmd.run({
       input: streamOf(emails),
