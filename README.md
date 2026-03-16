@@ -167,7 +167,12 @@ From this folder:
 
 ## Workflow files
 
-Lobster can run YAML/JSON workflow files with `steps`, `env`, `condition`, and approval gates.
+Lobster workflow files are meant to read like small scripts:
+
+- `run:` or `command:` for deterministic shell/CLI steps
+- `pipeline:` for native Lobster stages like `llm.invoke`
+- `approval:` for hard workflow gates between steps
+- `stdin: $step.stdout` or `stdin: $step.json` to pass data forward
 
 ```
 lobster run path/to/workflow.lobster
@@ -177,19 +182,113 @@ lobster run --file path/to/workflow.lobster --args-json '{"tag":"family"}'
 Example file:
 
 ```yaml
-name: inbox-triage
+name: jacket-advice
+args:
+  location:
+    default: Phoenix
 steps:
-  - id: collect
-    command: inbox list --json
-  - id: categorize
-    command: inbox categorize --json
-    stdin: $collect.stdout
-  - id: approve
-    command: inbox apply --approve
-    stdin: $categorize.stdout
-    approval: required
-  - id: execute
-    command: inbox apply --execute
-    stdin: $categorize.stdout
-    condition: $approve.approved
+  - id: fetch
+    run: weather --json ${location}
+
+  - id: confirm
+    approval: Want jacket advice from the LLM?
+    stdin: $fetch.json
+
+  - id: advice
+    pipeline: >
+      llm.invoke --prompt "Given this weather data, should I wear a jacket?
+      Be concise and return JSON."
+    stdin: $fetch.json
+    when: $confirm.approved
+```
+
+Notes:
+
+- `run:` and `command:` are equivalent; `run:` is the preferred spelling for new files.
+- `pipeline:` shares the same args/env/results model as shell steps, so later steps can still reference `$step.stdout` or `$step.json`.
+- If you need a human checkpoint before an LLM call, use a dedicated `approval:` step in the workflow file rather than `approve` inside the nested pipeline.
+- `cwd`, `env`, `stdin`, `when`, and `condition` work for both shell and pipeline steps.
+
+## Calling LLMs from workflows
+
+Use `llm.invoke` from a native `pipeline:` step for model-backed work:
+
+```bash
+llm.invoke --prompt 'Summarize this diff'
+llm.invoke --provider openclaw --prompt 'Summarize this diff'
+llm.invoke --provider pi --prompt 'Summarize this diff'
+```
+
+Provider resolution order:
+
+- `--provider`
+- `LOBSTER_LLM_PROVIDER`
+- auto-detect from environment
+
+Built-in providers today:
+
+- `openclaw` via `OPENCLAW_URL` / `OPENCLAW_TOKEN`
+- `pi` via `LOBSTER_PI_LLM_ADAPTER_URL` (typically supplied by the Pi extension)
+- `http` via `LOBSTER_LLM_ADAPTER_URL`
+
+`llm_task.invoke` remains available as a backward-compatible alias for the OpenClaw provider.
+
+## Calling OpenClaw tools from workflows
+
+Shell `run:` steps execute in your system shell, so OpenClaw tool calls there must be real executables.
+
+If you install Lobster via npm/pnpm, it installs a small shim executable named:
+
+- `openclaw.invoke` (preferred)
+- `clawd.invoke` (alias)
+
+These shims forward to the Lobster pipeline command of the same name.
+
+### Example: invoke llm-task
+
+Prereqs:
+
+- `OPENCLAW_URL` points at a running OpenClaw gateway
+- optionally `OPENCLAW_TOKEN` if auth is enabled
+
+```bash
+export OPENCLAW_URL=http://127.0.0.1:18789
+# export OPENCLAW_TOKEN=...
+```
+
+In a workflow:
+
+```yaml
+name: hello-world
+steps:
+  - id: greeting
+    run: >
+      openclaw.invoke --tool llm-task --action json --args-json '{"prompt":"Hello"}'
+```
+
+### Passing data between steps (no temp files)
+
+Use `stdin: $stepId.stdout` to pipe output from one step into the next.
+
+## Args and shell-safety
+
+`${arg}` substitution is a raw string replace into the shell command text.
+
+For anything that may contain quotes, `$`, backticks, or newlines, prefer env vars:
+
+- every resolved workflow arg is exposed as `LOBSTER_ARG_<NAME>` (uppercased, non-alnum → `_`)
+- the full args object is also available as `LOBSTER_ARGS_JSON`
+
+Example:
+
+```yaml
+args:
+  text:
+    default: ""
+steps:
+  - id: safe
+    env:
+      TEXT: "$LOBSTER_ARG_TEXT"
+    command: |
+      jq -n --arg text "$TEXT" '{"result": $text}'
 ```

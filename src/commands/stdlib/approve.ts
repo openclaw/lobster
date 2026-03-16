@@ -1,3 +1,5 @@
+import { readLineFromStream } from '../../read_line.js';
+
 function isInteractive(stdin) {
   return Boolean(stdin.isTTY);
 }
@@ -49,7 +51,9 @@ export const approveCommand = {
     }
 
     ctx.stdout.write(`${prompt} [y/N] `);
-    const answer = await readLine(ctx.stdin);
+    const answer = await readLineFromStream(ctx.stdin, {
+      timeoutMs: parseApprovalTimeoutMs(ctx.env),
+    });
 
     if (!/^y(es)?$/i.test(String(answer).trim())) {
       throw new Error('Not approved');
@@ -67,21 +71,11 @@ function buildPreview(items) {
   return JSON.stringify(items, null, 2);
 }
 
-function readLine(stdin) {
-  return new Promise((resolve) => {
-    let buf = '';
-
-    const onData = (chunk) => {
-      buf += chunk.toString('utf8');
-      const idx = buf.indexOf('\n');
-      if (idx !== -1) {
-        stdin.off('data', onData);
-        resolve(buf.slice(0, idx));
-      }
-    };
-
-    stdin.on('data', onData);
-  });
+function parseApprovalTimeoutMs(env) {
+  const raw = env?.LOBSTER_APPROVAL_INPUT_TIMEOUT_MS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
 }
 
 async function* asStream(items) {

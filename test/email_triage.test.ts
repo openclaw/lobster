@@ -237,3 +237,88 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
     await closeServer(server);
   }
 });
+
+test("email.triage --llm honors OPENCLAW_URL (not just CLAWD_URL)", async () => {
+  const registry = createDefaultRegistry();
+  const cacheDir = await mkdtemp(join(tmpdir(), "lobster-cache-"));
+
+  const emails = [
+    {
+      id: "m1",
+      threadId: "t1",
+      from: "Alice <alice@example.com>",
+      subject: "Quick question",
+      date: "2026-01-22T07:00:00Z",
+      snippet: "Hey, can you take a look?",
+      labels: ["INBOX", "UNREAD"],
+    },
+  ];
+
+  let callCount = 0;
+  const server = http.createServer((req, res) => {
+    if (req.method !== "POST" || req.url !== "/tools/invoke") {
+      res.writeHead(404);
+      res.end("not found");
+      return;
+    }
+
+    callCount++;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        result: {
+          ok: true,
+          result: {
+            runId: "triage_openclaw_url",
+            output: {
+              data: {
+                decisions: [
+                  {
+                    id: "m1",
+                    category: "needs_reply",
+                    reply: { body: "Absolutely — I can help." },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+    );
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+
+  try {
+    const input = (async function* () {
+      for (const e of emails) yield e;
+    })();
+
+    const result = await runPipeline({
+      pipeline: [{ name: "email.triage", args: { llm: true, limit: 20 }, raw: "" }],
+      registry,
+      input,
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env: {
+        ...process.env,
+        OPENCLAW_URL: `http://127.0.0.1:${port}`,
+        LOBSTER_CACHE_DIR: cacheDir,
+        LLM_TASK_FORCE_REFRESH: "1",
+      },
+      mode: "tool",
+    } as any);
+
+    assert.equal(callCount, 1);
+    assert.equal(result.items.length, 1);
+    assert.equal(result.items[0].mode, "llm");
+    assert.equal(result.items[0].drafts.length, 1);
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+    await closeServer(server);
+  }
+});

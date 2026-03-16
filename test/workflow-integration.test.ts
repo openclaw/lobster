@@ -6,6 +6,7 @@ import os from 'node:os';
 
 import { runWorkflowFile } from '../src/workflows/file.js';
 import { decodeResumeToken } from '../src/resume.js';
+import type { WorkflowResumePayload } from '../src/workflows/file.js';
 
 async function makeTestEnv() {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-integ-'));
@@ -25,6 +26,14 @@ async function writeWorkflow(dir: string, name: string, content: object): Promis
   const filePath = path.join(dir, `${name}.lobster`);
   await fsp.writeFile(filePath, JSON.stringify(content), 'utf8');
   return filePath;
+}
+
+function decodeWorkflowResumeToken(token: string): WorkflowResumePayload {
+  const payload = decodeResumeToken(token);
+  if (payload.kind !== 'workflow-file') {
+    throw new Error(`Expected workflow resume token, got ${payload.kind}`);
+  }
+  return payload;
 }
 
 test('integration: sub-workflow in a flow loop — 3 iterations then done', async () => {
@@ -146,7 +155,7 @@ test('integration: nested halt inside a loop with resume', async () => {
   assert.equal(first.status, 'needs_approval');
   assert.ok(first.requiresApproval?.prompt?.includes('Approve iteration 1'));
 
-  const payload1 = decodeResumeToken(first.requiresApproval?.resumeToken ?? '');
+  const payload1 = decodeWorkflowResumeToken(first.requiresApproval?.resumeToken ?? '');
   // Resume iteration 1 — child completes (done: false), flow loops back, child halts again
   const second = await runWorkflowFile({
     filePath: parentPath,
@@ -157,7 +166,7 @@ test('integration: nested halt inside a loop with resume', async () => {
   assert.equal(second.status, 'needs_approval');
   assert.ok(second.requiresApproval?.prompt?.includes('Approve iteration 2'));
 
-  const payload2 = decodeResumeToken(second.requiresApproval?.resumeToken ?? '');
+  const payload2 = decodeWorkflowResumeToken(second.requiresApproval?.resumeToken ?? '');
   // Resume iteration 2 — child completes (done: true), flow goes to finish
   const third = await runWorkflowFile({
     filePath: parentPath,
@@ -226,7 +235,7 @@ test('integration: flow + approval + lobster.run combined', async () => {
   const first = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
   assert.equal(first.status, 'needs_approval');
 
-  const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? '');
+  const payload = decodeWorkflowResumeToken(first.requiresApproval?.resumeToken ?? '');
   // Resume with approval — flow evaluates $run.json.confidence > 0.9 → true → auto-approve
   const second = await runWorkflowFile({
     filePath: parentPath,

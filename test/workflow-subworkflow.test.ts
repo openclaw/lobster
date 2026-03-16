@@ -6,6 +6,7 @@ import os from 'node:os';
 
 import { runWorkflowFile } from '../src/workflows/file.js';
 import { decodeResumeToken } from '../src/resume.js';
+import type { WorkflowResumePayload } from '../src/workflows/file.js';
 
 async function makeTestEnv() {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-sw-'));
@@ -25,6 +26,14 @@ async function writeWorkflow(dir: string, name: string, content: object): Promis
   const filePath = path.join(dir, `${name}.lobster`);
   await fsp.writeFile(filePath, JSON.stringify(content), 'utf8');
   return filePath;
+}
+
+function decodeWorkflowResumeToken(token: string): WorkflowResumePayload {
+  const payload = decodeResumeToken(token);
+  if (payload.kind !== 'workflow-file') {
+    throw new Error(`Expected workflow resume token, got ${payload.kind}`);
+  }
+  return payload;
 }
 
 test('lobster.run: basic child execution with args', async () => {
@@ -137,7 +146,7 @@ test('lobster.run: resume after child halt', async () => {
   const first = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
   assert.equal(first.status, 'needs_approval');
 
-  const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? '');
+  const payload = decodeWorkflowResumeToken(first.requiresApproval?.resumeToken ?? '');
   const second = await runWorkflowFile({
     filePath: parentPath,
     ctx: { ...testCtx, env },
@@ -177,7 +186,7 @@ test('lobster.run: resuming halted child does not consume another parent iterati
   const first = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
   assert.equal(first.status, 'needs_approval');
 
-  const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? '');
+  const payload = decodeWorkflowResumeToken(first.requiresApproval?.resumeToken ?? '');
   const second = await runWorkflowFile({
     filePath: parentPath,
     ctx: { ...testCtx, env },
