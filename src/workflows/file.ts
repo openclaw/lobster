@@ -256,8 +256,12 @@ export async function runWorkflowFile({
       continue;
     }
 
-    // Check visit counter
-    const visits = (visitCounts.get(step.id) ?? 0) + 1;
+    const childResumeKey = (resumeState as WorkflowResumeState | null)?.childStateKey;
+
+    // Resuming a halted child continues the current parent visit instead of starting a new one.
+    const visits = childResumeKey && idx === startIndex
+      ? (visitCounts.get(step.id) ?? 1)
+      : (visitCounts.get(step.id) ?? 0) + 1;
     const maxIter = step.max_iterations ?? 10;
     if (visits > maxIter) {
       throw new Error(`Step '${step.id}' exceeded max_iterations (${maxIter})`);
@@ -271,7 +275,6 @@ export async function runWorkflowFile({
 
     // Intercept lobster.run (or resume a halted child)
     const lobsterRun = parseLobsterRunCommand(command);
-    const childResumeKey = (resumeState as WorkflowResumeState | null)?.childStateKey;
     const childResumeFilePath = (resumeState as WorkflowResumeState | null)?.childFilePath;
 
     if (lobsterRun || childResumeKey) {
