@@ -18,3 +18,26 @@ test('parsePipeline keeps quoted pipes', () => {
   assert.equal(p.length, 2);
   assert.deepEqual(p[0].args._, ['echo', 'a|b']);
 });
+
+test('parsePipeline preserves JSON escapes in double-quoted args', () => {
+  const p = parsePipeline('openclaw.invoke --tool llm-task --action json --args-json "{\\"prompt\\":\\"line1\\\\nline2\\",\\"schema\\":{\\"type\\":\\"object\\"}}"');
+  assert.equal(p.length, 1);
+  const raw = p[0].args['args-json'];
+  const parsed = JSON.parse(raw);
+  assert.equal(parsed.prompt, 'line1\nline2');
+  assert.equal(parsed.schema.type, 'object');
+});
+
+test('parsePipeline keeps single-quoted args literal', () => {
+  const p = parsePipeline("openclaw.invoke --args-json '{\"x\":\"a\\\\nb\"}'");
+  assert.equal(p.length, 1);
+  assert.equal(p[0].args['args-json'], '{"x":"a\\\\nb"}');
+});
+
+test('parsePipeline preserves escaped apostrophes in single-quoted args', () => {
+  const p = parsePipeline("openclaw.invoke --args-json '{\"prompt\":\"don\\'t\"}'");
+  assert.equal(p.length, 1);
+  const raw = p[0].args['args-json'];
+  const parsed = JSON.parse(raw);
+  assert.equal(parsed.prompt, "don't");
+});

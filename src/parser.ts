@@ -60,18 +60,42 @@ function tokenizeCommand(input) {
     const ch = input[i];
 
     if (quote) {
+      if (quote === "'") {
+        if (ch === '\\' && input[i + 1] === quote) {
+          current += quote;
+          i++;
+          continue;
+        }
+        if (ch === quote) {
+          quote = null;
+          continue;
+        }
+        current += ch;
+        continue;
+      }
+
+      // Double-quoted mode: preserve unknown escapes (\n, \t, etc) while
+      // unescaping only shell-like quote/backslash escapes.
       if (ch === '\\') {
         const next = input[i + 1];
-        if (next) {
+        if (next === '"' || next === '\\' || next === '$' || next === '`') {
           current += next;
           i++;
           continue;
         }
+        if (next === '\n') {
+          i++;
+          continue;
+        }
+        current += ch;
+        continue;
       }
+
       if (ch === quote) {
         quote = null;
         continue;
       }
+
       current += ch;
       continue;
     }
