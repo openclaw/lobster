@@ -4,7 +4,9 @@
   "description": "Workflow runtime for AI agents - deterministic pipelines with approval gates",
   "type": "module",
   "bin": {
-    "lobster": "bin/lobster.js"
+    "lobster": "bin/lobster.js",
+    "openclaw.invoke": "bin/openclaw.invoke.js",
+    "clawd.invoke": "bin/clawd.invoke.js"
   },
   "files": [
     "bin",
@@ -16,6 +18,7 @@
   "exports": {
     ".": "./dist/src/sdk/index.js",
     "./sdk": "./dist/src/sdk/index.js",
+    "./core": "./dist/src/core/index.js",
     "./recipes/github": "./dist/src/recipes/github/index.js"
   },
   "main": "./dist/src/sdk/index.js",

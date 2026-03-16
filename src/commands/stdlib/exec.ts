@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { resolveInlineShellCommand } from '../../shell.js';
 
 export const execCommand = {
   name: 'exec',
@@ -8,7 +9,7 @@ export const execCommand = {
       type: 'object',
       properties: {
         json: { type: 'boolean', description: 'Parse stdout as JSON (single value).' },
-        shell: { type: 'string', description: 'Run via /bin/sh -lc with this command line.' },
+        shell: { type: 'string', description: 'Run via the system shell with this command line.' },
         _: { type: 'array', items: { type: 'string' }, description: 'Command + args.' },
       },
       required: ['_'],
@@ -25,10 +26,11 @@ export const execCommand = {
       `Notes:\n` +
       `  - With --json, parses stdout as JSON (single value).\n` +
       `  - With --stdin, writes pipeline input to stdin.\n` +
-      `  - With --shell (or a single arg containing spaces), runs via /bin/sh -lc.\n`;
+      `  - With --shell (or a single arg containing spaces), runs via the system shell.\n`;
   },
   async run({ input, args, ctx }) {
     const cmd = args._;
+    const cwd = ctx?.cwd ?? process.cwd();
 
     const shellLine = typeof args.shell === 'string' ? args.shell : null;
     const useShell = Boolean(args.shell) || (cmd.length === 1 && /\s/.test(cmd[0]));
@@ -49,8 +51,8 @@ export const execCommand = {
     }
 
     const result = useShell
-      ? await runProcess('/bin/sh', ['-lc', shellLine ?? cmd[0] ?? ''], { env: ctx.env, cwd: process.cwd(), stdin: stdinPayload })
-      : await runProcess(cmd[0], cmd.slice(1), { env: ctx.env, cwd: process.cwd(), stdin: stdinPayload });
+      ? await runShellLine(shellLine ?? cmd[0] ?? '', { env: ctx.env, cwd, stdin: stdinPayload, signal: ctx.signal })
+      : await runProcess(cmd[0], cmd.slice(1), { env: ctx.env, cwd, stdin: stdinPayload, signal: ctx.signal });
 
     if (args.json) {
       let parsed;
@@ -70,11 +72,12 @@ export const execCommand = {
   },
 };
 
-function runProcess(command, argv, { env, cwd, stdin }) {
+function runProcess(command, argv, { env, cwd, stdin, signal }) {
   return new Promise<any>((resolve, reject) => {
     const child = spawn(command, argv, {
       env,
       cwd,
+      signal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -99,6 +102,11 @@ function runProcess(command, argv, { env, cwd, stdin }) {
       reject(new Error(`exec failed (${code}): ${stderr.trim() || stdout.trim() || command}`));
     });
   });
+}
+
+function runShellLine(commandLine, { env, cwd, stdin, signal }) {
+  const shell = resolveInlineShellCommand({ command: commandLine, env });
+  return runProcess(shell.command, shell.argv, { env, cwd, stdin, signal });
 }
 
 function encodeStdin(items, mode) {

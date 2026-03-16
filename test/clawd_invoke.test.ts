@@ -9,7 +9,7 @@ function streamOf(items) {
   })();
 }
 
-test('clawd.invoke posts to /tools/invoke and returns JSON', async () => {
+test('openclaw.invoke posts to /tools/invoke and returns JSON', async () => {
   const server = http.createServer((req, res) => {
     if (req.method !== 'POST' || req.url !== '/tools/invoke') {
       res.writeHead(404);
@@ -35,7 +35,7 @@ test('clawd.invoke posts to /tools/invoke and returns JSON', async () => {
 
   try {
     const registry = createDefaultRegistry();
-    const cmd = registry.get('clawd.invoke');
+    const cmd = registry.get('openclaw.invoke');
 
     const result = await cmd.run({
       input: streamOf([]),
@@ -65,7 +65,7 @@ test('clawd.invoke posts to /tools/invoke and returns JSON', async () => {
   }
 });
 
-test('clawd.invoke --each maps input items into tool args', async () => {
+test('openclaw.invoke --each maps input items into tool args', async () => {
   const seen: Array<{ call: number; args: unknown }> = [];
   const server = http.createServer((req, res) => {
     if (req.method !== 'POST' || req.url !== '/tools/invoke') {
@@ -91,7 +91,7 @@ test('clawd.invoke --each maps input items into tool args', async () => {
 
   try {
     const registry = createDefaultRegistry();
-    const cmd = registry.get('clawd.invoke');
+    const cmd = registry.get('openclaw.invoke');
 
     const result = await cmd.run({
       input: streamOf(['a', 'b']),

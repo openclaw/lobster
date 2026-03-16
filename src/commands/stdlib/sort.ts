@@ -20,9 +20,12 @@ function defaultCompare(a: any, b: any): number {
   // number compare if both numbers
   if (typeof a === 'number' && typeof b === 'number') return a - b;
 
-  // date-ish compare if both look like ISO/date strings?
-  // Keep it simple: string compare for everything else.
-  return String(a).localeCompare(String(b));
+  // Deterministic lexical compare independent of process locale.
+  const aStr = String(a);
+  const bStr = String(b);
+  if (aStr < bStr) return -1;
+  if (aStr > bStr) return 1;
+  return 0;
 }
 
 export const sortCommand = {

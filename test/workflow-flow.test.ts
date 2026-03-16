@@ -6,6 +6,7 @@ import os from 'node:os';
 
 import { runWorkflowFile } from '../src/workflows/file.js';
 import { decodeResumeToken } from '../src/resume.js';
+import type { WorkflowResumePayload } from '../src/workflows/file.js';
 
 const testCtx = {
   stdin: process.stdin,
@@ -24,6 +25,14 @@ async function writeTmpWorkflow(
   const content = contentFn(dir);
   await fsp.writeFile(filePath, JSON.stringify(content), 'utf8');
   return { filePath, env: { ...process.env, LOBSTER_STATE_DIR: stateDir }, dir };
+}
+
+function decodeWorkflowResumeToken(token: string): WorkflowResumePayload {
+  const payload = decodeResumeToken(token);
+  if (payload.kind !== 'workflow-file') {
+    throw new Error(`Expected workflow resume token, got ${payload.kind}`);
+  }
+  return payload;
 }
 
 test('flow: forward jump skips intermediate steps', async () => {
@@ -189,13 +198,13 @@ test('flow: visit counters persist across halt/resume', async () => {
   // First run — halts for approval (visit 1)
   const first = await runWorkflowFile({ filePath, ctx: { ...testCtx, env } });
   assert.equal(first.status, 'needs_approval');
-  const payload1 = decodeResumeToken(first.requiresApproval?.resumeToken ?? '');
+  const payload1 = decodeWorkflowResumeToken(first.requiresApproval?.resumeToken ?? '');
 
   // Resume — flow loops back to check, so command runs again (visit 2)
   const second = await runWorkflowFile({ filePath, ctx: { ...testCtx, env }, resume: payload1, approved: true });
   assert.equal(second.status, 'needs_approval'); // visit 2, halts again
 
-  const payload2 = decodeResumeToken(second.requiresApproval?.resumeToken ?? '');
+  const payload2 = decodeWorkflowResumeToken(second.requiresApproval?.resumeToken ?? '');
 
   // Continue resuming until max_iterations
   let current = payload2;
@@ -204,7 +213,7 @@ test('flow: visit counters persist across halt/resume', async () => {
     try {
       const r = await runWorkflowFile({ filePath, ctx: { ...testCtx, env }, resume: current, approved: true });
       if (r.status === 'needs_approval') {
-        current = decodeResumeToken(r.requiresApproval?.resumeToken ?? '');
+        current = decodeWorkflowResumeToken(r.requiresApproval?.resumeToken ?? '');
       }
     } catch (e: unknown) {
       if (e instanceof Error && /max_iterations|exceeded/i.test(e.message)) {

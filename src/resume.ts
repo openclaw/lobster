@@ -1,6 +1,13 @@
 import { decodeToken } from './token.js';
 import { decodeWorkflowResumePayload } from './workflows/file.js';
 
+export type PipelineResumePayload = {
+  protocolVersion: 1;
+  v: 1;
+  kind: 'pipeline-resume';
+  stateKey: string;
+};
+
 export function parseResumeArgs(argv) {
   const args = { decision: null, token: null };
 
@@ -46,10 +53,21 @@ export function decodeResumeToken(token) {
   if (payload.v !== 1) throw new Error('Unsupported token version');
   const workflowPayload = decodeWorkflowResumePayload(payload);
   if (workflowPayload) return workflowPayload;
+  const pipelinePayload = decodePipelineResumePayload(payload);
+  if (pipelinePayload) return pipelinePayload;
+  throw new Error('Invalid token');
+}
 
-  if (!Array.isArray(payload.pipeline)) throw new Error('Invalid token');
-  if (typeof payload.resumeAtIndex !== 'number') throw new Error('Invalid token');
-  if (!Array.isArray(payload.items)) throw new Error('Invalid token');
-
-  return payload;
+function decodePipelineResumePayload(payload: unknown): PipelineResumePayload | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const data = payload as Partial<PipelineResumePayload>;
+  if (data.kind !== 'pipeline-resume') return null;
+  if (data.protocolVersion !== 1 || data.v !== 1) throw new Error('Unsupported token version');
+  if (!data.stateKey || typeof data.stateKey !== 'string') throw new Error('Invalid token');
+  return {
+    protocolVersion: 1,
+    v: 1,
+    kind: 'pipeline-resume',
+    stateKey: data.stateKey,
+  };
 }
