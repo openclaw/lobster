@@ -167,7 +167,12 @@ From this folder:
 
 ## Workflow files
 
-Lobster can run YAML/JSON workflow files with `steps`, `env`, `condition`, and approval gates.
+Lobster workflow files are meant to read like small scripts:
+
+- `run:` or `command:` for deterministic shell/CLI steps
+- `pipeline:` for native Lobster stages like `llm.invoke`
+- `approval:` for hard workflow gates between steps
+- `stdin: $step.stdout` or `stdin: $step.json` to pass data forward
 
 ```
 lobster run path/to/workflow.lobster
@@ -177,26 +182,36 @@ lobster run --file path/to/workflow.lobster --args-json '{"tag":"family"}'
 Example file:
 
 ```yaml
-name: inbox-triage
+name: jacket-advice
+args:
+  location:
+    default: Phoenix
 steps:
-  - id: collect
-    command: inbox list --json
-  - id: categorize
-    command: inbox categorize --json
-    stdin: $collect.stdout
-  - id: approve
-    command: inbox apply --approve
-    stdin: $categorize.stdout
-    approval: required
-  - id: execute
-    command: inbox apply --execute
-    stdin: $categorize.stdout
-    condition: $approve.approved
+  - id: fetch
+    run: weather --json ${location}
+
+  - id: confirm
+    approval: Want jacket advice from the LLM?
+    stdin: $fetch.json
+
+  - id: advice
+    pipeline: >
+      llm.invoke --prompt "Given this weather data, should I wear a jacket?
+      Be concise and return JSON."
+    stdin: $fetch.json
+    when: $confirm.approved
 ```
+
+Notes:
+
+- `run:` and `command:` are equivalent; `run:` is the preferred spelling for new files.
+- `pipeline:` shares the same args/env/results model as shell steps, so later steps can still reference `$step.stdout` or `$step.json`.
+- If you need a human checkpoint before an LLM call, use a dedicated `approval:` step in the workflow file rather than `approve` inside the nested pipeline.
+- `cwd`, `env`, `stdin`, `when`, and `condition` work for both shell and pipeline steps.
 
 ## Calling LLMs from workflows
 
-Lobster exposes a generic `llm.invoke` stage for model-backed steps:
+Use `llm.invoke` from a native `pipeline:` step for model-backed work:
 
 ```bash
 llm.invoke --prompt 'Summarize this diff'
@@ -220,7 +235,7 @@ Built-in providers today:
 
 ## Calling OpenClaw tools from workflows
 
-Workflow `steps[].command` runs in `/bin/sh`, so *tool calls must be real executables*.
+Shell `run:` steps execute in your system shell, so OpenClaw tool calls there must be real executables.
 
 If you install Lobster via npm/pnpm, it installs a small shim executable named:
 
@@ -247,7 +262,7 @@ In a workflow:
 name: hello-world
 steps:
   - id: greeting
-    command: >
+    run: >
       openclaw.invoke --tool llm-task --action json --args-json '{"prompt":"Hello"}'
 ```
 

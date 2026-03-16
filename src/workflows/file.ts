@@ -3,7 +3,10 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 import { randomUUID } from 'node:crypto';
+import { PassThrough } from 'node:stream';
 
+import { parsePipeline } from '../parser.js';
+import { runPipeline } from '../runtime.js';
 import { encodeToken } from '../token.js';
 import { deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
 import { readLineFromStream } from '../read_line.js';
@@ -20,14 +23,26 @@ export type WorkflowFile = {
 
 export type WorkflowStep = {
   id: string;
-  command: string;
+  command?: string;
+  run?: string;
+  pipeline?: string;
   env?: Record<string, string>;
   cwd?: string;
   stdin?: unknown;
-  approval?: boolean | 'required';
+  approval?: WorkflowApproval;
   condition?: unknown;
   when?: unknown;
 };
+
+export type WorkflowApproval =
+  | boolean
+  | 'required'
+  | string
+  | {
+    prompt?: string;
+    items?: unknown[];
+    preview?: string;
+  };
 
 export type WorkflowStepResult = {
   id: string;
@@ -55,6 +70,9 @@ type RunContext = {
   stderr: NodeJS.WritableStream;
   env: Record<string, string | undefined>;
   mode: 'human' | 'tool' | 'sdk';
+  registry?: {
+    get: (name: string) => any;
+  };
 };
 
 export type WorkflowResumePayload = {
@@ -100,8 +118,23 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (!step.id || typeof step.id !== 'string') {
       throw new Error('Workflow step requires an id');
     }
-    if (!step.command || typeof step.command !== 'string') {
-      throw new Error(`Workflow step ${step.id} requires a command string`);
+    const shellCommand = typeof step.run === 'string' ? step.run : step.command;
+    const pipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
+    const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline));
+    if (executionCount === 0 && !isApprovalStep(step.approval)) {
+      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, or approval`);
+    }
+    if (executionCount > 1) {
+      throw new Error(`Workflow step ${step.id} can only define one of run, command, or pipeline`);
+    }
+    if (step.run !== undefined && typeof step.run !== 'string') {
+      throw new Error(`Workflow step ${step.id} run must be a string`);
+    }
+    if (step.command !== undefined && typeof step.command !== 'string') {
+      throw new Error(`Workflow step ${step.id} command must be a string`);
+    }
+    if (step.pipeline !== undefined && typeof step.pipeline !== 'string') {
+      throw new Error(`Workflow step ${step.id} pipeline must be a string`);
     }
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
@@ -163,13 +196,20 @@ export async function runWorkflowFile({
     : {};
   const startIndex = resumeState?.resumeAtIndex ?? 0;
 
+  if (resumeState?.approvalStepId && approved === false) {
+    if (consumedResumeStateKey) {
+      await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+    }
+    return { status: 'cancelled', output: [] };
+  }
+
   if (resumeState?.approvalStepId && typeof approved === 'boolean') {
     const previous = results[resumeState.approvalStepId] ?? { id: resumeState.approvalStepId };
     previous.approved = approved;
     results[resumeState.approvalStepId] = previous;
   }
 
-  let lastStepId: string | null = null;
+  let lastStepId: string | null = findLastCompletedStepId(steps, results);
 
   for (let idx = startIndex; idx < steps.length; idx++) {
     const step = steps[idx];
@@ -179,15 +219,36 @@ export async function runWorkflowFile({
       continue;
     }
 
-    const command = resolveTemplate(step.command, resolvedArgs, results);
-    const stdinValue = resolveStdin(step.stdin, resolvedArgs, results);
     const env = mergeEnv(ctx.env, workflow.env, step.env, resolvedArgs, results);
     const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs);
+    const execution = getStepExecution(step);
 
-    const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd });
-    const json = parseJson(stdout);
+    let result: WorkflowStepResult;
+    if (execution.kind === 'shell') {
+      const command = resolveTemplate(execution.value, resolvedArgs, results);
+      const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
+      const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd });
+      result = { id: step.id, stdout, json: parseJson(stdout) };
+    } else if (execution.kind === 'pipeline') {
+      if (!ctx.registry) {
+        throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+      }
+      const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
+      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+      result = await runPipelineStep({
+        stepId: step.id,
+        pipelineText,
+        inputValue,
+        ctx,
+        env,
+        cwd,
+      });
+    } else {
+      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+      result = createSyntheticStepResult(step.id, inputValue);
+    }
 
-    results[step.id] = { id: step.id, stdout, json };
+    results[step.id] = result;
     lastStepId = step.id;
 
     if (isApprovalStep(step.approval)) {
@@ -324,7 +385,7 @@ function resolveCwd(cwd: string | undefined, args: Record<string, unknown>) {
   return resolveArgsTemplate(cwd, args);
 }
 
-function resolveStdin(
+function resolveInputValue(
   stdin: unknown,
   args: Record<string, unknown>,
   results: Record<string, WorkflowStepResult>,
@@ -335,7 +396,16 @@ function resolveStdin(
     if (ref) return getStepRefValue(ref, results, true);
     return resolveTemplate(stdin, args, results);
   }
-  return JSON.stringify(stdin);
+  return stdin;
+}
+
+function resolveShellStdin(
+  stdin: unknown,
+  args: Record<string, unknown>,
+  results: Record<string, WorkflowStepResult>,
+) {
+  const value = resolveInputValue(stdin, args, results);
+  return encodeShellInput(value);
 }
 
 function resolveTemplate(
@@ -382,7 +452,7 @@ function getStepRefValue(
     return '';
   }
   if (ref.field === 'stdout') return step.stdout ?? '';
-  return step.json !== undefined ? JSON.stringify(step.json) : '';
+  return step.json;
 }
 
 function evaluateCondition(
@@ -408,12 +478,14 @@ function evaluateCondition(
 
 function isApprovalStep(approval: WorkflowStep['approval']) {
   if (approval === true) return true;
-  if (typeof approval === 'string' && approval.toLowerCase() === 'required') return true;
+  if (typeof approval === 'string' && approval.trim().length > 0) return true;
+  if (approval && typeof approval === 'object' && !Array.isArray(approval)) return true;
   return false;
 }
 
 function extractApprovalRequest(step: WorkflowStep, result: WorkflowStepResult) {
-  const fallbackPrompt = `Approve ${step.id}?`;
+  const approvalConfig = normalizeApprovalConfig(step.approval);
+  const fallbackPrompt = approvalConfig.prompt ?? `Approve ${step.id}?`;
   const json = result.json;
 
   if (json && typeof json === 'object' && !Array.isArray(json)) {
@@ -441,11 +513,14 @@ function extractApprovalRequest(step: WorkflowStep, result: WorkflowStepResult) 
     }
   }
 
+  const items = approvalConfig.items ?? normalizeApprovalItems(result.json);
+  const preview = approvalConfig.preview ?? buildResultPreview(result);
+
   return {
     type: 'approval_request' as const,
     prompt: fallbackPrompt,
-    items: [],
-    ...(result.stdout ? { preview: result.stdout.trim().slice(0, 2000) } : null),
+    items,
+    ...(preview ? { preview } : null),
   };
 }
 
@@ -476,6 +551,13 @@ function cloneResults(results: Record<string, WorkflowStepResult>) {
     out[key] = { ...value };
   }
   return out;
+}
+
+function findLastCompletedStepId(steps: WorkflowStep[], results: Record<string, WorkflowStepResult>) {
+  for (let idx = steps.length - 1; idx >= 0; idx--) {
+    if (results[steps[idx].id]) return steps[idx].id;
+  }
+  return null;
 }
 
 function isInteractive(stdin: NodeJS.ReadableStream) {
@@ -531,4 +613,163 @@ async function runShellCommand({
       reject(new Error(`workflow command failed (${code}): ${stderr.trim() || stdout.trim() || command}`));
     });
   });
+}
+
+function getStepExecution(step: WorkflowStep) {
+  if (typeof step.pipeline === 'string' && step.pipeline.trim()) {
+    return { kind: 'pipeline' as const, value: step.pipeline };
+  }
+
+  const shellCommand = typeof step.run === 'string' ? step.run : step.command;
+  if (typeof shellCommand === 'string' && shellCommand.trim()) {
+    return { kind: 'shell' as const, value: shellCommand };
+  }
+
+  return { kind: 'none' as const };
+}
+
+async function runPipelineStep({
+  stepId,
+  pipelineText,
+  inputValue,
+  ctx,
+  env,
+  cwd,
+}: {
+  stepId: string;
+  pipelineText: string;
+  inputValue: unknown;
+  ctx: RunContext;
+  env: Record<string, string | undefined>;
+  cwd?: string;
+}) {
+  let pipeline;
+  try {
+    pipeline = parsePipeline(pipelineText);
+  } catch (err: any) {
+    throw new Error(`Workflow step ${stepId} pipeline parse failed: ${err?.message ?? String(err)}`);
+  }
+
+  const stdout = new PassThrough();
+  let renderedStdout = '';
+  stdout.setEncoding('utf8');
+  stdout.on('data', (chunk) => {
+    renderedStdout += String(chunk);
+  });
+
+  const result = await runPipeline({
+    pipeline,
+    registry: ctx.registry,
+    stdin: ctx.stdin,
+    stdout,
+    stderr: ctx.stderr,
+    env,
+    mode: ctx.mode,
+    cwd,
+    input: inputValueToStream(inputValue),
+  });
+  stdout.end();
+
+  if (result.halted) {
+    const haltedName = result.haltedAt?.stage?.name ?? 'unknown';
+    if (result.items.length === 1 && result.items[0]?.type === 'approval_request') {
+      throw new Error(
+        `Workflow step ${stepId} halted for approval inside pipeline stage ${haltedName}. Use a separate approval step in the workflow file.`,
+      );
+    }
+    throw new Error(`Workflow step ${stepId} halted before completion at pipeline stage ${haltedName}`);
+  }
+
+  const normalizedStdout = renderedStdout || serializePipelineItemsToStdout(result.items);
+  const json = result.items.length
+    ? (result.items.length === 1 ? result.items[0] : result.items)
+    : parseJson(renderedStdout);
+
+  return {
+    id: stepId,
+    stdout: normalizedStdout,
+    json,
+  } satisfies WorkflowStepResult;
+}
+
+function createSyntheticStepResult(stepId: string, value: unknown): WorkflowStepResult {
+  if (value === null || value === undefined) {
+    return { id: stepId };
+  }
+  if (typeof value === 'string') {
+    return {
+      id: stepId,
+      stdout: value,
+      json: parseJson(value),
+    };
+  }
+  return {
+    id: stepId,
+    stdout: serializeValueForStdout(value),
+    json: value,
+  };
+}
+
+function encodeShellInput(value: unknown) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+function* inputValueToItems(value: unknown) {
+  if (value === null || value === undefined) return;
+  if (Array.isArray(value)) {
+    for (const item of value) yield item;
+    return;
+  }
+  yield value;
+}
+
+function inputValueToStream(value: unknown) {
+  return (async function* () {
+    for (const item of inputValueToItems(value)) {
+      yield item;
+    }
+  })();
+}
+
+function serializePipelineItemsToStdout(items: unknown[]) {
+  if (!items.length) return '';
+  if (items.every((item) => typeof item === 'string')) {
+    return items.map((item) => String(item)).join('\n');
+  }
+  if (items.length === 1) {
+    return serializeValueForStdout(items[0]);
+  }
+  return JSON.stringify(items);
+}
+
+function serializeValueForStdout(value: unknown) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+function normalizeApprovalConfig(approval: WorkflowStep['approval']) {
+  if (approval === true || approval === 'required' || approval === undefined || approval === false) {
+    return {} as { prompt?: string; items?: unknown[]; preview?: string };
+  }
+  if (typeof approval === 'string') {
+    return { prompt: approval };
+  }
+  if (approval && typeof approval === 'object' && !Array.isArray(approval)) {
+    return approval;
+  }
+  return {} as { prompt?: string; items?: unknown[]; preview?: string };
+}
+
+function normalizeApprovalItems(value: unknown) {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function buildResultPreview(result: WorkflowStepResult) {
+  if (result.stdout) return result.stdout.trim().slice(0, 2000);
+  if (result.json !== undefined) return serializeValueForStdout(result.json).trim().slice(0, 2000);
+  return undefined;
 }

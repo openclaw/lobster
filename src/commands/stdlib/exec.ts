@@ -30,6 +30,7 @@ export const execCommand = {
   },
   async run({ input, args, ctx }) {
     const cmd = args._;
+    const cwd = ctx?.cwd ?? process.cwd();
 
     const shellLine = typeof args.shell === 'string' ? args.shell : null;
     const useShell = Boolean(args.shell) || (cmd.length === 1 && /\s/.test(cmd[0]));
@@ -50,8 +51,8 @@ export const execCommand = {
     }
 
     const result = useShell
-      ? await runShellLine(shellLine ?? cmd[0] ?? '', { env: ctx.env, cwd: process.cwd(), stdin: stdinPayload })
-      : await runProcess(cmd[0], cmd.slice(1), { env: ctx.env, cwd: process.cwd(), stdin: stdinPayload });
+      ? await runShellLine(shellLine ?? cmd[0] ?? '', { env: ctx.env, cwd, stdin: stdinPayload })
+      : await runProcess(cmd[0], cmd.slice(1), { env: ctx.env, cwd, stdin: stdinPayload });
 
     if (args.json) {
       let parsed;

@@ -1,6 +1,26 @@
 import { createJsonRenderer } from './renderers/json.js';
 
-export async function runPipeline({ pipeline, registry, stdin, stdout, stderr, env, mode = 'human', input }) {
+export async function runPipeline({
+  pipeline,
+  registry,
+  stdin,
+  stdout,
+  stderr,
+  env,
+  mode = 'human',
+  input,
+  cwd = undefined,
+}: {
+  pipeline: any[];
+  registry: any;
+  stdin: any;
+  stdout: any;
+  stderr: any;
+  env: any;
+  mode?: string;
+  input?: any;
+  cwd?: string | undefined;
+}) {
   let stream = input ?? emptyStream();
   let rendered = false;
   let halted = false;
@@ -13,6 +33,7 @@ export async function runPipeline({ pipeline, registry, stdin, stdout, stderr, e
     env,
     registry,
     mode,
+    cwd,
     render: createJsonRenderer(stdout),
   };
 

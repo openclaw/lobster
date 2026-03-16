@@ -97,6 +97,7 @@ async function handleRun({ argv, registry }) {
           stderr: process.stderr,
           env: process.env,
           mode: normalizedMode,
+          registry,
         },
       });
 
@@ -345,6 +346,7 @@ async function handleResume({ argv, registry }) {
           stderr: process.stderr,
           env: process.env,
           mode: 'tool',
+          registry,
         },
         resume: payload,
         approved: true,
