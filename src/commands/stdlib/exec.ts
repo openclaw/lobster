@@ -51,8 +51,8 @@ export const execCommand = {
     }
 
     const result = useShell
-      ? await runShellLine(shellLine ?? cmd[0] ?? '', { env: ctx.env, cwd, stdin: stdinPayload })
-      : await runProcess(cmd[0], cmd.slice(1), { env: ctx.env, cwd, stdin: stdinPayload });
+      ? await runShellLine(shellLine ?? cmd[0] ?? '', { env: ctx.env, cwd, stdin: stdinPayload, signal: ctx.signal })
+      : await runProcess(cmd[0], cmd.slice(1), { env: ctx.env, cwd, stdin: stdinPayload, signal: ctx.signal });
 
     if (args.json) {
       let parsed;
@@ -72,11 +72,12 @@ export const execCommand = {
   },
 };
 
-function runProcess(command, argv, { env, cwd, stdin }) {
+function runProcess(command, argv, { env, cwd, stdin, signal }) {
   return new Promise<any>((resolve, reject) => {
     const child = spawn(command, argv, {
       env,
       cwd,
+      signal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -103,9 +104,9 @@ function runProcess(command, argv, { env, cwd, stdin }) {
   });
 }
 
-function runShellLine(commandLine, { env, cwd, stdin }) {
+function runShellLine(commandLine, { env, cwd, stdin, signal }) {
   const shell = resolveInlineShellCommand({ command: commandLine, env });
-  return runProcess(shell.command, shell.argv, { env, cwd, stdin });
+  return runProcess(shell.command, shell.argv, { env, cwd, stdin, signal });
 }
 
 function encodeStdin(items, mode) {

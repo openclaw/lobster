@@ -18,6 +18,7 @@
   "exports": {
     ".": "./dist/src/sdk/index.js",
     "./sdk": "./dist/src/sdk/index.js",
+    "./core": "./dist/src/core/index.js",
     "./recipes/github": "./dist/src/recipes/github/index.js"
   },
   "main": "./dist/src/sdk/index.js",

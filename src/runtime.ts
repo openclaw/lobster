@@ -10,6 +10,8 @@ export async function runPipeline({
   mode = 'human',
   input,
   cwd = undefined,
+  llmAdapters = undefined,
+  signal = undefined,
 }: {
   pipeline: any[];
   registry: any;
@@ -20,6 +22,8 @@ export async function runPipeline({
   mode?: string;
   input?: any;
   cwd?: string | undefined;
+  llmAdapters?: Record<string, any> | undefined;
+  signal?: AbortSignal | undefined;
 }) {
   let stream = input ?? emptyStream();
   let rendered = false;
@@ -34,6 +38,8 @@ export async function runPipeline({
     registry,
     mode,
     cwd,
+    llmAdapters,
+    signal,
     render: createJsonRenderer(stdout),
   };
 

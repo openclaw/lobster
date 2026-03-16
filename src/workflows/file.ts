@@ -70,9 +70,12 @@ type RunContext = {
   stderr: NodeJS.WritableStream;
   env: Record<string, string | undefined>;
   mode: 'human' | 'tool' | 'sdk';
+  cwd?: string;
+  signal?: AbortSignal;
   registry?: {
     get: (name: string) => any;
   };
+  llmAdapters?: Record<string, any>;
 };
 
 export type WorkflowResumePayload = {
@@ -220,14 +223,14 @@ export async function runWorkflowFile({
     }
 
     const env = mergeEnv(ctx.env, workflow.env, step.env, resolvedArgs, results);
-    const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs);
+    const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
     const execution = getStepExecution(step);
 
     let result: WorkflowStepResult;
     if (execution.kind === 'shell') {
       const command = resolveTemplate(execution.value, resolvedArgs, results);
       const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
-      const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd });
+      const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: ctx.signal });
       result = { id: step.id, stdout, json: parseJson(stdout) };
     } else if (execution.kind === 'pipeline') {
       if (!ctx.registry) {
@@ -576,11 +579,13 @@ async function runShellCommand({
   stdin,
   env,
   cwd,
+  signal,
 }: {
   command: string;
   stdin: string | null;
   env: Record<string, string | undefined>;
   cwd?: string;
+  signal?: AbortSignal;
 }) {
   const { spawn } = await import('node:child_process');
 
@@ -589,6 +594,7 @@ async function runShellCommand({
     const child = spawn(shell.command, shell.argv, {
       env,
       cwd,
+      signal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -666,6 +672,8 @@ async function runPipelineStep({
     env,
     mode: ctx.mode,
     cwd,
+    signal: ctx.signal,
+    llmAdapters: ctx.llmAdapters,
     input: inputValueToStream(inputValue),
   });
   stdout.end();

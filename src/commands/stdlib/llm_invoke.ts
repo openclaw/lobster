@@ -97,7 +97,8 @@ const validateResponseEnvelope = ajv.compile(responseSchema);
 const DEFAULT_MAX_VALIDATION_RETRIES = 1;
 const STATE_VERSION = 1;
 
-type SupportedProvider = 'openclaw' | 'pi' | 'http';
+type BuiltInProvider = 'openclaw' | 'pi' | 'http';
+type SupportedProvider = BuiltInProvider | string;
 
 type LlmResponseEnvelope = {
   ok: boolean;
@@ -166,6 +167,13 @@ type Adapter = {
   source: string;
   invoke: (params: { env: any; args: any; payload: Record<string, any> }) => Promise<LlmResponseEnvelope>;
 };
+
+type DirectAdapter =
+  | ((params: { env: any; args: any; payload: Record<string, any>; ctx: any }) => Promise<LlmResponseEnvelope>)
+  | {
+    source?: string;
+    invoke: (params: { env: any; args: any; payload: Record<string, any>; ctx: any }) => Promise<LlmResponseEnvelope>;
+  };
 
 export const llmInvokeCommand = createLlmInvokeCommand({
   name: 'llm.invoke',
@@ -279,8 +287,8 @@ export function createLlmInvokeCommand(config: CommandConfig): LobsterCommand {
 
 async function runLlmInvoke({ input, args, ctx, config }: { input: AsyncIterable<any>; args: any; ctx: any; config: CommandConfig }) {
   const env = ctx.env ?? process.env;
-  const provider = resolveProvider(args, env, config.defaultProvider);
-  const adapter = resolveAdapter({ provider, env, args, config });
+  const provider = resolveProvider(args, env, config.defaultProvider, ctx);
+  const adapter = resolveAdapter({ provider, env, args, config, ctx });
   const prompt = extractPrompt(args);
   if (!prompt) throw new Error(`${config.name} requires --prompt or positional text`);
 
@@ -422,22 +430,53 @@ async function runLlmInvoke({ input, args, ctx, config }: { input: AsyncIterable
   }
 }
 
-function resolveProvider(args: any, env: any, defaultProvider?: SupportedProvider | null): SupportedProvider {
+function resolveProvider(args: any, env: any, defaultProvider?: SupportedProvider | null, ctx?: any): SupportedProvider {
   const explicit = String(args.provider ?? env.LOBSTER_LLM_PROVIDER ?? '').trim().toLowerCase();
   if (explicit) {
     if (explicit === 'openclaw' || explicit === 'pi' || explicit === 'http') {
       return explicit;
     }
+    if (getDirectAdapter(ctx, explicit)) {
+      return explicit;
+    }
     throw new Error(`Unsupported llm provider: ${explicit}`);
   }
   if (defaultProvider) return defaultProvider;
+  const directAdapters = ctx?.llmAdapters && typeof ctx.llmAdapters === 'object'
+    ? Object.keys(ctx.llmAdapters).filter((key) => getDirectAdapter(ctx, key))
+    : [];
+  if (directAdapters.length === 1) return directAdapters[0];
   if (String(env.LOBSTER_PI_LLM_ADAPTER_URL ?? '').trim()) return 'pi';
   if (String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? '').trim()) return 'openclaw';
   if (String(env.LOBSTER_LLM_ADAPTER_URL ?? '').trim()) return 'http';
   throw new Error('llm.invoke could not resolve a provider. Set --provider or LOBSTER_LLM_PROVIDER');
 }
 
-function resolveAdapter({ provider, env, args, config }: { provider: SupportedProvider; env: any; args: any; config: CommandConfig }): Adapter {
+function resolveAdapter({
+  provider,
+  env,
+  args,
+  config,
+  ctx,
+}: {
+  provider: SupportedProvider;
+  env: any;
+  args: any;
+  config: CommandConfig;
+  ctx: any;
+}): Adapter {
+  const direct = getDirectAdapter(ctx, provider);
+  if (direct) {
+    const invoke = typeof direct === 'function' ? direct : direct.invoke;
+    return {
+      provider,
+      source: typeof direct === 'function' ? provider : direct.source ?? provider,
+      async invoke({ payload }) {
+        return invoke({ env, args, payload, ctx });
+      },
+    };
+  }
+
   if (provider === 'openclaw') {
     const openclawUrl = String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? '').trim();
     if (!openclawUrl) {
@@ -481,6 +520,17 @@ function resolveAdapter({ provider, env, args, config }: { provider: SupportedPr
       return invokeHttpAdapter({ endpoint: buildAdapterEndpoint(adapterUrl), token, payload });
     },
   };
+}
+
+function getDirectAdapter(ctx: any, provider: string): DirectAdapter | null {
+  const adapters = ctx?.llmAdapters;
+  if (!adapters || typeof adapters !== 'object') return null;
+  const adapter = adapters[provider];
+  if (typeof adapter === 'function') return adapter as DirectAdapter;
+  if (adapter && typeof adapter === 'object' && typeof adapter.invoke === 'function') {
+    return adapter as DirectAdapter;
+  }
+  return null;
 }
 
 function buildAdapterEndpoint(rawUrl: string) {
