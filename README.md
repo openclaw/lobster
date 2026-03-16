@@ -253,3 +253,75 @@ steps:
     command: |
       jq -n --arg text "$TEXT" '{"result": $text}'
 ```
+
+## Real-world example: Daily standup with Jira and LLM
+
+A common pattern: fetch data via shell CLI, then feed it to an LLM tool for summarization. We include a complete, documented example:
+
+**File**: [`examples/daily-standup.lobster`](examples/daily-standup.lobster)
+
+```yaml
+name: daily-standup
+description: |
+  Daily standup pipeline: fetch tickets from Jira, summarize with LLM.
+  Demonstrates mixing shell commands (jira, jq) with openclaw.invoke tool calls.
+
+args:
+  team:
+    default: "CLAW"
+    description: "Jira team/project key"
+  project:
+    default: "E-commerce"
+    description: "Project name for filtering"
+  limit:
+    default: "30"
+    description: "Maximum number of tickets to fetch"
+  llm_prompt:
+    default: "Summarize the top 10 most urgent tickets for the daily standup. Output a concise bullet list with ticket IDs and key points."
+    description: "Prompt sent to the LLM"
+
+steps:
+  - id: list-tickets
+    command: >
+      jira issues search "project=${project} AND status=Todo" --json |
+      jq -s '[.[] | {id: .key, title: .fields.summary, status: .fields.status.name, priority: .fields.priority.name, assignee: (.fields.assignee.displayName // "unassigned")] | .[0:env.LOBSTER_ARG_limit | tonumber]' 2>/dev/null
+    env:
+      LOBSTER_ARG_limit: "${limit}"
+
+  - id: summarize
+    command: >
+      openclaw.invoke --tool llm-task --action json --args-json '{"prompt": "${llm_prompt}"}'
+    stdin: $list-tickets.stdout
+
+  - id: output
+    command: >
+      echo "=== Standup Summary ===" && echo && cat
+    stdin: $summarize.stdout
+```
+
+Key takeaways:
+
+- Use `stdin: $stepId.stdout` to pass data without temp files
+- Access numeric/complex args via safe env vars: `env.LOBSTER_ARG_<NAME>`
+- Call `openclaw.invoke` directly from any shell step
+- Works both standalone and from OpenClaw cron
+
+### Running standalone
+
+```bash
+export OPENCLAW_URL=http://127.0.0.1:18789
+lobster run --file examples/daily-standup.lobster --args-json '{"project":"E-commerce","limit":20}'
+```
+
+### From OpenClaw cron
+
+```json
+{
+  "action": "run",
+  "pipeline": "examples/daily-standup.lobster",
+  "args": { "project": "E-commerce", "limit": 20 },
+  "timeoutMs": 60000
+}
+```
+
+This example addresses the confusion reported in [#26](https://github.com/openclaw/lobster/issues/26) and shows a clean, maintainable way to compose shell and tool steps.
