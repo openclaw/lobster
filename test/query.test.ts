@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promises as fsp } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { listRuns, getRunDetail, cancelRun } from '../src/query.js';
+import { decodeResumeToken } from '../src/resume.js';
 
 function makeEnv(stateDir) {
   return { ...process.env, LOBSTER_STATE_DIR: stateDir };
@@ -103,6 +104,12 @@ test('getRunDetail includes resumeToken', async () => {
   assert.ok(detail);
   assert.ok(typeof detail.resumeToken === 'string');
   assert.ok(detail.resumeToken.length > 0);
+  assert.deepEqual(decodeResumeToken(detail.resumeToken), {
+    protocolVersion: 1,
+    v: 1,
+    kind: 'workflow-file',
+    stateKey: 'workflow_resume_eee-666',
+  });
 });
 
 test('getRunDetail extracts approval prompt', async () => {

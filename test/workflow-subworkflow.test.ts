@@ -149,6 +149,46 @@ test('lobster.run: resume after child halt', async () => {
   assert.deepEqual(second.output, [{ parentDone: true }]);
 });
 
+test('lobster.run: resuming halted child does not consume another parent iteration', async () => {
+  const { dir, env } = await makeTestEnv();
+
+  await writeWorkflow(dir, 'child', {
+    steps: [
+      {
+        id: 'approve',
+        command: "node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Approve?',items:[]}}))\"",
+        approval: 'required',
+      },
+      {
+        id: 'result',
+        command: 'node -e "process.stdout.write(JSON.stringify({childDone:true}))"',
+        condition: '$approve.approved',
+      },
+    ],
+  });
+
+  const parentPath = await writeWorkflow(dir, 'parent', {
+    steps: [
+      { id: 'run', command: 'lobster.run --name child', max_iterations: 1 },
+      { id: 'finish', command: 'node -e "process.stdout.write(JSON.stringify({parentDone:true}))"' },
+    ],
+  });
+
+  const first = await runWorkflowFile({ filePath: parentPath, ctx: { ...testCtx, env } });
+  assert.equal(first.status, 'needs_approval');
+
+  const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? '');
+  const second = await runWorkflowFile({
+    filePath: parentPath,
+    ctx: { ...testCtx, env },
+    resume: payload,
+    approved: true,
+  });
+
+  assert.equal(second.status, 'ok');
+  assert.deepEqual(second.output, [{ parentDone: true }]);
+});
+
 test('lobster.run: --file flag with explicit path', async () => {
   const { dir, env } = await makeTestEnv();
 

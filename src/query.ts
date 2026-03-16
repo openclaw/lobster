@@ -91,11 +91,10 @@ export async function getRunDetail(id, env) {
       args: state.args ?? {},
       steps: state.steps ?? {},
       resumeToken: encodeToken({
-        filePath: state.filePath,
-        resumeAtIndex: state.resumeAtIndex,
-        steps: state.steps,
-        args: state.args,
-        approvalStepId: state.approvalStepId,
+        protocolVersion: 1,
+        v: 1,
+        kind: 'workflow-file',
+        stateKey: `workflow_resume_${id}`,
       }),
     };
   } catch (err) {
