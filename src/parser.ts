@@ -60,10 +60,20 @@ function tokenizeCommand(input) {
     const ch = input[i];
 
     if (quote) {
+      // In single-quoted strings, everything is literal (no escape processing)
+      if (quote === "'") {
+        if (ch === "'") {
+          quote = null;
+          continue;
+        }
+        current += ch;
+        continue;
+      }
+      // In double-quoted strings, preserve escape sequences (backslash + next char)
       if (ch === '\\') {
         const next = input[i + 1];
         if (next) {
-          current += next;
+          current += ch + next;
           i++;
           continue;
         }

@@ -18,3 +18,19 @@ test('parsePipeline keeps quoted pipes', () => {
   assert.equal(p.length, 2);
   assert.deepEqual(p[0].args._, ['echo', 'a|b']);
 });
+
+test('single-quoted strings are fully literal (no escape processing)', () => {
+  const p = parsePipeline("exec echo 'hello\\nworld'");
+  assert.deepEqual(p[0].args._, ['echo', 'hello\\nworld']);
+});
+
+test('double-quoted strings preserve escape sequences', () => {
+  const p = parsePipeline('exec echo "line1\\nline2"');
+  assert.deepEqual(p[0].args._, ['echo', 'line1\\nline2']);
+});
+
+test('--args-json with escaped JSON in double quotes', () => {
+  const p = parsePipeline('invoke --args-json "{\\"prompt\\":\\"line1\\\\nline2\\"}"');
+  // Backslashes are preserved in double-quoted strings: \" stays as \"
+  assert.equal(p[0].args['args-json'], '{\\"prompt\\":\\"line1\\\\nline2\\"}');
+});
