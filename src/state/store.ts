@@ -49,6 +49,17 @@ export async function writeStateJson({ env, key, value }) {
   await fsp.writeFile(filePath, JSON.stringify(value, null, 2) + '\n', 'utf8');
 }
 
+export async function deleteStateJson({ env, key }) {
+  const stateDir = defaultStateDir(env);
+  const filePath = keyToPath(stateDir, key);
+  try {
+    await fsp.unlink(filePath);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return;
+    throw err;
+  }
+}
+
 export async function diffAndStore({ env, key, value }) {
   const before = await readStateJson({ env, key });
   const changed = stableStringify(before) !== stableStringify(value);

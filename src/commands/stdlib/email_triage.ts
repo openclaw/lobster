@@ -182,10 +182,10 @@ export const emailTriageCommand = {
       type: 'object',
       properties: {
         limit: { type: 'number', description: 'Maximum items to consume from input stream', default: 20 },
-        llm: { type: 'boolean', description: 'Use llm_task.invoke for categorization + draft replies (requires LLM_TASK_URL)' },
+        llm: { type: 'boolean', description: 'Use llm_task.invoke for categorization + draft replies (requires OPENCLAW_URL or CLAWD_URL)' },
         model: { type: 'string', description: 'Model for llm_task.invoke (required when --llm true)' },
-        url: { type: 'string', description: 'llm-task base URL (or LLM_TASK_URL)' },
-        token: { type: 'string', description: 'Bearer token (or LLM_TASK_TOKEN)' },
+        url: { type: 'string', description: 'Reserved for compatibility (ignored in OpenClaw mode)' },
+        token: { type: 'string', description: 'Bearer token (or OPENCLAW_TOKEN/CLAWD_TOKEN)' },
         temperature: { type: 'number', description: 'LLM temperature' },
         'max-output-tokens': { type: 'number', description: 'Max completion tokens' },
         emit: { type: 'string', description: "Output mode: 'report' (default) or 'drafts'", default: 'report' },
@@ -222,9 +222,9 @@ export const emailTriageCommand = {
 
     const wantLlm = Boolean(args.llm ?? false);
     const env = ctx?.env ?? process.env;
-    const hasClawdUrl = Boolean(String(env.CLAWD_URL ?? '').trim());
+    const hasGatewayUrl = Boolean(String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? '').trim());
 
-    if (!wantLlm || !hasClawdUrl) {
+    if (!wantLlm || !hasGatewayUrl) {
       const report = buildDeterministicReport(emails);
       if (emit === 'drafts') {
         return { output: streamOf([]) };

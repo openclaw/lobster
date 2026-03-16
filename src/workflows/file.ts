@@ -5,7 +5,9 @@ import { parse as parseYaml } from 'yaml';
 import { randomUUID } from 'node:crypto';
 
 import { encodeToken } from '../token.js';
-import { readStateJson, writeStateJson } from '../state/store.js';
+import { deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
+import { readLineFromStream } from '../read_line.js';
+import { resolveInlineShellCommand } from '../shell.js';
 
 export type WorkflowFile = {
   name?: string;
@@ -143,6 +145,9 @@ export async function runWorkflowFile({
   resume?: WorkflowResumePayload;
   approved?: boolean;
 }): Promise<WorkflowRunResult> {
+  const consumedResumeStateKey = resume?.stateKey && typeof resume.stateKey === 'string'
+    ? resume.stateKey
+    : null;
   const resumeState = resume?.stateKey
     ? await loadWorkflowResumeState(ctx.env, resume.stateKey)
     : resume ?? null;
@@ -198,6 +203,10 @@ export async function runWorkflowFile({
           createdAt: new Date().toISOString(),
         });
 
+        if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
+          await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+        }
+
         const resumeToken = encodeToken({
           protocolVersion: 1,
           v: 1,
@@ -216,7 +225,9 @@ export async function runWorkflowFile({
       }
 
       ctx.stdout.write(`${approval.prompt} [y/N] `);
-      const answer = await readLine(ctx.stdin);
+      const answer = await readLineFromStream(ctx.stdin, {
+        timeoutMs: parseApprovalTimeoutMs(ctx.env),
+      });
       if (!/^y(es)?$/i.test(String(answer).trim())) {
         throw new Error('Not approved');
       }
@@ -225,6 +236,9 @@ export async function runWorkflowFile({
   }
 
   const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
+  if (consumedResumeStateKey) {
+    await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+  }
   return { status: 'ok', output };
 }
 
@@ -468,21 +482,11 @@ function isInteractive(stdin: NodeJS.ReadableStream) {
   return Boolean((stdin as NodeJS.ReadStream).isTTY);
 }
 
-function readLine(stdin: NodeJS.ReadableStream) {
-  return new Promise((resolve) => {
-    let buf = '';
-
-    const onData = (chunk: Buffer) => {
-      buf += chunk.toString('utf8');
-      const idx = buf.indexOf('\n');
-      if (idx !== -1) {
-        stdin.off('data', onData);
-        resolve(buf.slice(0, idx));
-      }
-    };
-
-    stdin.on('data', onData);
-  });
+function parseApprovalTimeoutMs(env: Record<string, string | undefined>) {
+  const raw = env?.LOBSTER_APPROVAL_INPUT_TIMEOUT_MS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
 }
 
 async function runShellCommand({
@@ -499,7 +503,8 @@ async function runShellCommand({
   const { spawn } = await import('node:child_process');
 
   return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn('/bin/sh', ['-lc', command], {
+    const shell = resolveInlineShellCommand({ command, env });
+    const child = spawn(shell.command, shell.argv, {
       env,
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],

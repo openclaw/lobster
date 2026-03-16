@@ -74,4 +74,69 @@ test('workflow file runs with approval and resume', async () => {
 
   assert.equal(resumed.status, 'ok');
   assert.deepEqual(resumed.output, [{ done: true, value: 2 }]);
+
+  const stateFiles = await fsp.readdir(stateDir);
+  const resumeStateFiles = stateFiles.filter((name) => name.startsWith('workflow_resume_'));
+  assert.deepEqual(resumeStateFiles, []);
+});
+
+test('workflow resume cancellation cleans up resume state', async () => {
+  const workflow = {
+    steps: [
+      {
+        id: 'approve_step',
+        command: "node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?', items:[{id:1}]}}))\"",
+        approval: 'required',
+      },
+      {
+        id: 'finish',
+        command: "node -e \"process.stdout.write(JSON.stringify({done:true}))\"",
+        condition: '$approve_step.approved',
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-cancel-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env,
+      mode: 'tool',
+    },
+  });
+  assert.equal(first.status, 'needs_approval');
+
+  const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? '');
+  assert.equal(payload.kind, 'workflow-file');
+  assert.ok(payload.stateKey);
+
+  await fsp.access(path.join(stateDir, `${payload.stateKey}.json`));
+
+  const cancelled = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env,
+      mode: 'tool',
+    },
+    resume: payload,
+    approved: false,
+  });
+
+  assert.equal(cancelled.status, 'ok');
+  assert.deepEqual(cancelled.output, []);
+  const files = await fsp.readdir(stateDir);
+  const resumeStateFiles = files.filter((name) => name.startsWith('workflow_resume_'));
+  assert.deepEqual(resumeStateFiles, []);
 });

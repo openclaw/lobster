@@ -4,6 +4,16 @@ import { runPipeline } from './runtime.js';
 import { encodeToken } from './token.js';
 import { decodeResumeToken, parseResumeArgs } from './resume.js';
 import { runWorkflowFile } from './workflows/file.js';
+import { randomUUID } from 'node:crypto';
+import { deleteStateJson, readStateJson, writeStateJson } from './state/store.js';
+
+type PipelineResumeState = {
+  pipeline: Array<{ name: string; args: Record<string, unknown>; raw: string }>;
+  resumeAtIndex: number;
+  items: unknown[];
+  prompt?: string;
+  createdAt: string;
+};
 
 export async function runCli(argv) {
   const registry = createDefaultRegistry();
@@ -161,13 +171,19 @@ async function handleRun({ argv, registry }) {
         : null;
 
       if (approval) {
-        const resumeToken = encodeToken({
-          protocolVersion: 1,
-          v: 1,
+        const stateKey = await savePipelineResumeState(process.env, {
           pipeline,
           resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
           items: approval.items,
           prompt: approval.prompt,
+          createdAt: new Date().toISOString(),
+        });
+
+        const resumeToken = encodeToken({
+          protocolVersion: 1,
+          v: 1,
+          kind: 'pipeline-resume',
+          stateKey,
         });
 
         writeToolEnvelope({
@@ -296,10 +312,25 @@ async function resolveWorkflowFile(candidate) {
 
 async function handleResume({ argv, registry }) {
   const mode = 'tool';
-  const { token, approved } = parseResumeArgs(argv);
-  const payload = decodeResumeToken(token);
+  let approved: boolean;
+  let payload: any;
+  try {
+    const parsed = parseResumeArgs(argv);
+    approved = parsed.approved;
+    payload = decodeResumeToken(parsed.token);
+  } catch (err) {
+    writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: err?.message ?? String(err) } });
+    process.exitCode = 2;
+    return;
+  }
 
   if (!approved) {
+    if (payload.kind === 'workflow-file' && payload.stateKey) {
+      await deleteStateJson({ env: process.env, key: payload.stateKey });
+    }
+    if (payload.kind === 'pipeline-resume' && payload.stateKey) {
+      await deleteStateJson({ env: process.env, key: payload.stateKey });
+    }
     writeToolEnvelope({ ok: true, status: 'cancelled', output: [], requiresApproval: null });
     return;
   }
@@ -337,11 +368,17 @@ async function handleResume({ argv, registry }) {
       return;
     }
   }
-
-  const remaining = payload.pipeline.slice(payload.resumeAtIndex);
-  const input = (async function* () {
-    for (const item of payload.items) yield item;
-  })();
+  const previousStateKey = payload.stateKey;
+  let resumeState: PipelineResumeState;
+  try {
+    resumeState = await loadPipelineResumeState(process.env, previousStateKey);
+  } catch (err) {
+    writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
+    process.exitCode = 1;
+    return;
+  }
+  const remaining = resumeState.pipeline.slice(resumeState.resumeAtIndex);
+  const input = streamFromItems(resumeState.items);
 
   try {
     const output = await runPipeline({
@@ -360,13 +397,20 @@ async function handleResume({ argv, registry }) {
       : null;
 
     if (approval) {
-      const resumeToken = encodeToken({
-        protocolVersion: 1,
-        v: 1,
+      const nextStateKey = await savePipelineResumeState(process.env, {
         pipeline: remaining,
         resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
         items: approval.items,
         prompt: approval.prompt,
+        createdAt: new Date().toISOString(),
+      });
+      await deleteStateJson({ env: process.env, key: previousStateKey });
+
+      const resumeToken = encodeToken({
+        protocolVersion: 1,
+        v: 1,
+        kind: 'pipeline-resume',
+        stateKey: nextStateKey,
       });
 
       writeToolEnvelope({
@@ -378,11 +422,36 @@ async function handleResume({ argv, registry }) {
       return;
     }
 
+    await deleteStateJson({ env: process.env, key: previousStateKey });
     writeToolEnvelope({ ok: true, status: 'ok', output: output.items, requiresApproval: null });
   } catch (err) {
     writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
     process.exitCode = 1;
   }
+}
+
+function streamFromItems(items: unknown[]) {
+  return (async function* () {
+    for (const item of items) yield item;
+  })();
+}
+
+async function savePipelineResumeState(env: Record<string, string | undefined>, state: PipelineResumeState) {
+  const stateKey = `pipeline_resume_${randomUUID()}`;
+  await writeStateJson({ env, key: stateKey, value: state });
+  return stateKey;
+}
+
+async function loadPipelineResumeState(env: Record<string, string | undefined>, stateKey: string) {
+  const stored = await readStateJson({ env, key: stateKey });
+  if (!stored || typeof stored !== 'object') {
+    throw new Error('Pipeline resume state not found');
+  }
+  const data = stored as Partial<PipelineResumeState>;
+  if (!Array.isArray(data.pipeline)) throw new Error('Invalid pipeline resume state');
+  if (typeof data.resumeAtIndex !== 'number') throw new Error('Invalid pipeline resume state');
+  if (!Array.isArray(data.items)) throw new Error('Invalid pipeline resume state');
+  return data as PipelineResumeState;
 }
 
 async function readVersion() {
