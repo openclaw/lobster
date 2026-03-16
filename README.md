@@ -217,14 +217,75 @@ export OPENCLAW_URL=http://127.0.0.1:18789
 # export OPENCLAW_TOKEN=...
 ```
 
-In a workflow:
+**Basic usage in a workflow:**
 
 ```yaml
 name: hello-world
 steps:
   - id: greeting
     command: >
-      openclaw.invoke --tool llm-task --action json --args-json '{"prompt":"Hello"}'
+      openclaw.invoke --tool llm-task --action json --args-json '{"prompt":"Say hello"}'
+```
+
+**Complete example: Jira tickets + LLM summary (as requested in #26)**
+
+This workflow fetches Jira tickets, then uses llm-task to summarize them, and pipes the result to a final step:
+
+```yaml
+name: daily-standup
+args:
+  team:
+    default: "CLAW"
+  project:
+    default: "E-commerce"
+  limit:
+    default: "30"
+
+steps:
+  # Step 1: Fetch tickets from Jira
+  - id: list-tickets
+    command: >
+      (jira issues search "project = E-commerce AND status = Todo" --json) 2>/dev/null |
+      jq '[.[] | {id: .key, title: .fields.summary, priority: .fields.priority.name}]'
+
+  # Step 2: Use llm-task to summarize the tickets
+  - id: summarize
+    env:
+      # Pass tickets via env var to avoid shell escaping issues
+      TICKETS_JSON: "$LOBSTER_ARG_TICKETS"
+    command: >
+      openclaw.invoke --tool llm-task --action json --args-json 
+      '{"prompt": "Summarize the top 5 most urgent tickets for the daily standup: $TICKETS_JSON"}'
+    # Alternative: pipe from previous step using stdin
+    # stdin: $list-tickets.stdout
+    # command: >
+    #   openclaw.invoke --tool llm-task --action json 
+    #   --args-json '{"prompt": "Summarize these tickets for a daily standup"}'
+
+  # Step 3: Output the summary (or send to Slack, email, etc.)
+  - id: output
+    command: jq '.result'
+    stdin: $summarize.stdout
+```
+
+**Key points:**
+
+1. **`openclaw.invoke` syntax:** Always use `--tool <tool-name> --action <action> --args-json '<json>'`
+2. **Avoid `llm_task.invoke` directly** — it's not a standalone executable. Use `openclaw.invoke --tool llm-task` instead.
+3. **Passing data between steps:** Use `stdin: $stepId.stdout` to pipe output, or use env vars (`$LOBSTER_ARG_<NAME>`) for complex JSON.
+4. **Shell escaping:** For JSON with quotes, use env vars instead of inline substitution to avoid escaping nightmares.
+
+**Common mistakes to avoid:**
+
+```yaml
+# ❌ WRONG: llm_task.invoke is not an executable
+command: llm_task.invoke --prompt "Hello"
+
+# ❌ WRONG: --tools (plural) is not valid
+command: openclaw.invoke --tools llm-task --action json
+
+# ✅ CORRECT: Use openclaw.invoke with --tool (singular)
+command: openclaw.invoke --tool llm-task --action json --args-json '{"prompt":"Hello"}'
 ```
 
 ### Passing data between steps (no temp files)
