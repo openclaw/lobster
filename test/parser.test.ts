@@ -18,3 +18,20 @@ test('parsePipeline keeps quoted pipes', () => {
   assert.equal(p.length, 2);
   assert.deepEqual(p[0].args._, ['echo', 'a|b']);
 });
+
+test('parsePipeline preserves escaped apostrophes in single-quoted args', () => {
+  const p = parsePipeline(String.raw`openclaw.invoke --args-json '{"prompt":"don\'t"}'`);
+  assert.equal(p[0].args['args-json'], `{"prompt":"don't"}`);
+});
+
+test('parsePipeline preserves JSON escapes in double-quoted args', () => {
+  const p = parsePipeline(
+    String.raw`openclaw.invoke --tool llm-task --action json --args-json "{\"prompt\":\"line1\\nline2\"}"`,
+  );
+  assert.equal(p[0].args['args-json'], String.raw`{"prompt":"line1\nline2"}`);
+});
+
+test('parsePipeline handles shell-escaped apostrophes across quoted fragments', () => {
+  const p = parsePipeline(String.raw`openclaw.invoke --args-json '{"prompt":"don'\''t"}'`);
+  assert.equal(p[0].args['args-json'], `{"prompt":"don't"}`);
+});
