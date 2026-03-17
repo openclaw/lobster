@@ -9,10 +9,10 @@ function splitPipes(input) {
 
   for (let i = 0; i < input.length; i++) {
     const ch = input[i];
+    const next = input[i + 1];
 
     if (quote) {
       if (ch === '\\') {
-        const next = input[i + 1];
         if (next) {
           current += ch + next;
           i++;
@@ -23,6 +23,12 @@ function splitPipes(input) {
       if (ch === quote) {
         quote = null;
       }
+      continue;
+    }
+
+    if (ch === '\\' && next && (next === "'" || next === '"' || next === '\\' || next === '|')) {
+      current += ch + next;
+      i++;
       continue;
     }
 
@@ -58,11 +64,15 @@ function tokenizeCommand(input) {
 
   for (let i = 0; i < input.length; i++) {
     const ch = input[i];
+    const next = input[i + 1];
 
     if (quote) {
       if (ch === '\\') {
-        const next = input[i + 1];
-        if (next) {
+        if (
+          next &&
+          ((quote === "'" && (next === "'" || next === '\\')) ||
+            (quote === '"' && (next === '"' || next === '\\')))
+        ) {
           current += next;
           i++;
           continue;
@@ -73,6 +83,12 @@ function tokenizeCommand(input) {
         continue;
       }
       current += ch;
+      continue;
+    }
+
+    if (ch === '\\' && next && (next === "'" || next === '"' || next === '\\')) {
+      current += next;
+      i++;
       continue;
     }
 
