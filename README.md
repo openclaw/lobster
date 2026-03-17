@@ -233,6 +233,33 @@ Built-in providers today:
 
 `llm_task.invoke` remains available as a backward-compatible alias for the OpenClaw provider.
 
+### Example: shell output into an LLM step
+
+When you need to collect data with regular shell tools and summarize it with an LLM,
+keep the shell work in `run:` and feed its output forward with `stdin:`.
+
+```yaml
+name: daily-standup
+steps:
+  - id: list-tickets
+    run: >
+      jira issues search "..." --status Todo |
+      jq -s '[.[][] | {id: .identifier, title, status: .state.name}]'
+
+  - id: summarize
+    pipeline: >
+      llm.invoke --provider openclaw --prompt "Summarize the top 10 most urgent tickets for the daily standup."
+    stdin: $list-tickets.stdout
+```
+
+This avoids temp files and nested quoting.
+
+Notes:
+
+- Prefer `pipeline:` for native Lobster commands like `llm.invoke`.
+- Use `stdin: $prevStep.stdout` or `stdin: $prevStep.json` to pass data between steps.
+- If you are following older OpenClaw examples, `llm_task.invoke` still works as an alias here.
+
 ## Calling OpenClaw tools from workflows
 
 Shell `run:` steps execute in your system shell, so OpenClaw tool calls there must be real executables.
@@ -243,6 +270,9 @@ If you install Lobster via npm/pnpm, it installs a small shim executable named:
 - `clawd.invoke` (alias)
 
 These shims forward to the Lobster pipeline command of the same name.
+
+Do not wrap them in another nested `lobster '...'` shell invocation inside a workflow file.
+Call the shim directly from `run:` instead.
 
 ### Example: invoke llm-task
 
