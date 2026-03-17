@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -10,9 +10,10 @@ const __dirname = dirname(__filename);
 async function load() {
   const distEntry = join(__dirname, "../dist/src/cli.js");
   if (existsSync(distEntry)) {
-    return import(distEntry);
+    return import(pathToFileURL(distEntry).href);
   }
-  return import(join(__dirname, "../src/cli.js"));
+  const srcEntry = join(__dirname, "../src/cli.js");
+  return import(pathToFileURL(srcEntry).href);
 }
 
 const mod = await load();

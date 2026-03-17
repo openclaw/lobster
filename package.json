@@ -23,8 +23,8 @@
   },
   "main": "./dist/src/sdk/index.js",
   "scripts": {
-    "clean": "rm -rf dist",
-    "build": "pnpm clean && tsc -p tsconfig.json",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "pnpm clean && pnpm exec tsc -p tsconfig.json",
     "prepack": "pnpm build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "oxlint --tsconfig tsconfig.json src test",
