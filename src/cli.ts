@@ -5,15 +5,20 @@ import { encodeToken } from './token.js';
 import { decodeResumeToken, parseResumeArgs } from './resume.js';
 import { runWorkflowFile } from './workflows/file.js';
 import { randomUUID } from 'node:crypto';
+import { Ajv } from 'ajv';
 import { deleteStateJson, readStateJson, writeStateJson } from './state/store.js';
 
 type PipelineResumeState = {
   pipeline: Array<{ name: string; args: Record<string, unknown>; raw: string }>;
   resumeAtIndex: number;
   items: unknown[];
+  haltType?: 'approval_request' | 'input_request';
+  inputSchema?: unknown;
   prompt?: string;
   createdAt: string;
 };
+
+const pipelineInputAjv = new Ajv({ allErrors: false, strict: false });
 
 export async function runCli(argv) {
   const registry = createDefaultRegistry();
@@ -108,6 +113,18 @@ async function handleRun({ argv, registry }) {
             status: 'needs_approval',
             output: [],
             requiresApproval: output.requiresApproval ?? null,
+            requiresInput: null,
+          });
+          return;
+        }
+
+        if (output.status === 'needs_input') {
+          writeToolEnvelope({
+            ok: true,
+            status: 'needs_input',
+            output: [],
+            requiresApproval: null,
+            requiresInput: output.requiresInput ?? null,
           });
           return;
         }
@@ -117,6 +134,7 @@ async function handleRun({ argv, registry }) {
           status: 'ok',
           output: output.output,
           requiresApproval: null,
+          requiresInput: null,
         });
         return;
       }
@@ -167,15 +185,16 @@ async function handleRun({ argv, registry }) {
     });
 
     if (normalizedMode === 'tool') {
-      const approval = output.halted && output.items.length === 1 && output.items[0]?.type === 'approval_request'
-        ? output.items[0]
-        : null;
+      const halted = output.halted && output.items.length === 1 ? output.items[0] : null;
+      const approval = halted?.type === 'approval_request' ? halted : null;
+      const inputRequest = halted?.type === 'input_request' ? halted : null;
 
       if (approval) {
         const stateKey = await savePipelineResumeState(process.env, {
           pipeline,
           resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
           items: approval.items,
+          haltType: 'approval_request',
           prompt: approval.prompt,
           createdAt: new Date().toISOString(),
         });
@@ -195,6 +214,42 @@ async function handleRun({ argv, registry }) {
             ...approval,
             resumeToken,
           },
+          requiresInput: null,
+        });
+        return;
+      }
+
+      if (inputRequest) {
+        const stateKey = await savePipelineResumeState(process.env, {
+          pipeline,
+          resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
+          items: inputRequest.items ?? [],
+          haltType: 'input_request',
+          inputSchema: inputRequest.responseSchema,
+          prompt: inputRequest.prompt,
+          createdAt: new Date().toISOString(),
+        });
+
+        const resumeToken = encodeToken({
+          protocolVersion: 1,
+          v: 1,
+          kind: 'pipeline-resume',
+          stateKey,
+        });
+
+        writeToolEnvelope({
+          ok: true,
+          status: 'needs_input',
+          output: [],
+          requiresApproval: null,
+          requiresInput: {
+            type: 'input_request',
+            prompt: inputRequest.prompt,
+            responseSchema: inputRequest.responseSchema,
+            defaults: inputRequest.defaults,
+            subject: inputRequest.subject,
+            resumeToken,
+          },
         });
         return;
       }
@@ -204,6 +259,7 @@ async function handleRun({ argv, registry }) {
         status: 'ok',
         output: output.items,
         requiresApproval: null,
+        requiresInput: null,
       });
       return;
     }
@@ -313,11 +369,13 @@ async function resolveWorkflowFile(candidate) {
 
 async function handleResume({ argv, registry }) {
   const mode = 'tool';
-  let approved: boolean;
+  let approved: boolean | undefined;
+  let response: unknown = undefined;
   let payload: any;
   try {
     const parsed = parseResumeArgs(argv);
     approved = parsed.approved;
+    response = parsed.response;
     payload = decodeResumeToken(parsed.token);
   } catch (err) {
     writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: err?.message ?? String(err) } });
@@ -325,18 +383,15 @@ async function handleResume({ argv, registry }) {
     return;
   }
 
-  if (!approved) {
-    if (payload.kind === 'workflow-file' && payload.stateKey) {
-      await deleteStateJson({ env: process.env, key: payload.stateKey });
-    }
-    if (payload.kind === 'pipeline-resume' && payload.stateKey) {
-      await deleteStateJson({ env: process.env, key: payload.stateKey });
-    }
-    writeToolEnvelope({ ok: true, status: 'cancelled', output: [], requiresApproval: null });
-    return;
-  }
-
   if (payload.kind === 'workflow-file') {
+    if (approved === false) {
+      if (payload.stateKey) {
+        await deleteStateJson({ env: process.env, key: payload.stateKey });
+      }
+      writeToolEnvelope({ ok: true, status: 'cancelled', output: [], requiresApproval: null, requiresInput: null });
+      return;
+    }
+
     try {
       const output = await runWorkflowFile({
         filePath: payload.filePath,
@@ -349,7 +404,8 @@ async function handleResume({ argv, registry }) {
           registry,
         },
         resume: payload,
-        approved: true,
+        approved,
+        response,
       });
 
       if (output.status === 'needs_approval') {
@@ -358,11 +414,29 @@ async function handleResume({ argv, registry }) {
           status: 'needs_approval',
           output: [],
           requiresApproval: output.requiresApproval ?? null,
+          requiresInput: null,
         });
         return;
       }
 
-      writeToolEnvelope({ ok: true, status: 'ok', output: output.output, requiresApproval: null });
+      if (output.status === 'needs_input') {
+        writeToolEnvelope({
+          ok: true,
+          status: 'needs_input',
+          output: [],
+          requiresApproval: null,
+          requiresInput: output.requiresInput ?? null,
+        });
+        return;
+      }
+
+      writeToolEnvelope({
+        ok: true,
+        status: 'ok',
+        output: output.output,
+        requiresApproval: null,
+        requiresInput: null,
+      });
       return;
     } catch (err) {
       writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
@@ -370,6 +444,7 @@ async function handleResume({ argv, registry }) {
       return;
     }
   }
+
   const previousStateKey = payload.stateKey;
   let resumeState: PipelineResumeState;
   try {
@@ -379,8 +454,86 @@ async function handleResume({ argv, registry }) {
     process.exitCode = 1;
     return;
   }
+
+  if (resumeState.haltType === 'approval_request') {
+    if (response !== undefined) {
+      writeToolEnvelope({
+        ok: false,
+        error: { type: 'parse_error', message: 'pipeline approval resumes require --approve yes|no' },
+      });
+      process.exitCode = 2;
+      return;
+    }
+    if (typeof approved !== 'boolean') {
+      writeToolEnvelope({
+        ok: false,
+        error: { type: 'parse_error', message: 'pipeline approval resumes require --approve yes|no' },
+      });
+      process.exitCode = 2;
+      return;
+    }
+    if (approved === false) {
+      await deleteStateJson({ env: process.env, key: previousStateKey });
+      writeToolEnvelope({ ok: true, status: 'cancelled', output: [], requiresApproval: null, requiresInput: null });
+      return;
+    }
+  }
+
+  if (resumeState.haltType === 'input_request') {
+    if (approved !== undefined) {
+      writeToolEnvelope({
+        ok: false,
+        error: { type: 'parse_error', message: 'pipeline input resumes require --response-json <json>' },
+      });
+      process.exitCode = 2;
+      return;
+    }
+    if (response === undefined) {
+      writeToolEnvelope({
+        ok: false,
+        error: { type: 'parse_error', message: 'pipeline input resumes require --response-json <json>' },
+      });
+      process.exitCode = 2;
+      return;
+    }
+    try {
+      validatePipelineInputResponse(resumeState.inputSchema, response);
+    } catch (err) {
+      writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: err?.message ?? String(err) } });
+      process.exitCode = 2;
+      return;
+    }
+  }
+
+  if (!resumeState.haltType) {
+    if (response !== undefined) {
+      writeToolEnvelope({
+        ok: false,
+        error: { type: 'parse_error', message: 'legacy pipeline resumes require --approve yes|no' },
+      });
+      process.exitCode = 2;
+      return;
+    }
+    if (typeof approved !== 'boolean') {
+      writeToolEnvelope({
+        ok: false,
+        error: { type: 'parse_error', message: 'legacy pipeline resumes require --approve yes|no' },
+      });
+      process.exitCode = 2;
+      return;
+    }
+    if (approved === false) {
+      await deleteStateJson({ env: process.env, key: previousStateKey });
+      writeToolEnvelope({ ok: true, status: 'cancelled', output: [], requiresApproval: null, requiresInput: null });
+      return;
+    }
+  }
+
   const remaining = resumeState.pipeline.slice(resumeState.resumeAtIndex);
-  const input = streamFromItems(resumeState.items);
+  const inputItems = resumeState.haltType === 'input_request'
+    ? [response]
+    : resumeState.items;
+  const input = streamFromItems(inputItems);
 
   try {
     const output = await runPipeline({
@@ -394,15 +547,16 @@ async function handleResume({ argv, registry }) {
       input,
     });
 
-    const approval = output.halted && output.items.length === 1 && output.items[0]?.type === 'approval_request'
-      ? output.items[0]
-      : null;
+    const halted3 = output.halted && output.items.length === 1 ? output.items[0] : null;
+    const approval = halted3?.type === 'approval_request' ? halted3 : null;
+    const inputRequest = halted3?.type === 'input_request' ? halted3 : null;
 
     if (approval) {
       const nextStateKey = await savePipelineResumeState(process.env, {
         pipeline: remaining,
         resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
         items: approval.items,
+        haltType: 'approval_request',
         prompt: approval.prompt,
         createdAt: new Date().toISOString(),
       });
@@ -420,12 +574,55 @@ async function handleResume({ argv, registry }) {
         status: 'needs_approval',
         output: [],
         requiresApproval: { ...approval, resumeToken },
+        requiresInput: null,
+      });
+      return;
+    }
+
+    if (inputRequest) {
+      const nextStateKey = await savePipelineResumeState(process.env, {
+        pipeline: remaining,
+        resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
+        items: inputRequest.items ?? [],
+        haltType: 'input_request',
+        inputSchema: inputRequest.responseSchema,
+        prompt: inputRequest.prompt,
+        createdAt: new Date().toISOString(),
+      });
+      await deleteStateJson({ env: process.env, key: previousStateKey });
+
+      const resumeToken = encodeToken({
+        protocolVersion: 1,
+        v: 1,
+        kind: 'pipeline-resume',
+        stateKey: nextStateKey,
+      });
+
+      writeToolEnvelope({
+        ok: true,
+        status: 'needs_input',
+        output: [],
+        requiresApproval: null,
+        requiresInput: {
+          type: 'input_request',
+          prompt: inputRequest.prompt,
+          responseSchema: inputRequest.responseSchema,
+          defaults: inputRequest.defaults,
+          subject: inputRequest.subject,
+          resumeToken,
+        },
       });
       return;
     }
 
     await deleteStateJson({ env: process.env, key: previousStateKey });
-    writeToolEnvelope({ ok: true, status: 'ok', output: output.items, requiresApproval: null });
+    writeToolEnvelope({
+      ok: true,
+      status: 'ok',
+      output: output.items,
+      requiresApproval: null,
+      requiresInput: null,
+    });
   } catch (err) {
     writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
     process.exitCode = 1;
@@ -453,7 +650,23 @@ async function loadPipelineResumeState(env: Record<string, string | undefined>, 
   if (!Array.isArray(data.pipeline)) throw new Error('Invalid pipeline resume state');
   if (typeof data.resumeAtIndex !== 'number') throw new Error('Invalid pipeline resume state');
   if (!Array.isArray(data.items)) throw new Error('Invalid pipeline resume state');
+  if (data.haltType !== undefined && !['approval_request', 'input_request'].includes(data.haltType)) {
+    throw new Error('Invalid pipeline resume state');
+  }
   return data as PipelineResumeState;
+}
+
+function validatePipelineInputResponse(schema: unknown, response: unknown) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+    return;
+  }
+  const validator = pipelineInputAjv.compile(schema as object);
+  const ok = validator(response);
+  if (ok) return;
+  const first = validator.errors?.[0];
+  const pathValue = first?.instancePath || '/';
+  const reason = first?.message ? ` ${first.message}` : '';
+  throw new Error(`pipeline input response failed schema validation at ${pathValue}:${reason}`);
 }
 
 async function readVersion() {
@@ -507,6 +720,7 @@ async function handleDoctor({ argv, registry }) {
       notes: argv.length ? argv : undefined,
     }],
     requiresApproval: null,
+    requiresInput: null,
   });
 }
 
@@ -527,6 +741,7 @@ function helpText() {
     `  lobster run path/to/workflow.lobster\n` +
     `  lobster run --file path/to/workflow.lobster --args-json '{...}'\n` +
     `  lobster resume --token <token> --approve yes|no\n` +
+    `  lobster resume --token <token> --response-json '{...}'\n` +
     `  lobster doctor\n` +
     `  lobster version\n` +
     `  lobster help <command>\n\n` +
@@ -537,5 +752,5 @@ function helpText() {
     `  lobster 'exec --json "echo [1,2,3]" | json'\n` +
     `  lobster run --mode tool 'exec --json "echo [1]" | approve --prompt "ok?"'\n\n` +
     `Commands:\n` +
-    `  exec, head, json, pick, table, where, approve, openclaw.invoke, llm.invoke, llm_task.invoke, state.get, state.set, diff.last, commands.list, workflows.list, workflows.run\n`;
+    `  exec, head, json, pick, table, where, approve, ask, openclaw.invoke, llm.invoke, llm_task.invoke, state.get, state.set, diff.last, commands.list, workflows.list, workflows.run\n`;
 }

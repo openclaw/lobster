@@ -9,7 +9,7 @@ export type PipelineResumePayload = {
 };
 
 export function parseResumeArgs(argv) {
-  const args = { decision: null, token: null };
+  const args = { decision: null, token: null, responseJson: null };
 
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -35,15 +35,36 @@ export function parseResumeArgs(argv) {
       args.decision = tok.slice('--decision='.length);
       continue;
     }
+    if (tok === '--response-json') {
+      args.responseJson = argv[i + 1];
+      i++;
+      continue;
+    }
+    if (tok.startsWith('--response-json=')) {
+      args.responseJson = tok.slice('--response-json='.length);
+      continue;
+    }
   }
 
   if (!args.token) throw new Error('resume requires --token');
-  if (!args.decision) throw new Error('resume requires --approve yes|no');
+  if (args.decision && args.responseJson) {
+    throw new Error('resume accepts either --approve or --response-json');
+  }
+  if (!args.decision && !args.responseJson) {
+    throw new Error('resume requires --approve yes|no or --response-json');
+  }
 
-  const decision = String(args.decision).toLowerCase();
-  if (!['yes', 'y', 'no', 'n'].includes(decision)) throw new Error('resume --approve must be yes or no');
+  if (args.decision) {
+    const decision = String(args.decision).toLowerCase();
+    if (!['yes', 'y', 'no', 'n'].includes(decision)) throw new Error('resume --approve must be yes or no');
+    return { token: String(args.token), approved: decision === 'yes' || decision === 'y' };
+  }
 
-  return { token: String(args.token), approved: decision === 'yes' || decision === 'y' };
+  try {
+    return { token: String(args.token), response: JSON.parse(String(args.responseJson)) };
+  } catch {
+    throw new Error('resume --response-json must be valid JSON');
+  }
 }
 
 export function decodeResumeToken(token) {

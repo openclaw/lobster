@@ -1,6 +1,7 @@
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { Ajv } from 'ajv';
 
 import { randomUUID } from 'node:crypto';
 import { PassThrough } from 'node:stream';
@@ -30,8 +31,14 @@ export type WorkflowStep = {
   cwd?: string;
   stdin?: unknown;
   approval?: WorkflowApproval;
+  input?: WorkflowInputRequest;
   condition?: unknown;
   when?: unknown;
+  retry?: number;
+  retry_delay?: string;
+  on_error?: 'fail' | 'skip' | string;
+  next?: string;
+  max_iterations?: number;
 };
 
 export type WorkflowApproval =
@@ -44,22 +51,40 @@ export type WorkflowApproval =
     preview?: string;
   };
 
+export type WorkflowInputRequest = {
+  prompt: string;
+  responseSchema?: unknown;
+  defaults?: unknown;
+};
+
 export type WorkflowStepResult = {
   id: string;
   stdout?: string;
   json?: unknown;
   approved?: boolean;
+  subject?: unknown;
+  response?: unknown;
+  failed?: boolean;
+  error?: string;
   skipped?: boolean;
 };
 
 export type WorkflowRunResult = {
-  status: 'ok' | 'needs_approval' | 'cancelled';
+  status: 'ok' | 'needs_approval' | 'needs_input' | 'cancelled';
   output: unknown[];
   requiresApproval?: {
     type: 'approval_request';
     prompt: string;
     items: unknown[];
     preview?: string;
+    resumeToken?: string;
+  };
+  requiresInput?: {
+    type: 'input_request';
+    prompt: string;
+    responseSchema: unknown;
+    defaults?: unknown;
+    subject: unknown;
     resumeToken?: string;
   };
 };
@@ -88,6 +113,10 @@ export type WorkflowResumePayload = {
   steps?: Record<string, WorkflowStepResult>;
   args?: Record<string, unknown>;
   approvalStepId?: string;
+  inputStepId?: string;
+  inputSchema?: unknown;
+  inputSubject?: unknown;
+  iterationCounts?: Record<string, number>;
 };
 
 type WorkflowResumeState = {
@@ -96,6 +125,10 @@ type WorkflowResumeState = {
   steps: Record<string, WorkflowStepResult>;
   args: Record<string, unknown>;
   approvalStepId?: string;
+  inputStepId?: string;
+  inputSchema?: unknown;
+  inputSubject?: unknown;
+  iterationCounts?: Record<string, number>;
   createdAt: string;
 };
 
@@ -124,11 +157,17 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     const shellCommand = typeof step.run === 'string' ? step.run : step.command;
     const pipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
     const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline));
-    if (executionCount === 0 && !isApprovalStep(step.approval)) {
-      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, or approval`);
+    if (executionCount === 0 && !isApprovalStep(step.approval) && !isInputStep(step.input)) {
+      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, approval, or input`);
     }
     if (executionCount > 1) {
       throw new Error(`Workflow step ${step.id} can only define one of run, command, or pipeline`);
+    }
+    if (executionCount > 0 && isInputStep(step.input)) {
+      throw new Error(`Workflow step ${step.id} input steps cannot define run, command, or pipeline`);
+    }
+    if (isApprovalStep(step.approval) && isInputStep(step.input)) {
+      throw new Error(`Workflow step ${step.id} cannot define both approval and input`);
     }
     if (step.run !== undefined && typeof step.run !== 'string') {
       throw new Error(`Workflow step ${step.id} run must be a string`);
@@ -139,10 +178,58 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (step.pipeline !== undefined && typeof step.pipeline !== 'string') {
       throw new Error(`Workflow step ${step.id} pipeline must be a string`);
     }
+    if (step.input !== undefined && !isInputStep(step.input)) {
+      throw new Error(`Workflow step ${step.id} input must be an object`);
+    }
+    if (step.input && typeof step.input.prompt !== 'string') {
+      throw new Error(`Workflow step ${step.id} input.prompt must be a string`);
+    }
+    if (step.input && (!step.input.responseSchema || typeof step.input.responseSchema !== 'object')) {
+      throw new Error(`Workflow step ${step.id} input.responseSchema must be an object`);
+    }
+    if (step.retry !== undefined && (!Number.isInteger(step.retry) || step.retry < 0)) {
+      throw new Error(`Workflow step ${step.id} retry must be a non-negative integer`);
+    }
+    if (step.retry_delay !== undefined && !isValidDurationString(step.retry_delay)) {
+      throw new Error(`Workflow step ${step.id} retry_delay must be a duration like 1s or 500ms`);
+    }
+    if (step.max_iterations !== undefined && (!Number.isInteger(step.max_iterations) || step.max_iterations <= 0)) {
+      throw new Error(`Workflow step ${step.id} max_iterations must be a positive integer`);
+    }
+    if (step.on_error !== undefined && typeof step.on_error !== 'string') {
+      throw new Error(`Workflow step ${step.id} on_error must be a string`);
+    }
+    if (step.next !== undefined && typeof step.next !== 'string') {
+      throw new Error(`Workflow step ${step.id} next must be a string`);
+    }
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
     }
     seen.add(step.id);
+  }
+
+  for (const step of steps) {
+    if (step.next) {
+      const target = step.next.trim();
+      if (!target) {
+        throw new Error(`Workflow step ${step.id} next cannot be empty`);
+      }
+      if (!seen.has(target)) {
+        throw new Error(`Workflow step ${step.id} next target not found: ${target}`);
+      }
+      if (isApprovalStep(step.approval) || isInputStep(step.input)) {
+        throw new Error(`Workflow step ${step.id} cannot use next with approval/input steps`);
+      }
+    }
+    if (typeof step.on_error === 'string') {
+      const target = step.on_error.trim();
+      if (!target) {
+        throw new Error(`Workflow step ${step.id} on_error cannot be empty`);
+      }
+      if (!['fail', 'skip'].includes(target) && !seen.has(target)) {
+        throw new Error(`Workflow step ${step.id} on_error target not found: ${target}`);
+      }
+    }
   }
 
   return parsed as WorkflowFile;
@@ -174,12 +261,14 @@ export async function runWorkflowFile({
   ctx,
   resume,
   approved,
+  response,
 }: {
   filePath?: string;
   args?: Record<string, unknown>;
   ctx: RunContext;
   resume?: WorkflowResumePayload;
   approved?: boolean;
+  response?: unknown;
 }): Promise<WorkflowRunResult> {
   const consumedResumeStateKey = resume?.stateKey && typeof resume.stateKey === 'string'
     ? resume.stateKey
@@ -194,31 +283,143 @@ export async function runWorkflowFile({
   const workflow = await loadWorkflowFile(resolvedFilePath);
   const resolvedArgs = resolveWorkflowArgs(workflow.args, args ?? resumeState?.args);
   const steps = workflow.steps;
+  const stepIndexById = new Map(steps.map((step, idx) => [step.id, idx]));
   const results: Record<string, WorkflowStepResult> = resumeState?.steps
     ? cloneResults(resumeState.steps)
     : {};
+  const iterationCounts: Record<string, number> = resumeState?.iterationCounts
+    ? { ...resumeState.iterationCounts }
+    : {};
   const startIndex = resumeState?.resumeAtIndex ?? 0;
 
-  if (resumeState?.approvalStepId && approved === false) {
-    if (consumedResumeStateKey) {
-      await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+  if (resumeState?.approvalStepId) {
+    if (typeof approved !== 'boolean') {
+      throw new Error('Workflow resume requires --approve yes|no for approval requests');
     }
-    return { status: 'cancelled', output: [] };
-  }
-
-  if (resumeState?.approvalStepId && typeof approved === 'boolean') {
+    if (approved === false) {
+      if (consumedResumeStateKey) {
+        await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+      }
+      return { status: 'cancelled', output: [] };
+    }
     const previous = results[resumeState.approvalStepId] ?? { id: resumeState.approvalStepId };
     previous.approved = approved;
     results[resumeState.approvalStepId] = previous;
   }
 
-  let lastStepId: string | null = findLastCompletedStepId(steps, results);
+  if (resumeState?.inputStepId) {
+    if (response === undefined) {
+      throw new Error('Workflow resume requires --response-json for input requests');
+    }
+    const inputStep = steps[stepIndexById.get(resumeState.inputStepId) ?? -1];
+    if (!inputStep || !isInputStep(inputStep.input)) {
+      throw new Error(`Invalid input step in resume state: ${resumeState.inputStepId}`);
+    }
+    validateInputResponse({
+      schema: resumeState.inputSchema ?? inputStep.input.responseSchema,
+      response,
+      stepId: inputStep.id,
+    });
+    const previous = results[resumeState.inputStepId] ?? { id: resumeState.inputStepId };
+    previous.subject = resumeState.inputSubject ?? null;
+    previous.response = response;
+    delete previous.skipped;
+    delete previous.failed;
+    delete previous.error;
+    results[resumeState.inputStepId] = previous;
+  }
 
-  for (let idx = startIndex; idx < steps.length; idx++) {
+  let lastStepId: string | null =
+    resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
+
+  let idx = startIndex;
+  while (idx < steps.length) {
     const step = steps[idx];
 
     if (!evaluateCondition(step.when ?? step.condition, results)) {
       results[step.id] = { id: step.id, skipped: true };
+      idx += 1;
+      continue;
+    }
+
+    const maxIterations = resolveMaxIterations(step.max_iterations);
+    const nextIteration = (iterationCounts[step.id] ?? 0) + 1;
+    iterationCounts[step.id] = nextIteration;
+    if (nextIteration > maxIterations) {
+      throw new Error(
+        `Workflow step ${step.id} exceeded max_iterations (${maxIterations}). ` +
+        `This usually indicates a loop that never exits.`,
+      );
+    }
+
+    if (isInputStep(step.input)) {
+      const subject = resolveInputSubject({
+        step,
+        args: resolvedArgs,
+        results,
+        lastStepId,
+      });
+      const inputRequest = buildNeedsInputRequest({
+        stepId: step.id,
+        prompt: step.input.prompt,
+        responseSchema: step.input.responseSchema,
+        defaults: step.input.defaults,
+        subject,
+        maxEnvelopeBytes: resolveToolEnvelopeMaxBytes(ctx.env),
+      });
+
+      if (ctx.mode === 'tool' || !isInteractive(ctx.stdin)) {
+        const stateKey = await saveWorkflowResumeState(ctx.env, {
+          filePath: resolvedFilePath,
+          resumeAtIndex: idx + 1,
+          steps: results,
+          args: resolvedArgs,
+          inputStepId: step.id,
+          inputSchema: step.input.responseSchema,
+          inputSubject: subject,
+          iterationCounts,
+          createdAt: new Date().toISOString(),
+        });
+
+        if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
+          await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+        }
+
+        const resumeToken = encodeToken({
+          protocolVersion: 1,
+          v: 1,
+          kind: 'workflow-file',
+          stateKey,
+        } satisfies WorkflowResumePayload);
+
+        return {
+          status: 'needs_input',
+          output: [],
+          requiresInput: {
+            ...inputRequest,
+            resumeToken,
+          },
+        };
+      }
+
+      ctx.stdout.write(`${step.input.prompt}\n`);
+      ctx.stdout.write('Enter JSON response: ');
+      const raw = await readLineFromStream(ctx.stdin, {
+        timeoutMs: parseApprovalTimeoutMs(ctx.env),
+      });
+      const parsed = parseResponseJson(String(raw ?? '').trim());
+      validateInputResponse({
+        schema: step.input.responseSchema,
+        response: parsed,
+        stepId: step.id,
+      });
+      results[step.id] = {
+        id: step.id,
+        subject,
+        response: parsed,
+      };
+      lastStepId = step.id;
+      idx += 1;
       continue;
     }
 
@@ -226,32 +427,68 @@ export async function runWorkflowFile({
     const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
     const execution = getStepExecution(step);
 
-    let result: WorkflowStepResult;
-    if (execution.kind === 'shell') {
-      const command = resolveTemplate(execution.value, resolvedArgs, results);
-      const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
-      const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: ctx.signal });
-      result = { id: step.id, stdout, json: parseJson(stdout) };
-    } else if (execution.kind === 'pipeline') {
-      if (!ctx.registry) {
-        throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
-      }
-      const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
-      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-      result = await runPipelineStep({
-        stepId: step.id,
-        pipelineText,
-        inputValue,
-        ctx,
-        env,
-        cwd,
+    let result: WorkflowStepResult | null = null;
+    let failure: unknown = null;
+    try {
+      result = await runWithRetry({
+        retries: step.retry ?? 0,
+        retryDelayMs: parseRetryDelayMs(step.retry_delay),
+        signal: ctx.signal,
+        run: async () => {
+          if (execution.kind === 'shell') {
+            const command = resolveTemplate(execution.value, resolvedArgs, results);
+            const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
+            const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: ctx.signal });
+            return { id: step.id, stdout, json: parseJson(stdout) };
+          }
+          if (execution.kind === 'pipeline') {
+            if (!ctx.registry) {
+              throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+            }
+            const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
+            const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+            return await runPipelineStep({
+              stepId: step.id,
+              pipelineText,
+              inputValue,
+              ctx,
+              env,
+              cwd,
+            });
+          }
+          const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+          return createSyntheticStepResult(step.id, inputValue);
+        },
       });
-    } else {
-      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-      result = createSyntheticStepResult(step.id, inputValue);
+    } catch (err) {
+      failure = err;
     }
 
-    results[step.id] = result;
+    if (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure);
+      results[step.id] = {
+        id: step.id,
+        failed: true,
+        error: message,
+      };
+      lastStepId = step.id;
+      const onErrorTarget = normalizeOnError(step.on_error);
+      if (onErrorTarget === 'fail') {
+        throw failure;
+      }
+      if (onErrorTarget === 'skip') {
+        idx += 1;
+        continue;
+      }
+      const jumpIndex = stepIndexById.get(onErrorTarget);
+      if (jumpIndex === undefined) {
+        throw new Error(`Workflow step ${step.id} on_error target not found: ${onErrorTarget}`);
+      }
+      idx = jumpIndex;
+      continue;
+    }
+
+    results[step.id] = result!;
     lastStepId = step.id;
 
     if (isApprovalStep(step.approval)) {
@@ -264,6 +501,7 @@ export async function runWorkflowFile({
           steps: results,
           args: resolvedArgs,
           approvalStepId: step.id,
+          iterationCounts,
           createdAt: new Date().toISOString(),
         });
 
@@ -297,6 +535,16 @@ export async function runWorkflowFile({
       }
       results[step.id].approved = true;
     }
+
+    if (step.next) {
+      const jumpIndex = stepIndexById.get(step.next.trim());
+      if (jumpIndex === undefined) {
+        throw new Error(`Workflow step ${step.id} next target not found: ${step.next}`);
+      }
+      idx = jumpIndex;
+      continue;
+    }
+    idx += 1;
   }
 
   const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
@@ -428,34 +676,30 @@ function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
 }
 
 function resolveStepRefs(input: string, results: Record<string, WorkflowStepResult>) {
-  return input.replace(/\$([A-Za-z0-9_-]+)\.(stdout|json|approved)/g, (match, id, field) => {
-    const step = results[id];
-    if (!step) return match;
-    if (field === 'stdout') return step.stdout ?? '';
-    if (field === 'json') return step.json !== undefined ? JSON.stringify(step.json) : '';
-    if (field === 'approved') return step.approved === true ? 'true' : 'false';
-    return match;
+  return input.replace(/\$([A-Za-z0-9_-]+)\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)/g, (match, id, pathValue) => {
+    const refValue = getStepRefValue({ id, path: pathValue }, results, false);
+    if (refValue === undefined) return match;
+    return renderTemplateValue(refValue);
   });
 }
 
 function parseStepRef(value: string) {
-  const match = value.match(/^\$([A-Za-z0-9_-]+)\.(stdout|json)$/);
+  const match = value.match(/^\$([A-Za-z0-9_-]+)\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)$/);
   if (!match) return null;
-  return { id: match[1], field: match[2] as 'stdout' | 'json' };
+  return { id: match[1], path: match[2] };
 }
 
 function getStepRefValue(
-  ref: { id: string; field: 'stdout' | 'json' },
+  ref: { id: string; path: string },
   results: Record<string, WorkflowStepResult>,
   strict: boolean,
 ) {
   const step = results[ref.id];
   if (!step) {
-    if (strict) throw new Error(`Unknown step reference: ${ref.id}.${ref.field}`);
-    return '';
+    if (strict) throw new Error(`Unknown step reference: ${ref.id}.${ref.path}`);
+    return undefined;
   }
-  if (ref.field === 'stdout') return step.stdout ?? '';
-  return step.json;
+  return getValueByPath(step, ref.path);
 }
 
 function evaluateCondition(
@@ -469,14 +713,7 @@ function evaluateCondition(
   const trimmed = condition.trim();
   if (trimmed === 'true') return true;
   if (trimmed === 'false') return false;
-
-  const match = trimmed.match(/^\$([A-Za-z0-9_-]+)\.(approved|skipped)$/);
-  if (!match) throw new Error(`Unsupported condition: ${condition}`);
-
-  const step = results[match[1]];
-  if (!step) return false;
-
-  return match[2] === 'approved' ? step.approved === true : step.skipped === true;
+  return evaluateExpression(trimmed, results);
 }
 
 function isApprovalStep(approval: WorkflowStep['approval']) {
@@ -484,6 +721,10 @@ function isApprovalStep(approval: WorkflowStep['approval']) {
   if (typeof approval === 'string' && approval.trim().length > 0) return true;
   if (approval && typeof approval === 'object' && !Array.isArray(approval)) return true;
   return false;
+}
+
+function isInputStep(input: WorkflowStep['input']) {
+  return Boolean(input && typeof input === 'object' && !Array.isArray(input));
 }
 
 function extractApprovalRequest(step: WorkflowStep, result: WorkflowStepResult) {
@@ -572,6 +813,383 @@ function parseApprovalTimeoutMs(env: Record<string, string | undefined>) {
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) return 0;
   return Math.floor(value);
+}
+
+const inputResponseAjv = new Ajv({ allErrors: false, strict: false });
+const DURATION_PATTERN = /^(\d+)(ms|s|m|h)$/i;
+const DEFAULT_MAX_ITERATIONS = 20;
+const DEFAULT_RETRY_DELAY_MS = 1000;
+const MAX_NEEDS_INPUT_SUBJECT_BYTES = 192_000;
+const DEFAULT_TOOL_ENVELOPE_MAX_BYTES = 512_000;
+const RESUME_TOKEN_PLACEHOLDER = 'x'.repeat(220);
+
+function parseResponseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error('Invalid JSON passed to --response-json');
+  }
+}
+
+function validateInputResponse(params: {
+  schema: unknown;
+  response: unknown;
+  stepId: string;
+}) {
+  const validator = inputResponseAjv.compile(params.schema as object);
+  const ok = validator(params.response);
+  if (ok) return;
+  const first = validator.errors?.[0];
+  const pathValue = first?.instancePath || '/';
+  const reason = first?.message ? ` ${first.message}` : '';
+  throw new Error(
+    `Workflow input step ${params.stepId} response failed schema validation at ${pathValue}:${reason}`,
+  );
+}
+
+function resolveInputSubject(params: {
+  step: WorkflowStep;
+  args: Record<string, unknown>;
+  results: Record<string, WorkflowStepResult>;
+  lastStepId: string | null;
+}) {
+  if (params.step.stdin !== undefined) {
+    return resolveInputValue(params.step.stdin, params.args, params.results);
+  }
+  if (!params.lastStepId) return null;
+  const previous = params.results[params.lastStepId];
+  if (!previous) return null;
+  if (previous.json !== undefined) return previous.json;
+  if (previous.stdout !== undefined) return previous.stdout;
+  return null;
+}
+
+function maybeTruncateInputSubject(subject: unknown): unknown {
+  let serialized = '';
+  try {
+    serialized = JSON.stringify(subject ?? null);
+  } catch {
+    return {
+      truncated: true,
+      bytes: 0,
+      preview: '[unserializable subject]',
+    };
+  }
+  const byteLength = Buffer.byteLength(serialized, 'utf8');
+  if (byteLength <= MAX_NEEDS_INPUT_SUBJECT_BYTES) return subject;
+  const preview = serialized.slice(0, 2000);
+  return {
+    truncated: true,
+    bytes: byteLength,
+    preview,
+  };
+}
+
+function resolveToolEnvelopeMaxBytes(env: Record<string, string | undefined>) {
+  const raw = env?.LOBSTER_MAX_TOOL_ENVELOPE_BYTES;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1024) {
+    return DEFAULT_TOOL_ENVELOPE_MAX_BYTES;
+  }
+  return Math.floor(parsed);
+}
+
+function buildNeedsInputRequest(params: {
+  stepId: string;
+  prompt: string;
+  responseSchema: unknown;
+  defaults: unknown;
+  subject: unknown;
+  maxEnvelopeBytes: number;
+}) {
+  const base = {
+    type: 'input_request' as const,
+    prompt: params.prompt,
+    responseSchema: params.responseSchema,
+    ...(params.defaults !== undefined ? { defaults: params.defaults } : null),
+  };
+
+  let subject = params.subject;
+  let request = { ...base, subject };
+  if (fitsNeedsInputEnvelope(request, params.maxEnvelopeBytes)) {
+    return request;
+  }
+
+  subject = maybeTruncateInputSubject(subject);
+  request = { ...base, subject };
+  if (fitsNeedsInputEnvelope(request, params.maxEnvelopeBytes)) {
+    return request;
+  }
+
+  request = {
+    ...base,
+    subject: {
+      truncated: true,
+      bytes: estimateSerializedBytes(params.subject),
+      preview: '[subject omitted: envelope size limit]',
+    },
+  };
+  if (fitsNeedsInputEnvelope(request, params.maxEnvelopeBytes)) {
+    return request;
+  }
+
+  throw new Error(
+    `Workflow input step ${params.stepId} needs_input envelope exceeds ${params.maxEnvelopeBytes} bytes ` +
+    `even after subject truncation`,
+  );
+}
+
+function fitsNeedsInputEnvelope(
+  request: {
+    type: 'input_request';
+    prompt: string;
+    responseSchema: unknown;
+    defaults?: unknown;
+    subject: unknown;
+  },
+  maxEnvelopeBytes: number,
+) {
+  const envelope = {
+    protocolVersion: 1,
+    ok: true,
+    status: 'needs_input',
+    output: [],
+    requiresApproval: null,
+    requiresInput: {
+      ...request,
+      resumeToken: RESUME_TOKEN_PLACEHOLDER,
+    },
+  };
+  return estimateSerializedBytes(envelope) <= maxEnvelopeBytes;
+}
+
+function estimateSerializedBytes(value: unknown) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function isValidDurationString(value: string) {
+  return DURATION_PATTERN.test(value.trim());
+}
+
+function parseRetryDelayMs(value: unknown) {
+  if (value === undefined || value === null) return DEFAULT_RETRY_DELAY_MS;
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+  if (typeof value !== 'string') {
+    throw new Error('retry_delay must be a duration string like 1s');
+  }
+  const trimmed = value.trim();
+  const match = trimmed.match(DURATION_PATTERN);
+  if (!match) {
+    throw new Error(`Invalid retry_delay: ${value}`);
+  }
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  const multiplier = unit === 'ms' ? 1 : unit === 's' ? 1000 : unit === 'm' ? 60_000 : 3_600_000;
+  return amount * multiplier;
+}
+
+async function runWithRetry<T>(params: {
+  retries: number;
+  retryDelayMs: number;
+  signal?: AbortSignal;
+  run: () => Promise<T>;
+}): Promise<T> {
+  const retries = Number.isInteger(params.retries) && params.retries > 0 ? params.retries : 0;
+  const attempts = retries + 1;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await params.run();
+    } catch (err) {
+      lastError = err;
+      if (attempt >= attempts) {
+        throw err;
+      }
+      await sleepWithAbort(params.retryDelayMs, params.signal);
+    }
+  }
+  throw lastError ?? new Error('retry failed');
+}
+
+async function sleepWithAbort(ms: number, signal?: AbortSignal) {
+  const waitMs = Math.max(0, ms);
+  if (!waitMs) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, waitMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('Workflow aborted'));
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
+function normalizeOnError(value: WorkflowStep['on_error']) {
+  const raw = typeof value === 'string' ? value.trim() : 'fail';
+  if (!raw || raw === 'fail') return 'fail' as const;
+  if (raw === 'skip') return 'skip' as const;
+  return raw;
+}
+
+function resolveMaxIterations(value: WorkflowStep['max_iterations']) {
+  if (value === undefined || value === null) return DEFAULT_MAX_ITERATIONS;
+  return value;
+}
+
+function renderTemplateValue(value: unknown) {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function getValueByPath(value: unknown, pathValue: string) {
+  const fields = pathValue.split('.');
+  let current: unknown = value;
+  for (const field of fields) {
+    if (current === null || current === undefined) return undefined;
+    if (Array.isArray(current)) {
+      const idx = Number(field);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= current.length) return undefined;
+      current = current[idx];
+      continue;
+    }
+    if (typeof current !== 'object') return undefined;
+    current = (current as Record<string, unknown>)[field];
+  }
+  return current;
+}
+
+function evaluateExpression(expression: string, results: Record<string, WorkflowStepResult>) {
+  const hasAnd = containsConditionOperator(expression, '&&');
+  const hasOr = containsConditionOperator(expression, '||');
+  if (hasAnd && hasOr) {
+    throw new Error(`Unsupported condition: ${expression}`);
+  }
+  if (hasAnd) {
+    const parts = splitConditionByOperator(expression, '&&');
+    if (parts.length !== 2) throw new Error(`Unsupported condition: ${expression}`);
+    return evaluateAtom(parts[0], results) && evaluateAtom(parts[1], results);
+  }
+  if (hasOr) {
+    const parts = splitConditionByOperator(expression, '||');
+    if (parts.length !== 2) throw new Error(`Unsupported condition: ${expression}`);
+    return evaluateAtom(parts[0], results) || evaluateAtom(parts[1], results);
+  }
+  return evaluateAtom(expression, results);
+}
+
+function containsConditionOperator(input: string, op: '&&' | '||') {
+  return splitConditionByOperator(input, op).length > 1;
+}
+
+function splitConditionByOperator(input: string, op: '&&' | '||') {
+  const pieces: string[] = [];
+  let current = '';
+  let quote = false;
+  for (let idx = 0; idx < input.length; idx++) {
+    const ch = input[idx];
+    if (ch === '"' && !isEscapedQuote(input, idx)) {
+      quote = !quote;
+      current += ch;
+      continue;
+    }
+    if (!quote && input.slice(idx, idx + op.length) === op) {
+      pieces.push(current.trim());
+      current = '';
+      idx += op.length - 1;
+      continue;
+    }
+    current += ch;
+  }
+  pieces.push(current.trim());
+  return pieces.filter((piece) => piece.length > 0);
+}
+
+function isEscapedQuote(input: string, quoteIndex: number) {
+  let backslashes = 0;
+  for (let idx = quoteIndex - 1; idx >= 0 && input[idx] === '\\'; idx--) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function evaluateAtom(atomRaw: string, results: Record<string, WorkflowStepResult>): boolean {
+  const atom = atomRaw.trim();
+  if (!atom) throw new Error('Unsupported condition');
+  if (atom === 'true') return true;
+  if (atom === 'false') return false;
+  if (atom.startsWith('!')) {
+    return !evaluateAtom(atom.slice(1), results);
+  }
+
+  const comparison = parseComparison(atom);
+  if (comparison) {
+    const left = resolveConditionRef(comparison.ref, results);
+    if (left === undefined || left === null) return false;
+    const leftText = String(left);
+    return comparison.op === '==' ? leftText === comparison.literal : leftText !== comparison.literal;
+  }
+
+  const ref = parseStepRef(atom);
+  if (!ref) {
+    throw new Error(`Unsupported condition: ${atom}`);
+  }
+  const value = getStepRefValue(ref, results, false);
+  return Boolean(value);
+}
+
+function parseComparison(atom: string): { ref: { id: string; path: string }; op: '==' | '!='; literal: string } | null {
+  const match = atom.match(
+    /^(\$[A-Za-z0-9_-]+\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\s*(==|!=)\s*(.+)$/,
+  );
+  if (!match) return null;
+  const ref = parseStepRef(match[1]);
+  if (!ref) throw new Error(`Unsupported condition: ${atom}`);
+  return {
+    ref,
+    op: match[2] as '==' | '!=',
+    literal: parseConditionLiteral(match[3].trim()),
+  };
+}
+
+function parseConditionLiteral(input: string) {
+  if (input.startsWith('"')) {
+    if (!input.endsWith('"') || input.length < 2) {
+      throw new Error(`Invalid quoted literal in condition: ${input}`);
+    }
+    const body = input.slice(1, -1);
+    return body.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+  if (!/^[^\s&|"]+$/.test(input)) {
+    throw new Error(`Invalid literal in condition: ${input}`);
+  }
+  return input;
+}
+
+function resolveConditionRef(ref: { id: string; path: string }, results: Record<string, WorkflowStepResult>) {
+  return getStepRefValue(ref, results, false);
 }
 
 async function runShellCommand({
