@@ -19,17 +19,19 @@ Guidance for coding assistants operating in this repository.
 ## Approval And Resume
 
 - Treat `status: "needs_approval"` as a hard stop.
+- Treat `status: "needs_input"` as a hard stop.
 - Never auto-approve on behalf of a user.
-- Resume only after explicit user decision:
+- Resume only after explicit user decision or input:
   - `lobster resume --token <resumeToken> --approve yes|no`
+  - `lobster resume --token <resumeToken> --response-json '<json>'`
+  - `lobster resume --token <resumeToken> --cancel`
 
 ## Output Handling
 
-- Parse the tool envelope JSON fields: `ok`, `status`, `output`, `requiresApproval`, `error`.
+- Parse the tool envelope JSON fields: `ok`, `status`, `output`, `requiresApproval`, `requiresInput`, `error`.
 - On `ok: false`, surface the error and stop.
 
 ## Safety And Shell Usage
 
 - For workflow-file commands, prefer environment variables (`LOBSTER_ARG_*`) for untrusted or quoted values.
 - Avoid embedding unsafe user strings directly into shell command text.
-
