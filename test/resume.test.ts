@@ -81,6 +81,50 @@ test('resume cancellation cleans up pipeline resume state', async () => {
   assert.deepEqual(pipelineResumeFiles, []);
 });
 
+test('workflow approval resume reports cancelled status in CLI', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-resume-workflow-cancel-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'approve_step',
+            run: "node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?',items:[{id:1}]}}))\"",
+            approval: 'required',
+          },
+          {
+            id: 'publish',
+            run: "node -e \"process.stdout.write(JSON.stringify({ok:true}))\"",
+            when: '$approve_step.approved',
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const first = runCli(['run', '--mode', 'tool', filePath], { LOBSTER_STATE_DIR: stateDir });
+  assert.equal(first.status, 0);
+  const firstJson = JSON.parse(first.stdout);
+  assert.equal(firstJson.status, 'needs_approval');
+  assert.ok(firstJson.requiresApproval?.resumeToken);
+
+  const cancelled = runCli(
+    ['resume', '--token', firstJson.requiresApproval.resumeToken, '--approve', 'no'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(cancelled.status, 0);
+  const cancelledJson = JSON.parse(cancelled.stdout);
+  assert.equal(cancelledJson.status, 'cancelled');
+  assert.deepEqual(cancelledJson.output, []);
+});
+
 test('cli resume accepts --response-json for input requests', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-resume-input-'));
   const stateDir = path.join(tmpDir, 'state');
@@ -134,6 +178,199 @@ test('cli resume accepts --response-json for input requests', async () => {
   const resumedJson = JSON.parse(resumed.stdout);
   assert.equal(resumedJson.status, 'ok');
   assert.deepEqual(resumedJson.output, [{ text: 'hello' }]);
+});
+
+test('workflow needs_input schema mismatches return parse_error and keep token resumable', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-resume-workflow-schema-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Provide title',
+              responseSchema: { type: 'string' },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const first = runCli(['run', '--mode', 'tool', filePath], { LOBSTER_STATE_DIR: stateDir });
+  assert.equal(first.status, 0);
+  const firstJson = JSON.parse(first.stdout);
+  assert.equal(firstJson.status, 'needs_input');
+
+  const bad = runCli(
+    ['resume', '--token', firstJson.requiresInput.resumeToken, '--response-json', '{"not":"a string"}'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(bad.status, 2);
+  const badJson = JSON.parse(bad.stdout);
+  assert.equal(badJson.ok, false);
+  assert.equal(badJson.error?.type, 'parse_error');
+  assert.match(String(badJson.error?.message), /schema validation/i);
+
+  const good = runCli(
+    ['resume', '--token', firstJson.requiresInput.resumeToken, '--response-json', '"hello"'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(good.status, 0);
+  const goodJson = JSON.parse(good.stdout);
+  assert.equal(goodJson.status, 'ok');
+  assert.deepEqual(goodJson.output, ['hello']);
+});
+
+test('workflow needs_input tokens reject --approve and remain resumable with --response-json', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-resume-workflow-needs-input-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'object',
+                properties: { decision: { type: 'string', enum: ['approve', 'reject'] } },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const first = runCli(['run', '--mode', 'tool', filePath], { LOBSTER_STATE_DIR: stateDir });
+  assert.equal(first.status, 0);
+  const firstJson = JSON.parse(first.stdout);
+  assert.equal(firstJson.status, 'needs_input');
+
+  const bad = runCli(
+    ['resume', '--token', firstJson.requiresInput.resumeToken, '--approve', 'no'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(bad.status, 2);
+  const badJson = JSON.parse(bad.stdout);
+  assert.equal(badJson.ok, false);
+  assert.equal(badJson.error?.type, 'parse_error');
+  assert.match(String(badJson.error?.message), /requires --response-json/i);
+
+  const good = runCli(
+    ['resume', '--token', firstJson.requiresInput.resumeToken, '--response-json', '{"decision":"approve"}'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(good.status, 0);
+  const goodJson = JSON.parse(good.stdout);
+  assert.equal(goodJson.status, 'ok');
+  assert.deepEqual(goodJson.output, [{ decision: 'approve' }]);
+});
+
+test('workflow and pipeline needs_input tokens can be cancelled with --cancel', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-resume-cancel-input-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'object',
+                properties: { decision: { type: 'string' } },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const workflowFirst = runCli(['run', '--mode', 'tool', filePath], { LOBSTER_STATE_DIR: stateDir });
+  assert.equal(workflowFirst.status, 0);
+  const workflowFirstJson = JSON.parse(workflowFirst.stdout);
+  assert.equal(workflowFirstJson.status, 'needs_input');
+
+  const workflowCancelled = runCli(
+    ['resume', '--token', workflowFirstJson.requiresInput.resumeToken, '--cancel'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(workflowCancelled.status, 0);
+  const workflowCancelledJson = JSON.parse(workflowCancelled.stdout);
+  assert.equal(workflowCancelledJson.status, 'cancelled');
+
+  const pipeline =
+    "ask --prompt 'Decision?' --schema '{\"type\":\"object\",\"properties\":{\"decision\":{\"type\":\"string\"}},\"required\":[\"decision\"]}' | pick decision";
+  const pipelineFirst = runCli(['run', '--mode', 'tool', pipeline], { LOBSTER_STATE_DIR: stateDir });
+  assert.equal(pipelineFirst.status, 0);
+  const pipelineFirstJson = JSON.parse(pipelineFirst.stdout);
+  assert.equal(pipelineFirstJson.status, 'needs_input');
+
+  const pipelineCancelled = runCli(
+    ['resume', '--token', pipelineFirstJson.requiresInput.resumeToken, '--cancel'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(pipelineCancelled.status, 0);
+  const pipelineCancelledJson = JSON.parse(pipelineCancelled.stdout);
+  assert.equal(pipelineCancelledJson.status, 'cancelled');
+});
+
+test('resume --cancel false does not trigger cancellation', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-resume-cancel-false-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const pipeline =
+    "ask --prompt 'Decision?' --schema '{\"type\":\"object\",\"properties\":{\"decision\":{\"type\":\"string\"}},\"required\":[\"decision\"]}' | pick decision";
+
+  const first = runCli(['run', '--mode', 'tool', pipeline], { LOBSTER_STATE_DIR: stateDir });
+  assert.equal(first.status, 0);
+  const firstJson = JSON.parse(first.stdout);
+  assert.equal(firstJson.status, 'needs_input');
+
+  const notCancelled = runCli(
+    ['resume', '--token', firstJson.requiresInput.resumeToken, '--cancel', 'false'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(notCancelled.status, 2);
+  const notCancelledJson = JSON.parse(notCancelled.stdout);
+  assert.equal(notCancelledJson.ok, false);
+  assert.equal(notCancelledJson.error?.type, 'parse_error');
+  assert.match(String(notCancelledJson.error?.message), /requires --approve yes\|no, --response-json, or --cancel/i);
+
+  const resumed = runCli(
+    ['resume', '--token', firstJson.requiresInput.resumeToken, '--response-json', '{"decision":"approve"}'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(resumed.status, 0);
+  const resumedJson = JSON.parse(resumed.stdout);
+  assert.equal(resumedJson.status, 'ok');
+  assert.deepEqual(resumedJson.output, [{ decision: 'approve' }]);
 });
 
 test('resume rejects invalid --response-json with stable parse error', () => {

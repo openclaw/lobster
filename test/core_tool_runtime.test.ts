@@ -275,6 +275,117 @@ test('resumeToolRequest validates pipeline input response against ask schema', a
   assert.deepEqual(good.output, ['hello']);
 });
 
+test('resumeToolRequest maps workflow input schema validation failures to parse_error', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-core-tool-runtime-workflow-schema-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  const env = {
+    ...process.env,
+    LOBSTER_STATE_DIR: path.join(tmpDir, 'state'),
+  };
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Provide title',
+              responseSchema: { type: 'string' },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const first = await runToolRequest({
+    filePath,
+    ctx: { env },
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.status, 'needs_input');
+  assert.ok(first.requiresInput?.resumeToken);
+
+  const bad = await resumeToolRequest({
+    token: first.requiresInput?.resumeToken ?? '',
+    response: { not: 'a string' },
+    ctx: { env },
+  });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.error?.type, 'parse_error');
+  assert.match(String(bad.error?.message), /schema validation/i);
+});
+
+test('resumeToolRequest supports explicit cancel for input requests', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-core-tool-runtime-cancel-input-'));
+  const env = {
+    ...process.env,
+    LOBSTER_STATE_DIR: path.join(tmpDir, 'state'),
+  };
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'object',
+                properties: { decision: { type: 'string' } },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const workflowFirst = await runToolRequest({
+    filePath,
+    ctx: { env },
+  });
+  assert.equal(workflowFirst.ok, true);
+  assert.equal(workflowFirst.status, 'needs_input');
+  assert.ok(workflowFirst.requiresInput?.resumeToken);
+
+  const workflowCancelled = await resumeToolRequest({
+    token: workflowFirst.requiresInput?.resumeToken ?? '',
+    cancel: true,
+    ctx: { env },
+  });
+  assert.equal(workflowCancelled.ok, true);
+  assert.equal(workflowCancelled.status, 'cancelled');
+
+  const pipelineFirst = await runToolRequest({
+    pipeline: "ask --prompt 'Decision?' --schema '{\"type\":\"object\",\"properties\":{\"decision\":{\"type\":\"string\"}},\"required\":[\"decision\"]}'",
+    ctx: { env },
+  });
+  assert.equal(pipelineFirst.ok, true);
+  assert.equal(pipelineFirst.status, 'needs_input');
+  assert.ok(pipelineFirst.requiresInput?.resumeToken);
+
+  const pipelineCancelled = await resumeToolRequest({
+    token: pipelineFirst.requiresInput?.resumeToken ?? '',
+    cancel: true,
+    ctx: { env },
+  });
+  assert.equal(pipelineCancelled.ok, true);
+  assert.equal(pipelineCancelled.status, 'cancelled');
+});
+
 test('ask command fails fast on invalid --schema JSON', async () => {
   const envelope = await runToolRequest({
     pipeline: "ask --prompt 'Decision?' --schema '{'",

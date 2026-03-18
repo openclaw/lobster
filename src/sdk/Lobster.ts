@@ -1,8 +1,17 @@
 import { runPipelineInternal } from './runtime.js';
 import { encodeToken, decodeToken } from './token.js';
-import { Ajv } from 'ajv';
+import { sharedAjv } from '../validation.js';
 
-const inputAjv = new Ajv({ allErrors: false, strict: false });
+type SdkResumePayload = {
+  protocolVersion: 1;
+  v: 1;
+  stageIndex?: number;
+  resumeAtIndex: number;
+  items?: unknown[];
+  prompt?: string;
+  inputSchema?: unknown;
+  inputSubject?: unknown;
+};
 
 /**
  * @typedef {Object} LobsterResult
@@ -205,17 +214,34 @@ export class Lobster {
    * @param {Object} options
    * @param {boolean} [options.approved] - Whether the approval was granted
    * @param {Object} [options.response] - Structured input response
+   * @param {boolean} [options.cancel] - Cancel a pending approval/input request
    * @returns {Promise<LobsterResult>}
    */
-  async resume(token, { approved, response }) {
-    if (typeof approved === 'boolean' && response !== undefined) {
-      throw new Error('resume accepts either approved or response, not both');
+  async resume(
+    token: string,
+    options: { approved?: boolean; response?: unknown; cancel?: boolean } = {},
+  ) {
+    const { approved, response, cancel } = options;
+    const intentCount = Number(typeof approved === 'boolean') + Number(response !== undefined) + Number(cancel === true);
+    if (intentCount > 1) {
+      throw new Error('resume accepts only one of approved, response, or cancel');
     }
-    if (approved === undefined && response === undefined) {
-      throw new Error('resume requires approved or response');
+    if (intentCount === 0) {
+      throw new Error('resume requires approved, response, or cancel');
     }
 
-    const payload = decodeToken(token);
+    const payload = decodeSdkResumePayload(token);
+
+    if (cancel === true) {
+      return {
+        ok: true,
+        status: 'cancelled',
+        output: [],
+        requiresApproval: null,
+        requiresInput: null,
+      };
+    }
+
     const expectsInput = Boolean(payload.inputSchema && typeof payload.inputSchema === 'object');
     if (expectsInput) {
       if (approved !== undefined) {
@@ -249,7 +275,7 @@ export class Lobster {
       if (!schema || typeof schema !== 'object') {
         throw new Error('resume token does not support input responses');
       }
-      const validator = inputAjv.compile(schema);
+      const validator = sharedAjv.compile(schema);
       const ok = validator(response);
       if (!ok) {
         const first = validator.errors?.[0];
@@ -358,4 +384,22 @@ export class Lobster {
     cloned.#meta = this.#meta ? { ...this.#meta } : null;
     return cloned;
   }
+}
+
+function decodeSdkResumePayload(token: string): SdkResumePayload {
+  const payload = decodeToken(token);
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invalid token');
+  }
+  const data = payload as Record<string, unknown>;
+  if (data.protocolVersion !== 1 || data.v !== 1) {
+    throw new Error('Invalid token');
+  }
+  if (typeof data.resumeAtIndex !== 'number' || !Number.isInteger(data.resumeAtIndex) || data.resumeAtIndex < 0) {
+    throw new Error('Invalid token');
+  }
+  if (data.items !== undefined && !Array.isArray(data.items)) {
+    throw new Error('Invalid token');
+  }
+  return data as unknown as SdkResumePayload;
 }

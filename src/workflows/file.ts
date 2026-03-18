@@ -1,7 +1,6 @@
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { Ajv } from 'ajv';
 
 import { randomUUID } from 'node:crypto';
 import { PassThrough } from 'node:stream';
@@ -12,6 +11,7 @@ import { encodeToken } from '../token.js';
 import { deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
 import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
+import { sharedAjv } from '../validation.js';
 
 export type WorkflowFile = {
   name?: string;
@@ -53,7 +53,7 @@ export type WorkflowApproval =
 
 export type WorkflowInputRequest = {
   prompt: string;
-  responseSchema?: unknown;
+  responseSchema: unknown;
   defaults?: unknown;
 };
 
@@ -269,6 +269,7 @@ export async function runWorkflowFile({
   resume,
   approved,
   response,
+  cancel,
 }: {
   filePath?: string;
   args?: Record<string, unknown>;
@@ -276,6 +277,7 @@ export async function runWorkflowFile({
   resume?: WorkflowResumePayload;
   approved?: boolean;
   response?: unknown;
+  cancel?: boolean;
 }): Promise<WorkflowRunResult> {
   const consumedResumeStateKey = resume?.stateKey && typeof resume.stateKey === 'string'
     ? resume.stateKey
@@ -298,16 +300,22 @@ export async function runWorkflowFile({
     ? { ...resumeState.iterationCounts }
     : {};
   const startIndex = resumeState?.resumeAtIndex ?? 0;
+  if (resumeState?.approvalStepId && resumeState?.inputStepId) {
+    throw new Error('Invalid workflow resume state');
+  }
 
   if (resumeState?.approvalStepId) {
-    if (typeof approved !== 'boolean') {
+    if (response !== undefined) {
       throw new WorkflowResumeArgumentError('Workflow resume requires --approve yes|no for approval requests');
     }
-    if (approved === false) {
+    if (cancel === true || approved === false) {
       if (consumedResumeStateKey) {
         await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
       }
       return { status: 'cancelled', output: [] };
+    }
+    if (typeof approved !== 'boolean') {
+      throw new WorkflowResumeArgumentError('Workflow resume requires --approve yes|no for approval requests');
     }
     const previous = results[resumeState.approvalStepId] ?? { id: resumeState.approvalStepId };
     previous.approved = approved;
@@ -315,6 +323,15 @@ export async function runWorkflowFile({
   }
 
   if (resumeState?.inputStepId) {
+    if (cancel === true) {
+      if (consumedResumeStateKey) {
+        await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+      }
+      return { status: 'cancelled', output: [] };
+    }
+    if (approved !== undefined) {
+      throw new WorkflowResumeArgumentError('Workflow resume requires --response-json for input requests');
+    }
     if (response === undefined) {
       throw new WorkflowResumeArgumentError('Workflow resume requires --response-json for input requests');
     }
@@ -322,11 +339,15 @@ export async function runWorkflowFile({
     if (!inputStep || !isInputStep(inputStep.input)) {
       throw new Error(`Invalid input step in resume state: ${resumeState.inputStepId}`);
     }
-    validateInputResponse({
-      schema: resumeState.inputSchema ?? inputStep.input.responseSchema,
-      response,
-      stepId: inputStep.id,
-    });
+    try {
+      validateInputResponse({
+        schema: resumeState.inputSchema ?? inputStep.input.responseSchema,
+        response,
+        stepId: inputStep.id,
+      });
+    } catch (err: any) {
+      throw new WorkflowResumeArgumentError(err?.message ?? String(err));
+    }
     const previous = results[resumeState.inputStepId] ?? { id: resumeState.inputStepId };
     previous.subject = resumeState.inputSubject ?? null;
     previous.response = response;
@@ -344,7 +365,10 @@ export async function runWorkflowFile({
     const step = steps[idx];
 
     if (!evaluateCondition(step.when ?? step.condition, results)) {
-      results[step.id] = { id: step.id, skipped: true };
+      const previous = results[step.id];
+      results[step.id] = previous
+        ? { ...previous, skipped: true }
+        : { id: step.id, skipped: true };
       idx += 1;
       continue;
     }
@@ -828,7 +852,6 @@ function parseApprovalTimeoutMs(env: Record<string, string | undefined>) {
   return Math.floor(value);
 }
 
-const inputResponseAjv = new Ajv({ allErrors: false, strict: false });
 const DURATION_PATTERN = /^(\d+)(ms|s|m|h)$/i;
 const DEFAULT_MAX_ITERATIONS = 20;
 const DEFAULT_RETRY_DELAY_MS = 1000;
@@ -849,7 +872,7 @@ function validateInputResponse(params: {
   response: unknown;
   stepId: string;
 }) {
-  const validator = inputResponseAjv.compile(params.schema as object);
+  const validator = sharedAjv.compile(params.schema as object);
   const ok = validator(params.response);
   if (ok) return;
   const first = validator.errors?.[0];

@@ -3,22 +3,15 @@ import { createDefaultRegistry } from './commands/registry.js';
 import { runPipeline } from './runtime.js';
 import { encodeToken } from './token.js';
 import { decodeResumeToken, parseResumeArgs } from './resume.js';
-import { runWorkflowFile } from './workflows/file.js';
-import { randomUUID } from 'node:crypto';
-import { Ajv } from 'ajv';
-import { deleteStateJson, readStateJson, writeStateJson } from './state/store.js';
-
-type PipelineResumeState = {
-  pipeline: Array<{ name: string; args: Record<string, unknown>; raw: string }>;
-  resumeAtIndex: number;
-  items: unknown[];
-  haltType?: 'approval_request' | 'input_request';
-  inputSchema?: unknown;
-  prompt?: string;
-  createdAt: string;
-};
-
-const pipelineInputAjv = new Ajv({ allErrors: false, strict: false });
+import { WorkflowResumeArgumentError, runWorkflowFile } from './workflows/file.js';
+import { deleteStateJson } from './state/store.js';
+import {
+  extractPipelineHalt,
+  loadPipelineResumeState,
+  PipelineResumeState,
+  savePipelineResumeState,
+  validatePipelineInputResponse,
+} from './pipeline_resume_state.js';
 
 export async function runCli(argv) {
   const registry = createDefaultRegistry();
@@ -185,9 +178,7 @@ async function handleRun({ argv, registry }) {
     });
 
     if (normalizedMode === 'tool') {
-      const halted = output.halted && output.items.length === 1 ? output.items[0] : null;
-      const approval = halted?.type === 'approval_request' ? halted : null;
-      const inputRequest = halted?.type === 'input_request' ? halted : null;
+      const { approval, inputRequest } = extractPipelineHalt(output);
 
       if (approval) {
         const stateKey = await savePipelineResumeState(process.env, {
@@ -371,11 +362,13 @@ async function handleResume({ argv, registry }) {
   const mode = 'tool';
   let approved: boolean | undefined;
   let response: unknown = undefined;
+  let cancel = false;
   let payload: any;
   try {
     const parsed = parseResumeArgs(argv);
     approved = parsed.approved;
     response = parsed.response;
+    cancel = Boolean(parsed.cancel);
     payload = decodeResumeToken(parsed.token);
   } catch (err) {
     writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: err?.message ?? String(err) } });
@@ -384,14 +377,6 @@ async function handleResume({ argv, registry }) {
   }
 
   if (payload.kind === 'workflow-file') {
-    if (approved === false) {
-      if (payload.stateKey) {
-        await deleteStateJson({ env: process.env, key: payload.stateKey });
-      }
-      writeToolEnvelope({ ok: true, status: 'cancelled', output: [], requiresApproval: null, requiresInput: null });
-      return;
-    }
-
     try {
       const output = await runWorkflowFile({
         filePath: payload.filePath,
@@ -406,6 +391,7 @@ async function handleResume({ argv, registry }) {
         resume: payload,
         approved,
         response,
+        cancel,
       });
 
       if (output.status === 'needs_approval') {
@@ -430,6 +416,17 @@ async function handleResume({ argv, registry }) {
         return;
       }
 
+      if (output.status === 'cancelled') {
+        writeToolEnvelope({
+          ok: true,
+          status: 'cancelled',
+          output: [],
+          requiresApproval: null,
+          requiresInput: null,
+        });
+        return;
+      }
+
       writeToolEnvelope({
         ok: true,
         status: 'ok',
@@ -439,6 +436,11 @@ async function handleResume({ argv, registry }) {
       });
       return;
     } catch (err) {
+      if (err instanceof WorkflowResumeArgumentError) {
+        writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: err.message } });
+        process.exitCode = 2;
+        return;
+      }
       writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
       process.exitCode = 1;
       return;
@@ -452,6 +454,12 @@ async function handleResume({ argv, registry }) {
   } catch (err) {
     writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
     process.exitCode = 1;
+    return;
+  }
+
+  if (cancel) {
+    await deleteStateJson({ env: process.env, key: previousStateKey });
+    writeToolEnvelope({ ok: true, status: 'cancelled', output: [], requiresApproval: null, requiresInput: null });
     return;
   }
 
@@ -547,9 +555,7 @@ async function handleResume({ argv, registry }) {
       input,
     });
 
-    const halted3 = output.halted && output.items.length === 1 ? output.items[0] : null;
-    const approval = halted3?.type === 'approval_request' ? halted3 : null;
-    const inputRequest = halted3?.type === 'input_request' ? halted3 : null;
+    const { approval, inputRequest } = extractPipelineHalt(output);
 
     if (approval) {
       const nextStateKey = await savePipelineResumeState(process.env, {
@@ -635,40 +641,6 @@ function streamFromItems(items: unknown[]) {
   })();
 }
 
-async function savePipelineResumeState(env: Record<string, string | undefined>, state: PipelineResumeState) {
-  const stateKey = `pipeline_resume_${randomUUID()}`;
-  await writeStateJson({ env, key: stateKey, value: state });
-  return stateKey;
-}
-
-async function loadPipelineResumeState(env: Record<string, string | undefined>, stateKey: string) {
-  const stored = await readStateJson({ env, key: stateKey });
-  if (!stored || typeof stored !== 'object') {
-    throw new Error('Pipeline resume state not found');
-  }
-  const data = stored as Partial<PipelineResumeState>;
-  if (!Array.isArray(data.pipeline)) throw new Error('Invalid pipeline resume state');
-  if (typeof data.resumeAtIndex !== 'number') throw new Error('Invalid pipeline resume state');
-  if (!Array.isArray(data.items)) throw new Error('Invalid pipeline resume state');
-  if (data.haltType !== undefined && !['approval_request', 'input_request'].includes(data.haltType)) {
-    throw new Error('Invalid pipeline resume state');
-  }
-  return data as PipelineResumeState;
-}
-
-function validatePipelineInputResponse(schema: unknown, response: unknown) {
-  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
-    return;
-  }
-  const validator = pipelineInputAjv.compile(schema as object);
-  const ok = validator(response);
-  if (ok) return;
-  const first = validator.errors?.[0];
-  const pathValue = first?.instancePath || '/';
-  const reason = first?.message ? ` ${first.message}` : '';
-  throw new Error(`pipeline input response failed schema validation at ${pathValue}:${reason}`);
-}
-
 async function readVersion() {
   const { readFile } = await import('node:fs/promises');
   const { fileURLToPath } = await import('node:url');
@@ -742,6 +714,7 @@ function helpText() {
     `  lobster run --file path/to/workflow.lobster --args-json '{...}'\n` +
     `  lobster resume --token <token> --approve yes|no\n` +
     `  lobster resume --token <token> --response-json '{...}'\n` +
+    `  lobster resume --token <token> --cancel\n` +
     `  lobster doctor\n` +
     `  lobster version\n` +
     `  lobster help <command>\n\n` +

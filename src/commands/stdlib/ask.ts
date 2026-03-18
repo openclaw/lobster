@@ -11,16 +11,14 @@
  *   ... | ask --subject-from-stdin --prompt "Review this draft:"
  */
 
-import { Ajv } from 'ajv';
+import { sharedAjv } from '../../validation.js';
 
 function isInteractive(stdin) {
   return Boolean(stdin.isTTY);
 }
 
-const askInputAjv = new Ajv({ allErrors: false, strict: false });
-
 function validateAskResponse(schema, response) {
-  const validator = askInputAjv.compile(schema);
+  const validator = sharedAjv.compile(schema);
   const ok = validator(response);
   if (ok) return;
   const first = validator.errors?.[0];

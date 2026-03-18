@@ -340,6 +340,83 @@ test('next loops back to input step and subject tracks latest executed step outp
   assert.deepEqual(done.output, [{ published: 'v2' }]);
 });
 
+test('loop revisits preserve prior step output when later iteration skips the step', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-loop-skip-preserve-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'draft',
+            run: "node -e \"process.stdout.write(JSON.stringify({text:'v1'}))\"",
+          },
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve or redraft?',
+              responseSchema: {
+                type: 'object',
+                properties: {
+                  decision: { type: 'string', enum: ['approve', 'redraft'] },
+                },
+                required: ['decision'],
+              },
+            },
+          },
+          {
+            id: 'redraft',
+            run: "node -e \"process.stdout.write(JSON.stringify({text:'v2'}))\"",
+            when: '$review.response.decision == redraft',
+            next: 'review',
+            max_iterations: 3,
+          },
+          {
+            id: 'publish',
+            run: "node -e \"process.stdout.write(JSON.stringify({picked:process.env.PICKED,decision:process.env.DECISION}))\"",
+            env: {
+              PICKED: '$redraft.json.text',
+              DECISION: '$review.response.decision',
+            },
+            when: '$review.response.decision == approve',
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+
+  const first = await runWorkflowFile({ filePath, ctx: makeCtx(env) });
+  assert.equal(first.status, 'needs_input');
+  const firstPayload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
+  assert.equal(firstPayload.kind, 'workflow-file');
+
+  const second = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+    resume: firstPayload as any,
+    response: { decision: 'redraft' },
+  });
+  assert.equal(second.status, 'needs_input');
+  const secondPayload = decodeResumeToken(second.requiresInput?.resumeToken ?? '');
+  assert.equal(secondPayload.kind, 'workflow-file');
+
+  const done = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+    resume: secondPayload as any,
+    response: { decision: 'approve' },
+  });
+  assert.equal(done.status, 'ok');
+  assert.deepEqual(done.output, [{ picked: 'v2', decision: 'approve' }]);
+});
+
 test('retry and on_error jump mark step as failed and continue at target step', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-retry-'));
   const stateDir = path.join(tmpDir, 'state');
@@ -658,6 +735,69 @@ test('input resume requires response payload', async () => {
       }),
     /requires --response-json/i,
   );
+});
+
+test('input resume rejects approved flag and supports explicit cancel', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-approve-reject-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'object',
+                properties: {
+                  decision: { type: 'string', enum: ['approve', 'reject'] },
+                },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+  assert.equal(first.status, 'needs_input');
+  const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
+  assert.equal(payload.kind, 'workflow-file');
+  assert.ok(payload.stateKey);
+
+  await assert.rejects(
+    () =>
+      runWorkflowFile({
+        filePath,
+        ctx: makeCtx(env),
+        resume: payload as any,
+        approved: true,
+      }),
+    /requires --response-json/i,
+  );
+
+  const cancelled = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+    resume: payload as any,
+    cancel: true,
+  });
+  assert.equal(cancelled.status, 'cancelled');
+  const files = await fsp.readdir(stateDir);
+  const resumeStateFiles = files.filter((name) => name.startsWith('workflow_resume_'));
+  assert.deepEqual(resumeStateFiles, []);
 });
 
 test('needs_input fails when envelope exceeds max bytes even after subject truncation', async () => {
