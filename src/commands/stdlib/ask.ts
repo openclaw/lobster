@@ -18,7 +18,12 @@ function isInteractive(stdin) {
 }
 
 function validateAskResponse(schema, response) {
-  const validator = sharedAjv.compile(schema);
+  let validator;
+  try {
+    validator = sharedAjv.compile(schema);
+  } catch {
+    throw new Error('ask response schema is invalid');
+  }
   const ok = validator(response);
   if (ok) return;
   const first = validator.errors?.[0];

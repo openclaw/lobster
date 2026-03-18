@@ -1529,3 +1529,46 @@ test('retry delay wait is abortable via workflow signal', async () => {
     /Workflow aborted/i,
   );
 });
+
+test('workflow abort signal stops execution before first retry attempt', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-retry-pre-abort-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'pipeline_step',
+            pipeline: 'json',
+            stdin: {
+              ok: true,
+            },
+            retry: 2,
+            retry_delay: '10ms',
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const abort = new AbortController();
+  abort.abort();
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  await assert.rejects(
+    () =>
+      runWorkflowFile({
+        filePath,
+        ctx: makeCtx(env, {
+          signal: abort.signal,
+        }),
+      }),
+    /Workflow aborted/i,
+  );
+});

@@ -1059,19 +1059,19 @@ async function runWithRetry<T>(params: {
 }): Promise<T> {
   const retries = Number.isInteger(params.retries) && params.retries > 0 ? params.retries : 0;
   const attempts = retries + 1;
-  let lastError: unknown = null;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+  for (let attempt = 1; ; attempt++) {
+    if (params.signal?.aborted) {
+      throw new Error('Workflow aborted');
+    }
     try {
       return await params.run();
     } catch (err) {
-      lastError = err;
       if (attempt >= attempts) {
         throw err;
       }
       await sleepWithAbort(params.retryDelayMs, params.signal);
     }
   }
-  throw lastError ?? new Error('retry failed');
 }
 
 async function sleepWithAbort(ms: number, signal?: AbortSignal) {

@@ -125,6 +125,39 @@ test('ask rejects invalid interactive reply when schema does not match', async (
   );
 });
 
+test('ask reports invalid interactive schema with a stable error', async () => {
+  const registry = createDefaultRegistry();
+  const cmd = registry.get('ask');
+  const stdin = new PassThrough() as PassThrough & { isTTY?: boolean };
+  stdin.isTTY = true;
+  const stdout = new PassThrough();
+  setImmediate(() => {
+    stdin.end('approve\n');
+  });
+
+  await assert.rejects(
+    () =>
+      cmd.run({
+        input: streamOf([]),
+        args: {
+          _: [],
+          prompt: 'Decision?',
+          schema: '{"type":"wat"}',
+        },
+        ctx: {
+          stdin,
+          stdout,
+          stderr: process.stderr,
+          env: process.env,
+          registry,
+          mode: 'human',
+          render: { json() {}, lines() {} },
+        },
+      }),
+    /schema is invalid/i,
+  );
+});
+
 test('ask keeps freeform decision UX in interactive mode for default schema', async () => {
   const registry = createDefaultRegistry();
   const cmd = registry.get('ask');
