@@ -125,7 +125,8 @@ export async function finalizePipelineToolRun(params: {
     const nextStateKey = await savePipelineResumeState(params.env, {
       pipeline: params.pipeline,
       resumeAtIndex: (params.output.haltedAt?.index ?? -1) + 1,
-      items: inputRequest.items ?? [],
+      // Input resumes inject the submitted response as next input; halt items are unused.
+      items: [],
       haltType: 'input_request',
       inputSchema: inputRequest.responseSchema,
       prompt: inputRequest.prompt,

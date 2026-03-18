@@ -977,6 +977,58 @@ test('on_error backward jumps fail fast when max_iterations is exceeded', async 
   );
 });
 
+test('loop revisit skip preserves data outputs but clears stale failure flags', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-loop-skip-clear-failure-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const markerPath = path.join(tmpDir, 'toggle.marker');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        env: {
+          MARKER: markerPath,
+        },
+        steps: [
+          {
+            id: 'toggle',
+            run: "node -e \"const fs=require('node:fs');const p=process.env.MARKER;const first=!fs.existsSync(p);if(first)fs.writeFileSync(p,'1');process.stdout.write(JSON.stringify({go:first}));\"",
+          },
+          {
+            id: 'flaky',
+            run: "node -e \"process.stderr.write('boom'); process.exit(1)\"",
+            when: '$toggle.json.go == true',
+            on_error: 'toggle',
+            max_iterations: 3,
+          },
+          {
+            id: 'report',
+            run: "node -e \"process.stdout.write(JSON.stringify({failed:process.env.FAILED==='true',error:process.env.ERROR||''}))\"",
+            env: {
+              FAILED: '$flaky.failed',
+              ERROR: '$flaky.error',
+            },
+            when: '$flaky.failed',
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ go: false }]);
+});
+
 test('workflow parser rejects invalid next declarations', async () => {
   const cases = [
     {

@@ -368,7 +368,14 @@ export async function runWorkflowFile({
     if (!evaluateCondition(step.when ?? step.condition, results)) {
       const previous = results[step.id];
       results[step.id] = previous
-        ? { ...previous, skipped: true }
+        ? {
+          id: step.id,
+          stdout: previous.stdout,
+          json: previous.json,
+          subject: previous.subject,
+          response: previous.response,
+          skipped: true,
+        }
         : { id: step.id, skipped: true };
       idx += 1;
       continue;

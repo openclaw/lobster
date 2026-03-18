@@ -437,6 +437,65 @@ test('runToolRequest omits subject when ask does not provide one', async () => {
   assert.equal(Object.prototype.hasOwnProperty.call(envelope.requiresInput, 'subject'), false);
 });
 
+test('runToolRequest can pause on input requests with non-serializable halt items', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-core-tool-runtime-input-items-'));
+  const stateDir = path.join(tmpDir, 'state');
+
+  const cyclic: any = { value: 'x' };
+  cyclic.self = cyclic;
+
+  const emitInputCommand = {
+    name: 'emit_input',
+    meta: { description: 'emit test input_request' },
+    async run() {
+      return {
+        halt: true,
+        output: (async function* () {
+          yield {
+            type: 'input_request',
+            prompt: 'Decision?',
+            responseSchema: {
+              type: 'object',
+              properties: { decision: { type: 'string' } },
+              required: ['decision'],
+            },
+            subject: { text: 'draft' },
+            items: [cyclic],
+          };
+        })(),
+      };
+    },
+  };
+
+  const registry = {
+    get(name: string) {
+      if (name === 'emit_input') return emitInputCommand;
+      return undefined;
+    },
+    list() {
+      return ['emit_input'];
+    },
+  };
+
+  const envelope = await runToolRequest({
+    pipeline: 'emit_input',
+    ctx: {
+      env: { ...process.env, LOBSTER_STATE_DIR: stateDir },
+      registry: registry as any,
+    },
+  });
+
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.status, 'needs_input');
+  assert.ok(envelope.requiresInput?.resumeToken);
+
+  const files = await fsp.readdir(stateDir);
+  const stateFile = files.find((name) => name.startsWith('pipeline_resume_') && name.endsWith('.json'));
+  assert.ok(stateFile);
+  const persisted = JSON.parse(await fsp.readFile(path.join(stateDir, stateFile!), 'utf8'));
+  assert.deepEqual(persisted.items, []);
+});
+
 test('ask command fails fast on invalid --schema JSON', async () => {
   const envelope = await runToolRequest({
     pipeline: "ask --prompt 'Decision?' --schema '{'",
