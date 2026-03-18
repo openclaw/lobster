@@ -142,3 +142,57 @@ test('sdk Lobster.resume rejects invalid structured input responses', async () =
     /does not match schema/i,
   );
 });
+
+test('sdk Lobster.resume treats boolean schemas as input resumes', async () => {
+  const workflow = new Lobster().pipe({
+    async run() {
+      return {
+        halt: true,
+        output: (async function* () {
+          yield {
+            type: 'input_request',
+            prompt: 'Provide anything',
+            responseSchema: true,
+            subject: { text: 'draft v1' },
+          };
+        })(),
+      };
+    },
+  });
+
+  const first = await workflow.run();
+  assert.equal(first.status, 'needs_input');
+  const resumed = await workflow.resume(first.requiresInput!.resumeToken, {
+    response: { any: 'value' },
+  });
+  assert.equal(resumed.status, 'ok');
+  assert.deepEqual(resumed.output, [{ any: 'value' }]);
+});
+
+test('sdk Lobster.resume validates false boolean schemas as input resumes', async () => {
+  const workflow = new Lobster().pipe({
+    async run() {
+      return {
+        halt: true,
+        output: (async function* () {
+          yield {
+            type: 'input_request',
+            prompt: 'Provide anything',
+            responseSchema: false,
+            subject: { text: 'draft v1' },
+          };
+        })(),
+      };
+    },
+  });
+
+  const first = await workflow.run();
+  assert.equal(first.status, 'needs_input');
+  await assert.rejects(
+    () =>
+      workflow.resume(first.requiresInput!.resumeToken, {
+        response: { any: 'value' },
+      }),
+    /does not match schema/i,
+  );
+});

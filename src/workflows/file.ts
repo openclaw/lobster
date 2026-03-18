@@ -206,7 +206,10 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (step.retry !== undefined && (!Number.isInteger(step.retry) || step.retry < 0)) {
       throw new Error(`Workflow step ${step.id} retry must be a non-negative integer`);
     }
-    if (step.retry_delay !== undefined && !isValidDurationString(step.retry_delay)) {
+    if (step.retry_delay !== undefined && typeof step.retry_delay !== 'string') {
+      throw new Error(`Workflow step ${step.id} retry_delay must be a duration like 1s or 500ms`);
+    }
+    if (typeof step.retry_delay === 'string' && !isValidDurationString(step.retry_delay)) {
       throw new Error(`Workflow step ${step.id} retry_delay must be a duration like 1s or 500ms`);
     }
     if (step.max_iterations !== undefined && (!Number.isInteger(step.max_iterations) || step.max_iterations <= 0)) {
@@ -225,7 +228,7 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
   }
 
   for (const step of steps) {
-    if (step.next) {
+    if (typeof step.next === 'string') {
       const target = step.next.trim();
       if (!target) {
         throw new Error(`Workflow step ${step.id} next cannot be empty`);
@@ -409,16 +412,16 @@ export async function runWorkflowFile({
         results,
         lastStepId,
       });
-      const inputRequest = buildNeedsInputRequest({
-        stepId: step.id,
-        prompt: step.input.prompt,
-        responseSchema: step.input.responseSchema,
-        defaults: step.input.defaults,
-        subject,
-        maxEnvelopeBytes: resolveToolEnvelopeMaxBytes(ctx.env),
-      });
 
       if (ctx.mode === 'tool' || !isInteractive(ctx.stdin)) {
+        const inputRequest = buildNeedsInputRequest({
+          stepId: step.id,
+          prompt: step.input.prompt,
+          responseSchema: step.input.responseSchema,
+          defaults: step.input.defaults,
+          subject,
+          maxEnvelopeBytes: resolveToolEnvelopeMaxBytes(ctx.env),
+        });
         const stateKey = await saveWorkflowResumeState(ctx.env, {
           filePath: resolvedFilePath,
           resumeAtIndex: idx + 1,

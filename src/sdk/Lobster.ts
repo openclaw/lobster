@@ -242,7 +242,7 @@ export class Lobster {
       };
     }
 
-    const expectsInput = Boolean(payload.inputSchema && typeof payload.inputSchema === 'object');
+    const expectsInput = payload.inputSchema !== undefined;
     if (expectsInput) {
       if (approved !== undefined) {
         throw new Error('resume token expects an input response, not approved');
@@ -272,10 +272,15 @@ export class Lobster {
     let resumeItems = payload.items ?? [];
     if (response !== undefined) {
       const schema = payload.inputSchema;
-      if (!schema || typeof schema !== 'object') {
+      if (schema === undefined) {
         throw new Error('resume token does not support input responses');
       }
-      const validator = sharedAjv.compile(schema);
+      let validator;
+      try {
+        validator = sharedAjv.compile(schema as any);
+      } catch {
+        throw new Error('resume token input schema is invalid');
+      }
       const ok = validator(response);
       if (!ok) {
         const first = validator.errors?.[0];

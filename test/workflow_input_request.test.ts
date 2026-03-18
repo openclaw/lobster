@@ -638,6 +638,63 @@ test('input step reads response from interactive TTY mode', async () => {
   assert.deepEqual(result.output, [{ decision: 'approve', text: 'hello' }]);
 });
 
+test('interactive input mode ignores tool envelope size limits', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-interactive-no-envelope-limit-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'P'.repeat(20_000),
+              responseSchema: {
+                type: 'object',
+                properties: {
+                  decision: { type: 'string', enum: ['approve', 'reject'] },
+                },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const stdin = new PassThrough() as PassThrough & { isTTY?: boolean };
+  stdin.isTTY = true;
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  setImmediate(() => {
+    stdin.end('{"decision":"approve"}\n');
+  });
+
+  const env = {
+    ...process.env,
+    LOBSTER_STATE_DIR: stateDir,
+    LOBSTER_MAX_TOOL_ENVELOPE_BYTES: '1024',
+  } as Record<string, string>;
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env, {
+      stdin,
+      stdout,
+      stderr,
+      mode: 'human',
+    }),
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ decision: 'approve' }]);
+});
+
 test('terminal input step emits submitted response in interactive mode', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-terminal-interactive-output-'));
   const stateDir = path.join(tmpDir, 'state');
@@ -1114,6 +1171,19 @@ test('workflow parser rejects invalid next declarations', async () => {
       pattern: /next cannot be empty/i,
     },
     {
+      name: 'next target explicit empty string',
+      workflow: {
+        steps: [
+          {
+            id: 'a',
+            run: "node -e \"process.stdout.write('{}')\"",
+            next: '',
+          },
+        ],
+      },
+      pattern: /next cannot be empty/i,
+    },
+    {
       name: 'next on input step',
       workflow: {
         steps: [
@@ -1227,6 +1297,85 @@ test('workflow parser rejects invalid input response schemas before pausing', as
         ctx: makeCtx(env),
       }),
     /input\.responseSchema is invalid/i,
+  );
+});
+
+test('workflow parser accepts repeated responseSchema $id across runs', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-shared-id-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                $id: 'urn:lobster:test:input-schema',
+                type: 'object',
+                properties: { decision: { type: 'string' } },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+  assert.equal(first.status, 'needs_input');
+
+  const second = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+  assert.equal(second.status, 'needs_input');
+});
+
+test('workflow parser rejects non-string retry_delay with validation error', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-retry-delay-type-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'step1',
+            run: "node -e \"process.stdout.write('ok')\"",
+            retry: 1,
+            retry_delay: 100,
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  await assert.rejects(
+    () =>
+      runWorkflowFile({
+        filePath,
+        ctx: makeCtx(env),
+      }),
+    /retry_delay must be a duration like 1s or 500ms/i,
   );
 });
 
