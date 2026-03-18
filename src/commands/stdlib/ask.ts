@@ -37,7 +37,7 @@ function parseInteractiveCandidates(text) {
   if (typeof parsed === 'string') {
     return [parsed, { decision: parsed }];
   }
-  return [parsed];
+  return [parsed, text];
 }
 
 export const askCommand = {

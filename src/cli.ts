@@ -1,15 +1,13 @@
 import { parsePipeline } from './parser.js';
 import { createDefaultRegistry } from './commands/registry.js';
 import { runPipeline } from './runtime.js';
-import { encodeToken } from './token.js';
 import { decodeResumeToken, parseResumeArgs } from './resume.js';
 import { WorkflowResumeArgumentError, runWorkflowFile } from './workflows/file.js';
 import { deleteStateJson } from './state/store.js';
 import {
-  extractPipelineHalt,
+  finalizePipelineToolRun,
   loadPipelineResumeState,
   PipelineResumeState,
-  savePipelineResumeState,
   validatePipelineInputResponse,
 } from './pipeline_resume_state.js';
 
@@ -155,7 +153,7 @@ async function handleRun({ argv, registry }) {
   try {
     pipeline = parsePipeline(pipelineString);
   } catch (err) {
-    if (mode === 'tool') {
+    if (normalizedMode === 'tool') {
       writeToolEnvelope({ ok: false, error: { type: 'parse_error', message: err?.message ?? String(err) } });
       process.exitCode = 2;
       return;
@@ -178,79 +176,17 @@ async function handleRun({ argv, registry }) {
     });
 
     if (normalizedMode === 'tool') {
-      const { approval, inputRequest } = extractPipelineHalt(output);
-
-      if (approval) {
-        const stateKey = await savePipelineResumeState(process.env, {
-          pipeline,
-          resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
-          items: approval.items,
-          haltType: 'approval_request',
-          prompt: approval.prompt,
-          createdAt: new Date().toISOString(),
-        });
-
-        const resumeToken = encodeToken({
-          protocolVersion: 1,
-          v: 1,
-          kind: 'pipeline-resume',
-          stateKey,
-        });
-
-        writeToolEnvelope({
-          ok: true,
-          status: 'needs_approval',
-          output: [],
-          requiresApproval: {
-            ...approval,
-            resumeToken,
-          },
-          requiresInput: null,
-        });
-        return;
-      }
-
-      if (inputRequest) {
-        const stateKey = await savePipelineResumeState(process.env, {
-          pipeline,
-          resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
-          items: inputRequest.items ?? [],
-          haltType: 'input_request',
-          inputSchema: inputRequest.responseSchema,
-          prompt: inputRequest.prompt,
-          createdAt: new Date().toISOString(),
-        });
-
-        const resumeToken = encodeToken({
-          protocolVersion: 1,
-          v: 1,
-          kind: 'pipeline-resume',
-          stateKey,
-        });
-
-        writeToolEnvelope({
-          ok: true,
-          status: 'needs_input',
-          output: [],
-          requiresApproval: null,
-          requiresInput: {
-            type: 'input_request',
-            prompt: inputRequest.prompt,
-            responseSchema: inputRequest.responseSchema,
-            defaults: inputRequest.defaults,
-            subject: inputRequest.subject,
-            resumeToken,
-          },
-        });
-        return;
-      }
-
+      const finalized = await finalizePipelineToolRun({
+        env: process.env,
+        pipeline,
+        output,
+      });
       writeToolEnvelope({
         ok: true,
-        status: 'ok',
-        output: output.items,
-        requiresApproval: null,
-        requiresInput: null,
+        status: finalized.status,
+        output: finalized.output,
+        requiresApproval: finalized.requiresApproval,
+        requiresInput: finalized.requiresInput,
       });
       return;
     }
@@ -554,80 +490,18 @@ async function handleResume({ argv, registry }) {
       mode,
       input,
     });
-
-    const { approval, inputRequest } = extractPipelineHalt(output);
-
-    if (approval) {
-      const nextStateKey = await savePipelineResumeState(process.env, {
-        pipeline: remaining,
-        resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
-        items: approval.items,
-        haltType: 'approval_request',
-        prompt: approval.prompt,
-        createdAt: new Date().toISOString(),
-      });
-      await deleteStateJson({ env: process.env, key: previousStateKey });
-
-      const resumeToken = encodeToken({
-        protocolVersion: 1,
-        v: 1,
-        kind: 'pipeline-resume',
-        stateKey: nextStateKey,
-      });
-
-      writeToolEnvelope({
-        ok: true,
-        status: 'needs_approval',
-        output: [],
-        requiresApproval: { ...approval, resumeToken },
-        requiresInput: null,
-      });
-      return;
-    }
-
-    if (inputRequest) {
-      const nextStateKey = await savePipelineResumeState(process.env, {
-        pipeline: remaining,
-        resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
-        items: inputRequest.items ?? [],
-        haltType: 'input_request',
-        inputSchema: inputRequest.responseSchema,
-        prompt: inputRequest.prompt,
-        createdAt: new Date().toISOString(),
-      });
-      await deleteStateJson({ env: process.env, key: previousStateKey });
-
-      const resumeToken = encodeToken({
-        protocolVersion: 1,
-        v: 1,
-        kind: 'pipeline-resume',
-        stateKey: nextStateKey,
-      });
-
-      writeToolEnvelope({
-        ok: true,
-        status: 'needs_input',
-        output: [],
-        requiresApproval: null,
-        requiresInput: {
-          type: 'input_request',
-          prompt: inputRequest.prompt,
-          responseSchema: inputRequest.responseSchema,
-          defaults: inputRequest.defaults,
-          subject: inputRequest.subject,
-          resumeToken,
-        },
-      });
-      return;
-    }
-
-    await deleteStateJson({ env: process.env, key: previousStateKey });
+    const finalized = await finalizePipelineToolRun({
+      env: process.env,
+      pipeline: remaining,
+      output,
+      previousStateKey,
+    });
     writeToolEnvelope({
       ok: true,
-      status: 'ok',
-      output: output.items,
-      requiresApproval: null,
-      requiresInput: null,
+      status: finalized.status,
+      output: finalized.output,
+      requiresApproval: finalized.requiresApproval,
+      requiresInput: finalized.requiresInput,
     });
   } catch (err) {
     writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });

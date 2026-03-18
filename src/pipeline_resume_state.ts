@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import { readStateJson, writeStateJson } from './state/store.js';
+import { encodeToken } from './token.js';
+import { deleteStateJson, readStateJson, writeStateJson } from './state/store.js';
 import { sharedAjv } from './validation.js';
 
 export type PipelineResumeState = {
@@ -25,9 +26,48 @@ export type PipelineInputRequest = {
   prompt: string;
   responseSchema: unknown;
   defaults?: unknown;
-  subject: unknown;
+  subject?: unknown;
   items?: unknown[];
 };
+
+export type PipelineRunOutput = {
+  items: unknown[];
+  halted?: boolean;
+  haltedAt?: { index: number } | null;
+};
+
+export type PipelineToolRunResolution =
+  | {
+    status: 'needs_approval';
+    output: [];
+    requiresApproval: {
+      type: 'approval_request';
+      prompt: string;
+      items: unknown[];
+      preview?: string;
+      resumeToken: string;
+    };
+    requiresInput: null;
+  }
+  | {
+    status: 'needs_input';
+    output: [];
+    requiresApproval: null;
+    requiresInput: {
+      type: 'input_request';
+      prompt: string;
+      responseSchema: unknown;
+      defaults?: unknown;
+      subject?: unknown;
+      resumeToken: string;
+    };
+  }
+  | {
+    status: 'ok';
+    output: unknown[];
+    requiresApproval: null;
+    requiresInput: null;
+  };
 
 export function extractPipelineHalt(output: {
   halted?: boolean;
@@ -43,6 +83,87 @@ export function extractPipelineHalt(output: {
     ? halted as unknown as PipelineInputRequest
     : null;
   return { approval, inputRequest };
+}
+
+export async function finalizePipelineToolRun(params: {
+  env: Record<string, string | undefined>;
+  pipeline: PipelineResumeState['pipeline'];
+  output: PipelineRunOutput;
+  previousStateKey?: string;
+}): Promise<PipelineToolRunResolution> {
+  const { approval, inputRequest } = extractPipelineHalt(params.output);
+  if (approval) {
+    const nextStateKey = await savePipelineResumeState(params.env, {
+      pipeline: params.pipeline,
+      resumeAtIndex: (params.output.haltedAt?.index ?? -1) + 1,
+      items: approval.items,
+      haltType: 'approval_request',
+      prompt: approval.prompt,
+      createdAt: new Date().toISOString(),
+    });
+    if (params.previousStateKey) {
+      await deleteStateJson({ env: params.env, key: params.previousStateKey });
+    }
+    const resumeToken = encodeToken({
+      protocolVersion: 1,
+      v: 1,
+      kind: 'pipeline-resume',
+      stateKey: nextStateKey,
+    });
+    return {
+      status: 'needs_approval',
+      output: [],
+      requiresApproval: {
+        ...approval,
+        resumeToken,
+      },
+      requiresInput: null,
+    };
+  }
+
+  if (inputRequest) {
+    const nextStateKey = await savePipelineResumeState(params.env, {
+      pipeline: params.pipeline,
+      resumeAtIndex: (params.output.haltedAt?.index ?? -1) + 1,
+      items: inputRequest.items ?? [],
+      haltType: 'input_request',
+      inputSchema: inputRequest.responseSchema,
+      prompt: inputRequest.prompt,
+      createdAt: new Date().toISOString(),
+    });
+    if (params.previousStateKey) {
+      await deleteStateJson({ env: params.env, key: params.previousStateKey });
+    }
+    const resumeToken = encodeToken({
+      protocolVersion: 1,
+      v: 1,
+      kind: 'pipeline-resume',
+      stateKey: nextStateKey,
+    });
+    return {
+      status: 'needs_input',
+      output: [],
+      requiresApproval: null,
+      requiresInput: {
+        type: 'input_request',
+        prompt: inputRequest.prompt,
+        responseSchema: inputRequest.responseSchema,
+        ...(inputRequest.defaults !== undefined ? { defaults: inputRequest.defaults } : {}),
+        ...(inputRequest.subject !== undefined ? { subject: inputRequest.subject } : {}),
+        resumeToken,
+      },
+    };
+  }
+
+  if (params.previousStateKey) {
+    await deleteStateJson({ env: params.env, key: params.previousStateKey });
+  }
+  return {
+    status: 'ok',
+    output: params.output.items,
+    requiresApproval: null,
+    requiresInput: null,
+  };
 }
 
 export async function savePipelineResumeState(
@@ -73,10 +194,15 @@ export async function loadPipelineResumeState(
 }
 
 export function validatePipelineInputResponse(schema: unknown, response: unknown) {
-  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+  if (schema === undefined) {
     return;
   }
-  const validator = sharedAjv.compile(schema as object);
+  let validator;
+  try {
+    validator = sharedAjv.compile(schema as any);
+  } catch {
+    throw new Error('pipeline input response schema is invalid');
+  }
   const ok = validator(response);
   if (ok) return;
   const first = validator.errors?.[0];

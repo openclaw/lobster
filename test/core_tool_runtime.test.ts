@@ -275,6 +275,46 @@ test('resumeToolRequest validates pipeline input response against ask schema', a
   assert.deepEqual(good.output, ['hello']);
 });
 
+test('resumeToolRequest validates boolean input schemas in pipeline resume state', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-core-tool-runtime-bool-schema-'));
+  const stateDir = path.join(tmpDir, 'state');
+  await fsp.mkdir(stateDir, { recursive: true });
+  const stateKey = 'pipeline_resume_boolean_schema';
+  await fsp.writeFile(
+    path.join(stateDir, `${stateKey}.json`),
+    JSON.stringify(
+      {
+        pipeline: [],
+        resumeAtIndex: 0,
+        items: [],
+        haltType: 'input_request',
+        inputSchema: false,
+        prompt: 'Denied by schema',
+        createdAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const token = encodeToken({
+    protocolVersion: 1,
+    v: 1,
+    kind: 'pipeline-resume',
+    stateKey,
+  });
+
+  const bad = await resumeToolRequest({
+    token,
+    response: { decision: 'approve' },
+    ctx: { env: { ...process.env, LOBSTER_STATE_DIR: stateDir } },
+  });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.error?.type, 'parse_error');
+  assert.match(String(bad.error?.message), /schema validation/i);
+});
+
 test('resumeToolRequest maps workflow input schema validation failures to parse_error', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-core-tool-runtime-workflow-schema-'));
   const filePath = path.join(tmpDir, 'workflow.lobster');
@@ -384,6 +424,17 @@ test('resumeToolRequest supports explicit cancel for input requests', async () =
   });
   assert.equal(pipelineCancelled.ok, true);
   assert.equal(pipelineCancelled.status, 'cancelled');
+});
+
+test('runToolRequest omits subject when ask does not provide one', async () => {
+  const envelope = await runToolRequest({
+    pipeline: "ask --prompt 'Decision?' --schema '{\"type\":\"string\"}'",
+    ctx: { env: process.env },
+  });
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.status, 'needs_input');
+  assert.ok(envelope.requiresInput);
+  assert.equal(Object.prototype.hasOwnProperty.call(envelope.requiresInput, 'subject'), false);
 });
 
 test('ask command fails fast on invalid --schema JSON', async () => {

@@ -800,6 +800,64 @@ test('input resume rejects approved flag and supports explicit cancel', async ()
   assert.deepEqual(resumeStateFiles, []);
 });
 
+test('workflow resume rejects invalid iterationCounts in stored state', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-invalid-iteration-counts-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'object',
+                properties: {
+                  decision: { type: 'string', enum: ['approve', 'reject'] },
+                },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+  assert.equal(first.status, 'needs_input');
+  const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
+  assert.equal(payload.kind, 'workflow-file');
+  const stateKey = (payload as any).stateKey;
+  assert.equal(typeof stateKey, 'string');
+
+  const statePath = path.join(stateDir, `${stateKey}.json`);
+  const parsed = JSON.parse(await fsp.readFile(statePath, 'utf8'));
+  parsed.iterationCounts = 'invalid';
+  await fsp.writeFile(statePath, JSON.stringify(parsed, null, 2), 'utf8');
+
+  await assert.rejects(
+    () =>
+      runWorkflowFile({
+        filePath,
+        ctx: makeCtx(env),
+        resume: payload as any,
+        response: { decision: 'approve' },
+      }),
+    /Invalid workflow resume state/i,
+  );
+});
+
 test('needs_input fails when envelope exceeds max bytes even after subject truncation', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-envelope-hard-limit-'));
   const stateDir = path.join(tmpDir, 'state');
@@ -1064,6 +1122,65 @@ test('condition parser supports &&, ||, !, !=, and quoted string literals', asyn
 
   assert.equal(result.status, 'ok');
   assert.deepEqual(result.output, ['and', 'or', 'neq', 'quoted', 'not']);
+});
+
+test('condition parser supports more than two operands for && and ||', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-conditions-nary-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const markerPath = path.join(tmpDir, 'markers.txt');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  const append = (label: string) =>
+    `node -e "require('node:fs').appendFileSync(process.env.OUT,'${label}\\\\n')"`;
+  const readMarkers =
+    "node -e \"const fs=require('node:fs');const p=process.env.OUT;const t=fs.existsSync(p)?fs.readFileSync(p,'utf8').trim():'';process.stdout.write(JSON.stringify(t?t.split('\\\\n'):[]));\"";
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        env: {
+          OUT: markerPath,
+        },
+        steps: [
+          {
+            id: 'seed',
+            run: "node -e \"process.stdout.write(JSON.stringify({target:'prod',ok:true}))\"",
+          },
+          {
+            id: 'allow',
+            run: "node -e \"process.stdout.write(JSON.stringify({ok:true}))\"",
+          },
+          {
+            id: 'and_nary',
+            run: append('and_nary'),
+            when: '$seed.json.target == prod && $allow.json.ok == true && $seed.json.ok == true',
+          },
+          {
+            id: 'or_nary',
+            run: append('or_nary'),
+            when: '$seed.json.target == staging || $allow.json.ok == true || $seed.json.ok == true',
+          },
+          {
+            id: 'read',
+            run: readMarkers,
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, ['and_nary', 'or_nary']);
 });
 
 test('resolveStepRefs does not leak raw placeholders for missing fields', async () => {

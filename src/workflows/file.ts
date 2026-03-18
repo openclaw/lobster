@@ -293,6 +293,7 @@ export async function runWorkflowFile({
   const resolvedArgs = resolveWorkflowArgs(workflow.args, args ?? resumeState?.args);
   const steps = workflow.steps;
   const stepIndexById = new Map(steps.map((step, idx) => [step.id, idx]));
+  const jumpTargets = collectJumpTargets(steps);
   const results: Record<string, WorkflowStepResult> = resumeState?.steps
     ? cloneResults(resumeState.steps)
     : {};
@@ -373,14 +374,16 @@ export async function runWorkflowFile({
       continue;
     }
 
-    const maxIterations = resolveMaxIterations(step.max_iterations);
-    const nextIteration = (iterationCounts[step.id] ?? 0) + 1;
-    iterationCounts[step.id] = nextIteration;
-    if (nextIteration > maxIterations) {
-      throw new Error(
-        `Workflow step ${step.id} exceeded max_iterations (${maxIterations}). ` +
-        `This usually indicates a loop that never exits.`,
-      );
+    if (shouldTrackStepIterations(step, jumpTargets)) {
+      const maxIterations = resolveMaxIterations(step.max_iterations);
+      const nextIteration = (iterationCounts[step.id] ?? 0) + 1;
+      iterationCounts[step.id] = nextIteration;
+      if (nextIteration > maxIterations) {
+        throw new Error(
+          `Workflow step ${step.id} exceeded max_iterations (${maxIterations}). ` +
+          `This usually indicates a loop that never exits.`,
+        );
+      }
     }
 
     if (isInputStep(step.input)) {
@@ -616,6 +619,16 @@ async function loadWorkflowResumeState(env: Record<string, string | undefined>, 
   if (typeof data.resumeAtIndex !== 'number') throw new Error('Invalid workflow resume state');
   if (!data.steps || typeof data.steps !== 'object') throw new Error('Invalid workflow resume state');
   if (!data.args || typeof data.args !== 'object') throw new Error('Invalid workflow resume state');
+  if (data.iterationCounts !== undefined) {
+    if (!data.iterationCounts || typeof data.iterationCounts !== 'object' || Array.isArray(data.iterationCounts)) {
+      throw new Error('Invalid workflow resume state');
+    }
+    for (const value of Object.values(data.iterationCounts)) {
+      if (!Number.isInteger(value) || (value as number) < 0) {
+        throw new Error('Invalid workflow resume state');
+      }
+    }
+  }
   return data as WorkflowResumeState;
 }
 
@@ -1088,6 +1101,32 @@ function resolveMaxIterations(value: WorkflowStep['max_iterations']) {
   return value;
 }
 
+function collectJumpTargets(steps: WorkflowStep[]) {
+  const out = new Set<string>();
+  for (const step of steps) {
+    if (typeof step.next === 'string' && step.next.trim()) {
+      out.add(step.next.trim());
+    }
+    if (typeof step.on_error === 'string') {
+      const target = step.on_error.trim();
+      if (target && target !== 'fail' && target !== 'skip') {
+        out.add(target);
+      }
+    }
+  }
+  return out;
+}
+
+function shouldTrackStepIterations(step: WorkflowStep, jumpTargets: Set<string>) {
+  if (step.max_iterations !== undefined) return true;
+  if (typeof step.next === 'string' && step.next.trim()) return true;
+  if (typeof step.on_error === 'string') {
+    const target = step.on_error.trim();
+    if (target && target !== 'fail' && target !== 'skip') return true;
+  }
+  return jumpTargets.has(step.id);
+}
+
 function renderTemplateValue(value: unknown) {
   if (value === undefined || value === null) return '';
   if (typeof value === 'string') return value;
@@ -1126,13 +1165,11 @@ function evaluateExpression(expression: string, results: Record<string, Workflow
   }
   if (hasAnd) {
     const parts = splitConditionByOperator(expression, '&&');
-    if (parts.length !== 2) throw new Error(`Unsupported condition: ${expression}`);
-    return evaluateAtom(parts[0], results) && evaluateAtom(parts[1], results);
+    return parts.every((part) => evaluateAtom(part, results));
   }
   if (hasOr) {
     const parts = splitConditionByOperator(expression, '||');
-    if (parts.length !== 2) throw new Error(`Unsupported condition: ${expression}`);
-    return evaluateAtom(parts[0], results) || evaluateAtom(parts[1], results);
+    return parts.some((part) => evaluateAtom(part, results));
   }
   return evaluateAtom(expression, results);
 }
