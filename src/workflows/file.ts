@@ -678,7 +678,10 @@ function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
 function resolveStepRefs(input: string, results: Record<string, WorkflowStepResult>) {
   return input.replace(/\$([A-Za-z0-9_-]+)\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)/g, (match, id, pathValue) => {
     const refValue = getStepRefValue({ id, path: pathValue }, results, false);
-    if (refValue === undefined) return match;
+    if (refValue === undefined) {
+      if (pathValue === 'approved' || pathValue === 'skipped') return 'false';
+      return '';
+    }
     return renderTemplateValue(refValue);
   });
 }
@@ -782,6 +785,9 @@ function toOutputItems(result: WorkflowStepResult | undefined) {
   if (!result) return [];
   if (result.json !== undefined) {
     return Array.isArray(result.json) ? result.json : [result.json];
+  }
+  if (result.response !== undefined) {
+    return Array.isArray(result.response) ? result.response : [result.response];
   }
   if (result.stdout !== undefined) {
     return result.stdout === '' ? [] : [result.stdout];

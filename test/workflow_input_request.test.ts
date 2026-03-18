@@ -90,6 +90,56 @@ test('input step pauses with needs_input and resumes with structured response', 
   assert.deepEqual(resumed.output, [{ decision: 'approve', text: 'hello' }]);
 });
 
+test('terminal input step emits submitted response as final output after resume', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-terminal-output-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'object',
+                properties: {
+                  decision: { type: 'string', enum: ['approve', 'reject'] },
+                },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+  assert.equal(first.status, 'needs_input');
+  const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
+  assert.equal(payload.kind, 'workflow-file');
+
+  const resumed = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+    resume: payload as any,
+    response: { decision: 'approve' },
+  });
+
+  assert.equal(resumed.status, 'ok');
+  assert.deepEqual(resumed.output, [{ decision: 'approve' }]);
+});
+
 test('input resume rejects response that does not match schema', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-schema-'));
   const stateDir = path.join(tmpDir, 'state');
@@ -383,6 +433,59 @@ test('input step reads response from interactive TTY mode', async () => {
 
   assert.equal(result.status, 'ok');
   assert.deepEqual(result.output, [{ decision: 'approve', text: 'hello' }]);
+});
+
+test('terminal input step emits submitted response in interactive mode', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-terminal-interactive-output-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'object',
+                properties: {
+                  decision: { type: 'string', enum: ['approve', 'reject'] },
+                },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const stdin = new PassThrough() as PassThrough & { isTTY?: boolean };
+  stdin.isTTY = true;
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  setImmediate(() => {
+    stdin.end('{"decision":"approve"}\n');
+  });
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env, {
+      stdin,
+      stdout,
+      stderr,
+      mode: 'human',
+    }),
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ decision: 'approve' }]);
 });
 
 test('input step accepts primitive JSON response when schema allows it', async () => {
@@ -751,6 +854,47 @@ test('condition parser supports &&, ||, !, !=, and quoted string literals', asyn
 
   assert.equal(result.status, 'ok');
   assert.deepEqual(result.output, ['and', 'or', 'neq', 'quoted', 'not']);
+});
+
+test('resolveStepRefs does not leak raw placeholders for missing fields', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-template-missing-refs-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'seed',
+            run: "node -e \"process.stdout.write(JSON.stringify({ok:true}))\"",
+          },
+          {
+            id: 'render',
+            run: "node -e \"process.stdout.write(JSON.stringify({approved:process.env.APPROVED,missing:process.env.MISSING,unknown:process.env.UNKNOWN}))\"",
+            env: {
+              APPROVED: '$seed.approved',
+              MISSING: 'prefix-$seed.nope-suffix',
+              UNKNOWN: '$missing.stdout',
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ approved: 'false', missing: 'prefix--suffix', unknown: '' }]);
 });
 
 test('condition parser handles quoted literals ending with backslash before &&', async () => {
