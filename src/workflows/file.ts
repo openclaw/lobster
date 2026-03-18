@@ -194,6 +194,15 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (step.input && (!step.input.responseSchema || typeof step.input.responseSchema !== 'object')) {
       throw new Error(`Workflow step ${step.id} input.responseSchema must be an object`);
     }
+    if (step.input) {
+      try {
+        sharedAjv.compile(step.input.responseSchema as any);
+      } catch (err: any) {
+        throw new Error(
+          `Workflow step ${step.id} input.responseSchema is invalid: ${err?.message ?? String(err)}`,
+        );
+      }
+    }
     if (step.retry !== undefined && (!Number.isInteger(step.retry) || step.retry < 0)) {
       throw new Error(`Workflow step ${step.id} retry must be a non-negative integer`);
     }
@@ -417,7 +426,7 @@ export async function runWorkflowFile({
           args: resolvedArgs,
           inputStepId: step.id,
           inputSchema: step.input.responseSchema,
-          inputSubject: subject,
+          inputSubject: inputRequest.subject,
           iterationCounts,
           createdAt: new Date().toISOString(),
         });

@@ -130,6 +130,28 @@ async function handleRun({ argv, registry }) {
         return;
       }
 
+      if (output.status === 'needs_approval') {
+        process.stdout.write(JSON.stringify({
+          status: 'needs_approval',
+          output: [],
+          requiresApproval: output.requiresApproval ?? null,
+          requiresInput: null,
+        }, null, 2));
+        process.stdout.write('\n');
+        return;
+      }
+
+      if (output.status === 'needs_input') {
+        process.stdout.write(JSON.stringify({
+          status: 'needs_input',
+          output: [],
+          requiresApproval: null,
+          requiresInput: output.requiresInput ?? null,
+        }, null, 2));
+        process.stdout.write('\n');
+        return;
+      }
+
       if (output.status === 'ok' && output.output.length) {
         process.stdout.write(JSON.stringify(output.output, null, 2));
         process.stdout.write('\n');

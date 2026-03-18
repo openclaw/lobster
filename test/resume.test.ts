@@ -180,6 +180,42 @@ test('cli resume accepts --response-json for input requests', async () => {
   assert.deepEqual(resumedJson.output, [{ text: 'hello' }]);
 });
 
+test('cli run in non-interactive human mode surfaces needs_input with resume token', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-run-human-needs-input-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'object',
+                properties: { decision: { type: 'string', enum: ['approve', 'reject'] } },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const run = runCli(['run', filePath], { LOBSTER_STATE_DIR: stateDir });
+  assert.equal(run.status, 0);
+  const runJson = JSON.parse(run.stdout);
+  assert.equal(runJson.status, 'needs_input');
+  assert.ok(runJson.requiresInput?.resumeToken);
+});
+
 test('workflow needs_input schema mismatches return parse_error and keep token resumable', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-resume-workflow-schema-'));
   const stateDir = path.join(tmpDir, 'state');

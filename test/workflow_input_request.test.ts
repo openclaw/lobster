@@ -516,6 +516,62 @@ test('needs_input subject truncation is envelope-aware against tool output limit
   assert.equal((first.requiresInput?.subject as any)?.truncated, true);
 });
 
+test('needs_input persists sanitized subject in resume state', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-sanitized-subject-state-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'draft',
+            run: "node -e \"process.stdout.write(JSON.stringify({text:'x'.repeat(30000)}))\"",
+          },
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'object',
+                properties: {
+                  decision: { type: 'string', enum: ['approve', 'reject'] },
+                },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = {
+    ...process.env,
+    LOBSTER_STATE_DIR: stateDir,
+    LOBSTER_MAX_TOOL_ENVELOPE_BYTES: '4096',
+  } as Record<string, string>;
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+
+  assert.equal(first.status, 'needs_input');
+  assert.equal(typeof first.requiresInput?.subject, 'object');
+  assert.equal((first.requiresInput?.subject as any)?.truncated, true);
+  assert.ok(first.requiresInput?.resumeToken);
+
+  const tokenPayload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
+  assert.equal(tokenPayload.kind, 'workflow-file');
+  const statePath = path.join(stateDir, `${(tokenPayload as any).stateKey}.json`);
+  const state = JSON.parse(await fsp.readFile(statePath, 'utf8'));
+  assert.equal((state.inputSubject as any)?.truncated, true);
+});
+
 test('input step reads response from interactive TTY mode', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-interactive-'));
   const stateDir = path.join(tmpDir, 'state');
@@ -1133,6 +1189,44 @@ test('workflow parser rejects input steps without prompt', async () => {
         ctx: makeCtx(env),
       }),
     /input\.prompt must be a string/i,
+  );
+});
+
+test('workflow parser rejects invalid input response schemas before pausing', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-invalid-schema-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'wat',
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  await assert.rejects(
+    () =>
+      runWorkflowFile({
+        filePath,
+        ctx: makeCtx(env),
+      }),
+    /input\.responseSchema is invalid/i,
   );
 });
 
