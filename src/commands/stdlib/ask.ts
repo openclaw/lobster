@@ -30,11 +30,16 @@ function validateAskResponse(schema, response) {
 }
 
 function parseInteractiveCandidates(text) {
+  let parsed;
   try {
-    return [JSON.parse(text)];
+    parsed = JSON.parse(text);
   } catch {
     return [text, { decision: text }];
   }
+  if (typeof parsed === 'string') {
+    return [parsed, { decision: parsed }];
+  }
+  return [parsed];
 }
 
 export const askCommand = {

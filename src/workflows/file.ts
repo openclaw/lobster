@@ -132,6 +132,13 @@ type WorkflowResumeState = {
   createdAt: string;
 };
 
+export class WorkflowResumeArgumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkflowResumeArgumentError';
+  }
+}
+
 export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> {
   const text = await fsp.readFile(filePath, 'utf8');
   const ext = path.extname(filePath).toLowerCase();
@@ -294,7 +301,7 @@ export async function runWorkflowFile({
 
   if (resumeState?.approvalStepId) {
     if (typeof approved !== 'boolean') {
-      throw new Error('Workflow resume requires --approve yes|no for approval requests');
+      throw new WorkflowResumeArgumentError('Workflow resume requires --approve yes|no for approval requests');
     }
     if (approved === false) {
       if (consumedResumeStateKey) {
@@ -309,7 +316,7 @@ export async function runWorkflowFile({
 
   if (resumeState?.inputStepId) {
     if (response === undefined) {
-      throw new Error('Workflow resume requires --response-json for input requests');
+      throw new WorkflowResumeArgumentError('Workflow resume requires --response-json for input requests');
     }
     const inputStep = steps[stepIndexById.get(resumeState.inputStepId) ?? -1];
     if (!inputStep || !isInputStep(inputStep.input)) {

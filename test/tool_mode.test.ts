@@ -156,3 +156,35 @@ test('ask keeps freeform decision UX in interactive mode for default schema', as
   for await (const it of result.output) items.push(it);
   assert.deepEqual(items, [{ decision: 'approve' }]);
 });
+
+test('ask treats quoted interactive strings like decisions for default schema', async () => {
+  const registry = createDefaultRegistry();
+  const cmd = registry.get('ask');
+  const stdin = new PassThrough() as PassThrough & { isTTY?: boolean };
+  stdin.isTTY = true;
+  const stdout = new PassThrough();
+  setImmediate(() => {
+    stdin.end('"approve"\n');
+  });
+
+  const result = await cmd.run({
+    input: streamOf([]),
+    args: {
+      _: [],
+      prompt: 'Decision?',
+    },
+    ctx: {
+      stdin,
+      stdout,
+      stderr: process.stderr,
+      env: process.env,
+      registry,
+      mode: 'human',
+      render: { json() {}, lines() {} },
+    },
+  });
+
+  const items = [];
+  for await (const it of result.output) items.push(it);
+  assert.deepEqual(items, [{ decision: 'approve' }]);
+});
