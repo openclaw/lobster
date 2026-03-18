@@ -913,6 +913,59 @@ test('input resume rejects approved flag and supports explicit cancel', async ()
   assert.deepEqual(resumeStateFiles, []);
 });
 
+test('input cancel succeeds even when workflow file is missing', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-cancel-missing-file-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'review',
+            input: {
+              prompt: 'Approve?',
+              responseSchema: {
+                type: 'object',
+                properties: {
+                  decision: { type: 'string', enum: ['approve', 'reject'] },
+                },
+                required: ['decision'],
+              },
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+  assert.equal(first.status, 'needs_input');
+  const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
+  assert.equal(payload.kind, 'workflow-file');
+  assert.ok(payload.stateKey);
+
+  await fsp.rm(filePath);
+
+  const cancelled = await runWorkflowFile({
+    ctx: makeCtx(env),
+    resume: payload as any,
+    cancel: true,
+  });
+  assert.equal(cancelled.status, 'cancelled');
+  const files = await fsp.readdir(stateDir);
+  const resumeStateFiles = files.filter((name) => name.startsWith('workflow_resume_'));
+  assert.deepEqual(resumeStateFiles, []);
+});
+
 test('workflow resume rejects invalid iterationCounts in stored state', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-invalid-iteration-counts-'));
   const stateDir = path.join(tmpDir, 'state');

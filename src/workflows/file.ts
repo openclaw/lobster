@@ -297,6 +297,29 @@ export async function runWorkflowFile({
   const resumeState = resume?.stateKey
     ? await loadWorkflowResumeState(ctx.env, resume.stateKey)
     : resume ?? null;
+  if (resumeState?.approvalStepId && resumeState?.inputStepId) {
+    throw new Error('Invalid workflow resume state');
+  }
+
+  if (resumeState?.approvalStepId) {
+    if (response !== undefined) {
+      throw new WorkflowResumeArgumentError('Workflow resume requires --approve yes|no for approval requests');
+    }
+    if (cancel === true || approved === false) {
+      if (consumedResumeStateKey) {
+        await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+      }
+      return { status: 'cancelled', output: [] };
+    }
+  }
+
+  if (resumeState?.inputStepId && cancel === true) {
+    if (consumedResumeStateKey) {
+      await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+    }
+    return { status: 'cancelled', output: [] };
+  }
+
   const resolvedFilePath = filePath ?? resumeState?.filePath;
   if (!resolvedFilePath) {
     throw new Error('Workflow file path required');
@@ -313,19 +336,9 @@ export async function runWorkflowFile({
     ? { ...resumeState.iterationCounts }
     : {};
   const startIndex = resumeState?.resumeAtIndex ?? 0;
-  if (resumeState?.approvalStepId && resumeState?.inputStepId) {
-    throw new Error('Invalid workflow resume state');
-  }
-
   if (resumeState?.approvalStepId) {
     if (response !== undefined) {
       throw new WorkflowResumeArgumentError('Workflow resume requires --approve yes|no for approval requests');
-    }
-    if (cancel === true || approved === false) {
-      if (consumedResumeStateKey) {
-        await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
-      }
-      return { status: 'cancelled', output: [] };
     }
     if (typeof approved !== 'boolean') {
       throw new WorkflowResumeArgumentError('Workflow resume requires --approve yes|no for approval requests');
@@ -336,12 +349,6 @@ export async function runWorkflowFile({
   }
 
   if (resumeState?.inputStepId) {
-    if (cancel === true) {
-      if (consumedResumeStateKey) {
-        await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
-      }
-      return { status: 'cancelled', output: [] };
-    }
     if (approved !== undefined) {
       throw new WorkflowResumeArgumentError('Workflow resume requires --response-json for input requests');
     }

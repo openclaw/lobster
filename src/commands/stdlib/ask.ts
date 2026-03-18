@@ -17,13 +17,15 @@ function isInteractive(stdin) {
   return Boolean(stdin.isTTY);
 }
 
-function validateAskResponse(schema, response) {
-  let validator;
+function compileAskValidator(schema) {
   try {
-    validator = sharedAjv.compile(schema);
+    return sharedAjv.compile(schema);
   } catch {
     throw new Error('ask response schema is invalid');
   }
+}
+
+function validateAskResponse(validator, response) {
   const ok = validator(response);
   if (ok) return;
   const first = validator.errors?.[0];
@@ -109,6 +111,7 @@ export const askCommand = {
       }
       responseSchema = parsedSchema;
     }
+    const responseValidator = compileAskValidator(responseSchema);
 
     // Build subject from stdin if requested
     let subject: { text: string } | undefined;
@@ -146,7 +149,7 @@ export const askCommand = {
     let lastError;
     for (const candidate of parseInteractiveCandidates(text)) {
       try {
-        validateAskResponse(responseSchema, candidate);
+        validateAskResponse(responseValidator, candidate);
         return { output: (async function* () { yield candidate; })() };
       } catch (err) {
         lastError = err;

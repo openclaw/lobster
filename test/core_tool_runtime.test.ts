@@ -507,6 +507,17 @@ test('ask command fails fast on invalid --schema JSON', async () => {
   assert.match(String(envelope.error?.message), /ask --schema must be valid JSON/i);
 });
 
+test('ask command fails fast on invalid --schema object', async () => {
+  const envelope = await runToolRequest({
+    pipeline: "ask --prompt 'Decision?' --schema '{\"type\":\"wat\"}'",
+    ctx: { env: process.env },
+  });
+
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error?.type, 'runtime_error');
+  assert.match(String(envelope.error?.message), /ask response schema is invalid/i);
+});
+
 test('resumeToolRequest legacy pipeline state without haltType requires approved flag', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-core-tool-runtime-legacy-'));
   const stateDir = path.join(tmpDir, 'state');
