@@ -42,7 +42,7 @@ function parseInteractiveCandidates(text) {
   if (typeof parsed === 'string') {
     return [parsed, { decision: parsed }];
   }
-  return [parsed, text];
+  return [parsed];
 }
 
 export const askCommand = {
