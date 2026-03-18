@@ -191,6 +191,76 @@ test('input resume rejects response that does not match schema', async () => {
   );
 });
 
+test('input to input chaining derives subject from previous input response', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-chain-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'first',
+            input: {
+              prompt: 'First value?',
+              responseSchema: { type: 'string' },
+            },
+          },
+          {
+            id: 'second',
+            input: {
+              prompt: 'Second value?',
+              responseSchema: { type: 'string' },
+            },
+          },
+          {
+            id: 'done',
+            run: "node -e \"process.stdout.write(JSON.stringify({subject:process.env.SUBJECT,response:process.env.RESPONSE}))\"",
+            env: {
+              SUBJECT: '$second.subject',
+              RESPONSE: '$second.response',
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+  });
+  assert.equal(first.status, 'needs_input');
+
+  const firstPayload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
+  assert.equal(firstPayload.kind, 'workflow-file');
+  const second = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+    resume: firstPayload as any,
+    response: 'alpha',
+  });
+  assert.equal(second.status, 'needs_input');
+  assert.equal(second.requiresInput?.subject, 'alpha');
+
+  const secondPayload = decodeResumeToken(second.requiresInput?.resumeToken ?? '');
+  assert.equal(secondPayload.kind, 'workflow-file');
+  const done = await runWorkflowFile({
+    filePath,
+    ctx: makeCtx(env),
+    resume: secondPayload as any,
+    response: 'omega',
+  });
+  assert.equal(done.status, 'ok');
+  assert.deepEqual(done.output, [{ subject: 'alpha', response: 'omega' }]);
+});
+
 test('next loops back to input step and subject tracks latest executed step output', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-loop-'));
   const stateDir = path.join(tmpDir, 'state');

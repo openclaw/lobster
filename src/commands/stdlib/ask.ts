@@ -11,8 +11,30 @@
  *   ... | ask --subject-from-stdin --prompt "Review this draft:"
  */
 
+import { Ajv } from 'ajv';
+
 function isInteractive(stdin) {
   return Boolean(stdin.isTTY);
+}
+
+const askInputAjv = new Ajv({ allErrors: false, strict: false });
+
+function validateAskResponse(schema, response) {
+  const validator = askInputAjv.compile(schema);
+  const ok = validator(response);
+  if (ok) return;
+  const first = validator.errors?.[0];
+  const pathValue = first?.instancePath || '/';
+  const reason = first?.message ? ` ${first.message}` : '';
+  throw new Error(`ask response failed schema validation at ${pathValue}:${reason}`);
+}
+
+function parseInteractiveCandidates(text) {
+  try {
+    return [JSON.parse(text)];
+  } catch {
+    return [text, { decision: text }];
+  }
 }
 
 export const askCommand = {
@@ -113,11 +135,15 @@ export const askCommand = {
     const raw = await readLineFromStream(ctx.stdin, { timeoutMs: 0 });
     const text = String(raw ?? '').trim();
 
-    // Try to parse as JSON, otherwise treat as freeform decision
-    try {
-      return { output: (async function* () { yield JSON.parse(text); })() };
-    } catch {
-      return { output: (async function* () { yield { decision: text }; })() };
+    let lastError;
+    for (const candidate of parseInteractiveCandidates(text)) {
+      try {
+        validateAskResponse(responseSchema, candidate);
+        return { output: (async function* () { yield candidate; })() };
+      } catch (err) {
+        lastError = err;
+      }
     }
+    throw lastError ?? new Error('ask response failed schema validation');
   },
 };

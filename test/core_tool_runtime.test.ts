@@ -180,6 +180,15 @@ test('runToolRequest/resumeToolRequest handles needs_input workflow pauses', asy
   assert.ok(first.requiresInput?.resumeToken);
   assert.deepEqual(first.requiresInput?.subject, { text: 'hello' });
 
+  const wrongCancel = await resumeToolRequest({
+    token: first.requiresInput?.resumeToken ?? '',
+    approved: false,
+    ctx: { cwd: tmpDir, env },
+  });
+  assert.equal(wrongCancel.ok, false);
+  assert.equal(wrongCancel.error?.type, 'parse_error');
+  assert.match(String(wrongCancel.error?.message), /response-json.*input requests/i);
+
   const resumed = await resumeToolRequest({
     token: first.requiresInput?.resumeToken ?? '',
     response: { decision: 'approve' },

@@ -225,13 +225,6 @@ export async function resumeToolRequest({
   }
 
   if (payload.kind === 'workflow-file') {
-    if (approved === false) {
-      if (payload.stateKey) {
-        await deleteStateJson({ env: runtime.env, key: payload.stateKey });
-      }
-      return okEnvelope('cancelled', [], null, null);
-    }
-
     try {
       const output = await runWorkflowFile({
         filePath: payload.filePath,
@@ -252,7 +245,11 @@ export async function resumeToolRequest({
       }
       return okEnvelope('ok', output.output, null, null);
     } catch (err: any) {
-      return errorEnvelope('runtime_error', err?.message ?? String(err));
+      const message = err?.message ?? String(err);
+      if (isWorkflowResumeArgumentError(message)) {
+        return errorEnvelope('parse_error', message);
+      }
+      return errorEnvelope('runtime_error', message);
     }
   }
 
@@ -474,6 +471,11 @@ function validatePipelineInputResponse(schema: unknown, response: unknown) {
   const pathValue = first?.instancePath || '/';
   const reason = first?.message ? ` ${first.message}` : '';
   throw new Error(`pipeline input response failed schema validation at ${pathValue}:${reason}`);
+}
+
+function isWorkflowResumeArgumentError(message: string) {
+  return message.includes('Workflow resume requires --approve yes|no for approval requests')
+    || message.includes('Workflow resume requires --response-json for input requests');
 }
 
 async function resolveWorkflowFile(candidate: string, cwd: string) {

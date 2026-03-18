@@ -866,6 +866,7 @@ function resolveInputSubject(params: {
   const previous = params.results[params.lastStepId];
   if (!previous) return null;
   if (previous.json !== undefined) return previous.json;
+  if (previous.response !== undefined) return previous.response;
   if (previous.stdout !== undefined) return previous.stdout;
   return null;
 }
