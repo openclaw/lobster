@@ -84,7 +84,7 @@ export type WorkflowRunResult = {
     prompt: string;
     responseSchema: unknown;
     defaults?: unknown;
-    subject: unknown;
+    subject?: unknown;
     resumeToken?: string;
   };
 };

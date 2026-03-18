@@ -938,6 +938,45 @@ test('next loops fail fast when max_iterations is exceeded', async () => {
   );
 });
 
+test('on_error backward jumps fail fast when max_iterations is exceeded', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-on-error-backward-loop-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'start',
+            run: "node -e \"process.stdout.write('{}')\"",
+            next: 'flaky',
+          },
+          {
+            id: 'flaky',
+            run: "node -e \"process.stderr.write('boom'); process.exit(1)\"",
+            max_iterations: 2,
+            on_error: 'start',
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir } as Record<string, string>;
+  await assert.rejects(
+    () =>
+      runWorkflowFile({
+        filePath,
+        ctx: makeCtx(env),
+      }),
+    /step flaky exceeded max_iterations/i,
+  );
+});
+
 test('workflow parser rejects invalid next declarations', async () => {
   const cases = [
     {

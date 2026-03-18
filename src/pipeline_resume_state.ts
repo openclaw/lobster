@@ -195,7 +195,7 @@ export async function loadPipelineResumeState(
 
 export function validatePipelineInputResponse(schema: unknown, response: unknown) {
   if (schema === undefined) {
-    return;
+    throw new Error('pipeline input response schema is missing');
   }
   let validator;
   try {
