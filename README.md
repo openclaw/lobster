@@ -153,6 +153,26 @@ From this folder:
 
 - `pnpm test` runs `tsc` and then executes tests against `dist/`.
 - `bin/lobster.js` prefers the compiled entrypoint in `dist/` when present.
+
+## Examples
+
+Check out the [`examples/`](examples/) directory for ready-to-run workflow files:
+
+- **llm-basic.lobster** - Simple LLM invocation
+- **llm-with-approval.lobster** - LLM calls with human approval gates
+- **openclaw-tool-call.lobster** - Calling OpenClaw tools (llm-task, sessions.list, etc.)
+- **data-pipeline.lobster** - Data passing between steps without temp files
+
+```bash
+# Run an example
+lobster run examples/llm-basic.lobster --args-json '{"text":"Hello world"}'
+
+# See all examples
+ls examples/*.lobster
+```
+
+See [examples/README.md](examples/README.md) for detailed documentation and common patterns.
+
 ## Commands
 
 - `exec`: run OS commands
@@ -219,56 +239,178 @@ llm.invoke --provider openclaw --prompt 'Summarize this diff'
 llm.invoke --provider pi --prompt 'Summarize this diff'
 ```
 
-Provider resolution order:
+### In a workflow file
 
-- `--provider`
-- `LOBSTER_LLM_PROVIDER`
-- auto-detect from environment
+```yaml
+name: summarize
+args:
+  text:
+    default: "Some text to summarize"
 
-Built-in providers today:
+steps:
+  - id: summary
+    pipeline: >
+      llm.invoke
+      --provider openclaw
+      --model claude-3-sonnet
+      --prompt "Summarize concisely: ${text}"
 
-- `openclaw` via `OPENCLAW_URL` / `OPENCLAW_TOKEN`
-- `pi` via `LOBSTER_PI_LLM_ADAPTER_URL` (typically supplied by the Pi extension)
-- `http` via `LOBSTER_LLM_ADAPTER_URL`
+  - id: formatted
+    pipeline: >
+      llm.invoke
+      --provider openclaw
+      --prompt "Format as bullet points: ${summary.json}"
+```
 
-`llm_task.invoke` remains available as a backward-compatible alias for the OpenClaw provider.
+### Provider resolution order
+
+1. `--provider` flag (explicit)
+2. `LOBSTER_LLM_PROVIDER` environment variable
+3. Auto-detect from environment
+
+### Built-in providers
+
+- **`openclaw`** via `OPENCLAW_URL` / `OPENCLAW_TOKEN`
+- **`pi`** via `LOBSTER_PI_LLM_ADAPTER_URL` (typically supplied by the Pi extension)
+- **`http`** via `LOBSTER_LLM_ADAPTER_URL`
+
+> **Note:** `llm_task.invoke` remains available as a backward-compatible alias for the OpenClaw provider, but `llm.invoke` is preferred for new workflows.
+
+### Common patterns
+
+```yaml
+# Simple call
+- id: answer
+  pipeline: llm.invoke --prompt "${question}"
+
+# With specific model
+- id: analyze
+  pipeline: llm.invoke --model claude-3-sonnet --prompt "${data}"
+
+# With output schema
+- id: structured
+  pipeline: >
+    llm.invoke
+    --prompt "Extract entities"
+    --output-schema '{"type":"object","required":["name","date"]}'
+
+# Conditional LLM call
+- id: ai-enhance
+  pipeline: llm.invoke --prompt "Enhance: ${draft.json}"
+  when: $config.json.useAI
+```
 
 ## Calling OpenClaw tools from workflows
 
 Shell `run:` steps execute in your system shell, so OpenClaw tool calls there must be real executables.
 
-If you install Lobster via npm/pnpm, it installs a small shim executable named:
+If you install Lobster via npm/pnpm, it installs shim executables:
 
-- `openclaw.invoke` (preferred)
-- `clawd.invoke` (alias)
+- **`openclaw.invoke`** (preferred)
+- **`clawd.invoke`** (alias for backward compatibility)
 
 These shims forward to the Lobster pipeline command of the same name.
 
-### Example: invoke llm-task
-
-Prereqs:
-
-- `OPENCLAW_URL` points at a running OpenClaw gateway
-- optionally `OPENCLAW_TOKEN` if auth is enabled
+### Prerequisites
 
 ```bash
+# Set OpenClaw gateway URL
 export OPENCLAW_URL=http://127.0.0.1:18789
-# export OPENCLAW_TOKEN=...
+
+# Set token if auth is enabled
+export OPENCLAW_TOKEN=your-gateway-token
 ```
 
-In a workflow:
+### Method 1: Using openclaw.invoke (recommended)
 
 ```yaml
 name: hello-world
 steps:
   - id: greeting
     run: >
-      openclaw.invoke --tool llm-task --action json --args-json '{"prompt":"Hello"}'
+      openclaw.invoke
+      --tool llm-task
+      --action json
+      --args-json '{"prompt":"Hello"}'
+```
+
+### Method 2: Using lobster pipeline directly
+
+```yaml
+name: hello-world
+steps:
+  - id: greeting
+    pipeline: >
+      openclaw.invoke
+      --tool llm-task
+      --action json
+      --args-json '{"prompt":"Hello"}'
+```
+
+### Available OpenClaw tools
+
+All OpenClaw tools are available:
+
+```bash
+# LLM tasks
+openclaw.invoke --tool llm-task --args-json '{"prompt":"..."}'
+
+# Session management
+openclaw.invoke --tool sessions.list --args-json '{"limit":10}'
+openclaw.invoke --tool sessions.send --args-json '{"sessionKey":"...","message":"..."}'
+
+# Browser control
+openclaw.invoke --tool browser.snapshot --args-json '{"action":"snapshot"}'
+
+# And more: cron, message, gateway, nodes, etc.
+```
+
+### Complete example: LLM + Session
+
+```yaml
+name: summarize-and-send
+args:
+  sessionKey:
+    default: "main"
+  text:
+    default: "Summarize this"
+
+steps:
+  # Step 1: Call LLM to summarize
+  - id: summary
+    run: >
+      openclaw.invoke
+      --tool llm-task
+      --action json
+      --args-json '{"prompt":"Summarize: ${text}"}'
+
+  # Step 2: Send result to session
+  - id: notify
+    run: >
+      openclaw.invoke
+      --tool sessions.send
+      --action json
+      --args-json '{"sessionKey":"${sessionKey}","message":"${summary.json}"}'
 ```
 
 ### Passing data between steps (no temp files)
 
-Use `stdin: $stepId.stdout` to pipe output from one step into the next.
+Use `stdin: $stepId.stdout` or `${stepId.json}` to pipe data between steps:
+
+```yaml
+steps:
+  - id: fetch
+    run: curl -s https://api.example.com/data | json
+
+  - id: process
+    stdin: $fetch.json
+    run: jq '.items[]'
+
+  - id: summarize
+    pipeline: >
+      llm.invoke
+      --prompt "Summarize: ${process.json}"
+```
 
 ## Args and shell-safety
 
