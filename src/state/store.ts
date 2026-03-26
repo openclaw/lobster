@@ -80,8 +80,10 @@ export async function writeApprovalIndex({ env, stateKey, approvalId }: {
   approvalId: string;
 }) {
   const stateDir = defaultStateDir(env);
+  const safe = approvalId.replace(/[^a-f0-9]/g, '');
+  if (!safe) return;
   await fsp.mkdir(stateDir, { recursive: true });
-  const indexPath = path.join(stateDir, `approval_${approvalId}.json`);
+  const indexPath = path.join(stateDir, `approval_${safe}.json`);
   await fsp.writeFile(indexPath, JSON.stringify({ stateKey, createdAt: new Date().toISOString() }) + '\n', 'utf8');
 }
 
@@ -123,6 +125,36 @@ export async function deleteApprovalId({ env, approvalId }: {
   } catch (err: any) {
     if (err?.code === 'ENOENT') return;
     throw err;
+  }
+}
+
+/**
+ * Clean up any approval index file that points to the given stateKey.
+ * Used when resuming via --token (where we don't know the approvalId).
+ * Scans index files in the state dir — O(n) but n is tiny in practice.
+ */
+export async function cleanupApprovalIndexByStateKey({ env, stateKey }: {
+  env: Record<string, string | undefined>;
+  stateKey: string;
+}) {
+  const stateDir = defaultStateDir(env);
+  let files: string[];
+  try {
+    files = await fsp.readdir(stateDir);
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return;
+    throw err;
+  }
+  for (const file of files) {
+    if (!file.startsWith('approval_') || !file.endsWith('.json')) continue;
+    try {
+      const text = await fsp.readFile(path.join(stateDir, file), 'utf8');
+      const data = JSON.parse(text);
+      if (data?.stateKey === stateKey) {
+        await fsp.unlink(path.join(stateDir, file)).catch(() => {});
+        return; // one index per stateKey
+      }
+    } catch { /* skip corrupt files */ }
   }
 }
 

@@ -3,7 +3,7 @@ import { createDefaultRegistry } from './commands/registry.js';
 import { runPipeline } from './runtime.js';
 import { encodeToken } from './token.js';
 import { decodeResumeToken, parseResumeArgs, resolveApprovalId } from './resume.js';
-import { deleteApprovalId, generateApprovalId, writeApprovalIndex } from './state/store.js';
+import { cleanupApprovalIndexByStateKey, deleteApprovalId, generateApprovalId, writeApprovalIndex } from './state/store.js';
 import { runWorkflowFile } from './workflows/file.js';
 import { randomUUID } from 'node:crypto';
 import { deleteStateJson, readStateJson, writeStateJson } from './state/store.js';
@@ -357,6 +357,9 @@ async function handleResume({ argv, registry }) {
   // Clean up approval ID index after use
   if (resolvedApprovalId) {
     await deleteApprovalId({ env: process.env, approvalId: resolvedApprovalId });
+  } else if (payload.stateKey) {
+    // --token path: clean up any orphaned approval index for this stateKey
+    await cleanupApprovalIndexByStateKey({ env: process.env, stateKey: payload.stateKey });
   }
 
   if (!approved) {
@@ -442,6 +445,9 @@ async function handleResume({ argv, registry }) {
       });
       await deleteStateJson({ env: process.env, key: previousStateKey });
 
+      const nextAid = generateApprovalId();
+      await writeApprovalIndex({ env: process.env, stateKey: nextStateKey, approvalId: nextAid });
+
       const resumeToken = encodeToken({
         protocolVersion: 1,
         v: 1,
@@ -453,7 +459,7 @@ async function handleResume({ argv, registry }) {
         ok: true,
         status: 'needs_approval',
         output: [],
-        requiresApproval: { ...approval, resumeToken },
+        requiresApproval: { ...approval, resumeToken, approvalId: nextAid },
       });
       return;
     }

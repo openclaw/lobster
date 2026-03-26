@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { createDefaultRegistry } from '../commands/registry.js';
 import { parsePipeline } from '../parser.js';
-import { decodeResumeToken } from '../resume.js';
+import { decodeResumeToken, kindFromStateKey } from '../resume.js';
 import { runPipeline } from '../runtime.js';
 import { encodeToken } from '../token.js';
 import { readStateJson, writeStateJson, deleteStateJson, generateApprovalId, writeApprovalIndex, deleteApprovalId, findStateKeyByApprovalId } from '../state/store.js';
@@ -178,9 +178,8 @@ export async function resumeToolRequest({
       if (!stateKey) {
         return errorEnvelope('parse_error', `Approval ID "${approvalId}" not found or expired`);
       }
-      const kind = stateKey.startsWith('pipeline_resume_') ? 'pipeline-resume' : 'workflow-file';
-      const { encodeToken: encode } = await import('../token.js');
-      resolvedToken = encode({
+      const kind = kindFromStateKey(stateKey);
+      resolvedToken = encodeToken({
         protocolVersion: 1,
         v: 1,
         kind,

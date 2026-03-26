@@ -2,6 +2,17 @@ import { decodeToken, encodeToken } from './token.js';
 import { decodeWorkflowResumePayload } from './workflows/file.js';
 import { findStateKeyByApprovalId } from './state/store.js';
 
+/**
+ * Determine the resume payload kind from a state key prefix.
+ * State keys use naming conventions: pipeline_resume_<uuid> or workflow_resume_<uuid>.
+ */
+export function kindFromStateKey(stateKey: string): 'pipeline-resume' | 'workflow-file' {
+  if (stateKey.startsWith('pipeline_resume_')) return 'pipeline-resume';
+  if (stateKey.startsWith('workflow_resume_')) return 'workflow-file';
+  // Fallback for unknown prefixes — workflow-file is the original behavior
+  return 'workflow-file';
+}
+
 export type PipelineResumePayload = {
   protocolVersion: 1;
   v: 1;
@@ -70,8 +81,7 @@ export async function resolveApprovalId(approvalId: string, env: Record<string, 
     throw new Error(`Approval ID "${approvalId}" not found or expired`);
   }
 
-  // Detect kind from state key naming convention
-  const kind = stateKey.startsWith('pipeline_resume_') ? 'pipeline-resume' : 'workflow-file';
+  const kind = kindFromStateKey(stateKey);
 
   return encodeToken({
     protocolVersion: 1,

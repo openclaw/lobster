@@ -100,6 +100,69 @@ test('resume with invalid --id returns clear error', async () => {
   assert.ok(json.error?.message?.includes('not found'), `Error should mention not found: ${json.error?.message}`);
 });
 
+test('--token resume cleans up orphaned approval index', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-aid-orphan-'));
+  const stateDir = path.join(tmpDir, 'state');
+
+  const pipeline =
+    "exec --json --shell \"node -e 'process.stdout.write(JSON.stringify([{e:5}]))'\" | approve --prompt 'ok?' | pick e";
+
+  // Step 1: Run pipeline, get both approvalId and resumeToken
+  const first = runCli(['run', '--mode', 'tool', pipeline], { LOBSTER_STATE_DIR: stateDir });
+  const firstJson = JSON.parse(first.stdout);
+  assert.ok(firstJson.requiresApproval?.approvalId);
+  assert.ok(firstJson.requiresApproval?.resumeToken);
+
+  // Verify index file exists
+  let files = await fsp.readdir(stateDir);
+  let indexFiles = files.filter((name) => name.startsWith('approval_'));
+  assert.equal(indexFiles.length, 1, 'approval index should exist before resume');
+
+  // Step 2: Resume using --token (NOT --id)
+  const resumed = runCli(
+    ['resume', '--token', firstJson.requiresApproval.resumeToken, '--approve', 'yes'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(resumed.status, 0);
+  const resumedJson = JSON.parse(resumed.stdout);
+  assert.equal(resumedJson.status, 'ok');
+
+  // Step 3: Verify approval index was cleaned up despite using --token
+  files = await fsp.readdir(stateDir);
+  indexFiles = files.filter((name) => name.startsWith('approval_'));
+  assert.equal(indexFiles.length, 0, 'approval index should be cleaned up even when using --token');
+});
+
+test('double-resume with same --id returns clear error', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-aid-double-'));
+  const stateDir = path.join(tmpDir, 'state');
+
+  const pipeline =
+    "exec --json --shell \"node -e 'process.stdout.write(JSON.stringify([{f:6}]))'\" | approve --prompt 'ok?' | pick f";
+
+  const first = runCli(['run', '--mode', 'tool', pipeline], { LOBSTER_STATE_DIR: stateDir });
+  const firstJson = JSON.parse(first.stdout);
+  const approvalId = firstJson.requiresApproval.approvalId;
+
+  // First resume — should succeed
+  const resumed = runCli(
+    ['resume', '--id', approvalId, '--approve', 'yes'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(resumed.status, 0);
+  const resumedJson = JSON.parse(resumed.stdout);
+  assert.equal(resumedJson.status, 'ok');
+
+  // Second resume with same ID — should fail cleanly, not crash
+  const second = runCli(
+    ['resume', '--id', approvalId, '--approve', 'yes'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  const secondJson = JSON.parse(second.stdout);
+  assert.equal(secondJson.ok, false);
+  assert.ok(secondJson.error?.message?.includes('not found'), `Should report not found: ${secondJson.error?.message}`);
+});
+
 test('backward compat: --token still works when approvalId is present', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-aid-compat-'));
   const stateDir = path.join(tmpDir, 'state');
