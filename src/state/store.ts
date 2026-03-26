@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fsp } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 
 export function defaultStateDir(env) {
   return (
@@ -55,6 +56,71 @@ export async function deleteStateJson({ env, key }) {
   try {
     await fsp.unlink(filePath);
   } catch (err) {
+    if (err?.code === 'ENOENT') return;
+    throw err;
+  }
+}
+
+/**
+ * Generate a short, human-friendly approval ID (8 hex chars).
+ * These are easy to copy/paste in chat interfaces where full
+ * base64url resume tokens are unwieldy.
+ */
+export function generateApprovalId(): string {
+  return randomBytes(4).toString('hex');
+}
+
+/**
+ * Write a reverse-index file that maps approvalId → stateKey.
+ * Call this after writeStateJson to enable short-ID resume.
+ */
+export async function writeApprovalIndex({ env, stateKey, approvalId }: {
+  env: Record<string, string | undefined>;
+  stateKey: string;
+  approvalId: string;
+}) {
+  const stateDir = defaultStateDir(env);
+  await fsp.mkdir(stateDir, { recursive: true });
+  const indexPath = path.join(stateDir, `approval_${approvalId}.json`);
+  await fsp.writeFile(indexPath, JSON.stringify({ stateKey, createdAt: new Date().toISOString() }) + '\n', 'utf8');
+}
+
+/**
+ * Look up a state key by short approval ID.
+ * Returns the stateKey string or null if not found.
+ */
+export async function findStateKeyByApprovalId({ env, approvalId }: {
+  env: Record<string, string | undefined>;
+  approvalId: string;
+}): Promise<string | null> {
+  const stateDir = defaultStateDir(env);
+  const safe = approvalId.replace(/[^a-f0-9]/g, '');
+  if (!safe) return null;
+  const indexPath = path.join(stateDir, `approval_${safe}.json`);
+  try {
+    const text = await fsp.readFile(indexPath, 'utf8');
+    const data = JSON.parse(text);
+    return typeof data?.stateKey === 'string' ? data.stateKey : null;
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
+ * Delete the approval ID index file (cleanup after resume or cancel).
+ */
+export async function deleteApprovalId({ env, approvalId }: {
+  env: Record<string, string | undefined>;
+  approvalId: string;
+}) {
+  const stateDir = defaultStateDir(env);
+  const safe = approvalId.replace(/[^a-f0-9]/g, '');
+  if (!safe) return;
+  const indexPath = path.join(stateDir, `approval_${safe}.json`);
+  try {
+    await fsp.unlink(indexPath);
+  } catch (err: any) {
     if (err?.code === 'ENOENT') return;
     throw err;
   }
