@@ -7,7 +7,7 @@ import { parsePipeline } from '../parser.js';
 import { decodeResumeToken, kindFromStateKey } from '../resume.js';
 import { runPipeline } from '../runtime.js';
 import { encodeToken } from '../token.js';
-import { readStateJson, writeStateJson, deleteStateJson, generateApprovalId, writeApprovalIndex, deleteApprovalId, findStateKeyByApprovalId } from '../state/store.js';
+import { readStateJson, writeStateJson, deleteStateJson, generateApprovalId, writeApprovalIndex, deleteApprovalId, findStateKeyByApprovalId, cleanupApprovalIndexByStateKey } from '../state/store.js';
 import { runWorkflowFile } from '../workflows/file.js';
 
 type PipelineResumeState = {
@@ -173,7 +173,7 @@ export async function resumeToolRequest({
   try {
     // Resolve short approval ID to token if provided
     let resolvedToken: string;
-    if (approvalId && !token) {
+    if (approvalId) {
       const stateKey = await findStateKeyByApprovalId({ env: runtime.env, approvalId });
       if (!stateKey) {
         return errorEnvelope('parse_error', `Approval ID "${approvalId}" not found or expired`);
@@ -198,6 +198,9 @@ export async function resumeToolRequest({
   // Clean up approval ID index after use
   if (resolvedApprovalId) {
     await deleteApprovalId({ env: runtime.env, approvalId: resolvedApprovalId });
+  } else if (payload?.stateKey) {
+    // --token path: clean up any orphaned approval index for this state key
+    await cleanupApprovalIndexByStateKey({ env: runtime.env, stateKey: payload.stateKey });
   }
 
   if (!approved) {
