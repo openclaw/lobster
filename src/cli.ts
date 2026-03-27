@@ -354,15 +354,17 @@ async function handleResume({ argv, registry }) {
     return;
   }
 
-  // Clean up approval ID index after use
-  if (resolvedApprovalId) {
-    await deleteApprovalId({ env: process.env, approvalId: resolvedApprovalId });
-  } else if (payload.stateKey) {
-    // --token path: clean up any orphaned approval index for this stateKey
-    await cleanupApprovalIndexByStateKey({ env: process.env, stateKey: payload.stateKey });
-  }
+  // Helper: clean up approval ID index after successful use
+  const cleanupIndex = async () => {
+    if (resolvedApprovalId) {
+      await deleteApprovalId({ env: process.env, approvalId: resolvedApprovalId });
+    } else if (payload.stateKey) {
+      await cleanupApprovalIndexByStateKey({ env: process.env, stateKey: payload.stateKey });
+    }
+  };
 
   if (!approved) {
+    await cleanupIndex();
     if (payload.kind === 'workflow-file' && payload.stateKey) {
       await deleteStateJson({ env: process.env, key: payload.stateKey });
     }
@@ -399,9 +401,11 @@ async function handleResume({ argv, registry }) {
         return;
       }
 
+      await cleanupIndex();
       writeToolEnvelope({ ok: true, status: 'ok', output: output.output, requiresApproval: null });
       return;
     } catch (err) {
+      // Don't clean up index on error — allow retry by --id
       writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
       process.exitCode = 1;
       return;
@@ -443,6 +447,7 @@ async function handleResume({ argv, registry }) {
         prompt: approval.prompt,
         createdAt: new Date().toISOString(),
       });
+      await cleanupIndex();
       await deleteStateJson({ env: process.env, key: previousStateKey });
 
       const nextAid = generateApprovalId();
@@ -464,9 +469,11 @@ async function handleResume({ argv, registry }) {
       return;
     }
 
+    await cleanupIndex();
     await deleteStateJson({ env: process.env, key: previousStateKey });
     writeToolEnvelope({ ok: true, status: 'ok', output: output.items, requiresApproval: null });
   } catch (err) {
+    // Don't clean up index on error — allow retry by --id
     writeToolEnvelope({ ok: false, error: { type: 'runtime_error', message: err?.message ?? String(err) } });
     process.exitCode = 1;
   }

@@ -195,15 +195,17 @@ export async function resumeToolRequest({
     return errorEnvelope('parse_error', err?.message ?? String(err));
   }
 
-  // Clean up approval ID index after use
-  if (resolvedApprovalId) {
-    await deleteApprovalId({ env: runtime.env, approvalId: resolvedApprovalId });
-  } else if (payload?.stateKey) {
-    // --token path: clean up any orphaned approval index for this state key
-    await cleanupApprovalIndexByStateKey({ env: runtime.env, stateKey: payload.stateKey });
-  }
+  // Helper: clean up approval ID index after successful use
+  const cleanupIndex = async () => {
+    if (resolvedApprovalId) {
+      await deleteApprovalId({ env: runtime.env, approvalId: resolvedApprovalId });
+    } else if (payload?.stateKey) {
+      await cleanupApprovalIndexByStateKey({ env: runtime.env, stateKey: payload.stateKey });
+    }
+  };
 
   if (!approved) {
+    await cleanupIndex();
     if (payload.kind === 'workflow-file' && payload.stateKey) {
       await deleteStateJson({ env: runtime.env, key: payload.stateKey });
     }
@@ -223,13 +225,16 @@ export async function resumeToolRequest({
       });
 
       if (output.status === 'needs_approval') {
+        // Don't clean up index — next gate will issue a new approvalId
         return okEnvelope('needs_approval', [], output.requiresApproval ?? null);
       }
+      await cleanupIndex();
       if (output.status === 'cancelled') {
         return okEnvelope('cancelled', [], null);
       }
       return okEnvelope('ok', output.output, null);
     } catch (err: any) {
+      // Don't clean up index on error — allow retry by --id
       return errorEnvelope('runtime_error', err?.message ?? String(err));
     }
   }
@@ -273,6 +278,7 @@ export async function resumeToolRequest({
         createdAt: new Date().toISOString(),
       });
       await writeApprovalIndex({ env: runtime.env, stateKey: nextStateKey, approvalId: nextAid });
+      await cleanupIndex();
       await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 
       const resumeToken = encodeToken({
@@ -289,9 +295,11 @@ export async function resumeToolRequest({
       });
     }
 
+    await cleanupIndex();
     await deleteStateJson({ env: runtime.env, key: payload.stateKey });
     return okEnvelope('ok', output.items, null);
   } catch (err: any) {
+    // Don't clean up index on error — allow retry by --id
     return errorEnvelope('runtime_error', err?.message ?? String(err));
   }
 }
