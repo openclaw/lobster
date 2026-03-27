@@ -1,5 +1,17 @@
-import { decodeToken } from './token.js';
+import { decodeToken, encodeToken } from './token.js';
 import { decodeWorkflowResumePayload } from './workflows/file.js';
+import { findStateKeyByApprovalId } from './state/store.js';
+
+/**
+ * Determine the resume payload kind from a state key prefix.
+ * State keys use naming conventions: pipeline_resume_<uuid> or workflow_resume_<uuid>.
+ */
+export function kindFromStateKey(stateKey: string): 'pipeline-resume' | 'workflow-file' {
+  if (stateKey.startsWith('pipeline_resume_')) return 'pipeline-resume';
+  if (stateKey.startsWith('workflow_resume_')) return 'workflow-file';
+  // Fallback for unknown prefixes — workflow-file is the original behavior
+  return 'workflow-file';
+}
 
 export type PipelineResumePayload = {
   protocolVersion: 1;
@@ -9,7 +21,7 @@ export type PipelineResumePayload = {
 };
 
 export function parseResumeArgs(argv) {
-  const args = { decision: null, token: null };
+  const args = { decision: null, token: null, approvalId: null };
 
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -20,6 +32,15 @@ export function parseResumeArgs(argv) {
     }
     if (tok.startsWith('--token=')) {
       args.token = tok.slice('--token='.length);
+      continue;
+    }
+    if (tok === '--id') {
+      args.approvalId = argv[i + 1];
+      i++;
+      continue;
+    }
+    if (tok.startsWith('--id=')) {
+      args.approvalId = tok.slice('--id='.length);
       continue;
     }
     if (tok === '--approve' || tok === '--decision') {
@@ -37,13 +58,37 @@ export function parseResumeArgs(argv) {
     }
   }
 
-  if (!args.token) throw new Error('resume requires --token');
+  if (!args.token && !args.approvalId) throw new Error('resume requires --token or --id');
   if (!args.decision) throw new Error('resume requires --approve yes|no');
 
   const decision = String(args.decision).toLowerCase();
   if (!['yes', 'y', 'no', 'n'].includes(decision)) throw new Error('resume --approve must be yes or no');
 
-  return { token: String(args.token), approved: decision === 'yes' || decision === 'y' };
+  return {
+    token: args.token ? String(args.token) : null,
+    approvalId: args.approvalId ? String(args.approvalId) : null,
+    approved: decision === 'yes' || decision === 'y',
+  };
+}
+
+/**
+ * Resolve an approval ID to a resume token by looking up the state key.
+ * Detects the kind (workflow-file vs pipeline-resume) from the state key prefix.
+ */
+export async function resolveApprovalId(approvalId: string, env: Record<string, string | undefined>): Promise<string> {
+  const stateKey = await findStateKeyByApprovalId({ env, approvalId });
+  if (!stateKey) {
+    throw new Error(`Approval ID "${approvalId}" not found or expired`);
+  }
+
+  const kind = kindFromStateKey(stateKey);
+
+  return encodeToken({
+    protocolVersion: 1,
+    v: 1,
+    kind,
+    stateKey,
+  });
 }
 
 export function decodeResumeToken(token) {

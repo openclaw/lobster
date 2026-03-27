@@ -4,10 +4,10 @@ import path from 'node:path';
 
 import { createDefaultRegistry } from '../commands/registry.js';
 import { parsePipeline } from '../parser.js';
-import { decodeResumeToken } from '../resume.js';
+import { decodeResumeToken, kindFromStateKey } from '../resume.js';
 import { runPipeline } from '../runtime.js';
 import { encodeToken } from '../token.js';
-import { readStateJson, writeStateJson, deleteStateJson } from '../state/store.js';
+import { readStateJson, writeStateJson, deleteStateJson, generateApprovalId, writeApprovalIndex, deleteApprovalId, findStateKeyByApprovalId, cleanupApprovalIndexByStateKey } from '../state/store.js';
 import { runWorkflowFile } from '../workflows/file.js';
 
 type PipelineResumeState = {
@@ -41,6 +41,7 @@ type ToolEnvelope = {
     items: unknown[];
     preview?: string;
     resumeToken?: string;
+    approvalId?: string;
   } | null;
   error?: {
     type: string;
@@ -124,6 +125,7 @@ export async function runToolRequest({
       : null;
 
     if (approval) {
+      const aid = generateApprovalId();
       const stateKey = await savePipelineResumeState(runtime.env, {
         pipeline: parsed,
         resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
@@ -131,6 +133,7 @@ export async function runToolRequest({
         prompt: approval.prompt,
         createdAt: new Date().toISOString(),
       });
+      await writeApprovalIndex({ env: runtime.env, stateKey, approvalId: aid });
 
       const resumeToken = encodeToken({
         protocolVersion: 1,
@@ -142,6 +145,7 @@ export async function runToolRequest({
       return okEnvelope('needs_approval', [], {
         ...approval,
         resumeToken,
+        approvalId: aid,
       });
     }
 
@@ -153,23 +157,55 @@ export async function runToolRequest({
 
 export async function resumeToolRequest({
   token,
+  approvalId,
   approved,
   ctx = {},
 }: {
-  token: string;
+  token?: string;
+  approvalId?: string;
   approved: boolean;
   ctx?: ToolRunContext;
 }): Promise<ToolEnvelope> {
   const runtime = createToolContext(ctx);
   let payload: any;
+  let resolvedApprovalId = approvalId ?? null;
 
   try {
-    payload = decodeResumeToken(token);
+    // Resolve short approval ID to token if provided
+    let resolvedToken: string;
+    if (approvalId) {
+      const stateKey = await findStateKeyByApprovalId({ env: runtime.env, approvalId });
+      if (!stateKey) {
+        return errorEnvelope('parse_error', `Approval ID "${approvalId}" not found or expired`);
+      }
+      const kind = kindFromStateKey(stateKey);
+      resolvedToken = encodeToken({
+        protocolVersion: 1,
+        v: 1,
+        kind,
+        stateKey,
+      });
+    } else if (token) {
+      resolvedToken = token;
+    } else {
+      return errorEnvelope('parse_error', 'resume requires token or approvalId');
+    }
+    payload = decodeResumeToken(resolvedToken);
   } catch (err: any) {
     return errorEnvelope('parse_error', err?.message ?? String(err));
   }
 
+  // Helper: clean up approval ID index after successful use
+  const cleanupIndex = async () => {
+    if (resolvedApprovalId) {
+      await deleteApprovalId({ env: runtime.env, approvalId: resolvedApprovalId });
+    } else if (payload?.stateKey) {
+      await cleanupApprovalIndexByStateKey({ env: runtime.env, stateKey: payload.stateKey });
+    }
+  };
+
   if (!approved) {
+    await cleanupIndex();
     if (payload.kind === 'workflow-file' && payload.stateKey) {
       await deleteStateJson({ env: runtime.env, key: payload.stateKey });
     }
@@ -189,13 +225,16 @@ export async function resumeToolRequest({
       });
 
       if (output.status === 'needs_approval') {
+        // Don't clean up index — next gate will issue a new approvalId
         return okEnvelope('needs_approval', [], output.requiresApproval ?? null);
       }
+      await cleanupIndex();
       if (output.status === 'cancelled') {
         return okEnvelope('cancelled', [], null);
       }
       return okEnvelope('ok', output.output, null);
     } catch (err: any) {
+      // Don't clean up index on error — allow retry by --id
       return errorEnvelope('runtime_error', err?.message ?? String(err));
     }
   }
@@ -230,6 +269,7 @@ export async function resumeToolRequest({
       : null;
 
     if (approval) {
+      const nextAid = generateApprovalId();
       const nextStateKey = await savePipelineResumeState(runtime.env, {
         pipeline: remaining,
         resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
@@ -237,6 +277,8 @@ export async function resumeToolRequest({
         prompt: approval.prompt,
         createdAt: new Date().toISOString(),
       });
+      await writeApprovalIndex({ env: runtime.env, stateKey: nextStateKey, approvalId: nextAid });
+      await cleanupIndex();
       await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 
       const resumeToken = encodeToken({
@@ -249,12 +291,15 @@ export async function resumeToolRequest({
       return okEnvelope('needs_approval', [], {
         ...approval,
         resumeToken,
+        approvalId: nextAid,
       });
     }
 
+    await cleanupIndex();
     await deleteStateJson({ env: runtime.env, key: payload.stateKey });
     return okEnvelope('ok', output.items, null);
   } catch (err: any) {
+    // Don't clean up index on error — allow retry by --id
     return errorEnvelope('runtime_error', err?.message ?? String(err));
   }
 }
