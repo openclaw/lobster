@@ -4,10 +4,10 @@ import path from 'node:path';
 
 import { createDefaultRegistry } from '../commands/registry.js';
 import { parsePipeline } from '../parser.js';
-import { decodeResumeToken } from '../resume.js';
+import { decodeResumeToken, kindFromStateKey } from '../resume.js';
 import { runPipeline } from '../runtime.js';
 import { encodeToken } from '../token.js';
-import { readStateJson, writeStateJson, deleteStateJson } from '../state/store.js';
+import { readStateJson, writeStateJson, deleteStateJson, generateApprovalId, writeApprovalIndex, deleteApprovalId, findStateKeyByApprovalId, cleanupApprovalIndexByStateKey } from '../state/store.js';
 import { runWorkflowFile } from '../workflows/file.js';
 
 type PipelineResumeState = {
@@ -41,6 +41,7 @@ type ToolEnvelope = {
     items: unknown[];
     preview?: string;
     resumeToken?: string;
+    approvalId?: string;
   } | null;
   error?: {
     type: string;
@@ -124,6 +125,7 @@ export async function runToolRequest({
       : null;
 
     if (approval) {
+      const aid = generateApprovalId();
       const stateKey = await savePipelineResumeState(runtime.env, {
         pipeline: parsed,
         resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
@@ -131,6 +133,7 @@ export async function runToolRequest({
         prompt: approval.prompt,
         createdAt: new Date().toISOString(),
       });
+      await writeApprovalIndex({ env: runtime.env, stateKey, approvalId: aid });
 
       const resumeToken = encodeToken({
         protocolVersion: 1,
@@ -142,6 +145,7 @@ export async function runToolRequest({
       return okEnvelope('needs_approval', [], {
         ...approval,
         resumeToken,
+        approvalId: aid,
       });
     }
 
@@ -153,20 +157,50 @@ export async function runToolRequest({
 
 export async function resumeToolRequest({
   token,
+  approvalId,
   approved,
   ctx = {},
 }: {
-  token: string;
+  token?: string;
+  approvalId?: string;
   approved: boolean;
   ctx?: ToolRunContext;
 }): Promise<ToolEnvelope> {
   const runtime = createToolContext(ctx);
   let payload: any;
+  let resolvedApprovalId = approvalId ?? null;
 
   try {
-    payload = decodeResumeToken(token);
+    // Resolve short approval ID to token if provided
+    let resolvedToken: string;
+    if (approvalId) {
+      const stateKey = await findStateKeyByApprovalId({ env: runtime.env, approvalId });
+      if (!stateKey) {
+        return errorEnvelope('parse_error', `Approval ID "${approvalId}" not found or expired`);
+      }
+      const kind = kindFromStateKey(stateKey);
+      resolvedToken = encodeToken({
+        protocolVersion: 1,
+        v: 1,
+        kind,
+        stateKey,
+      });
+    } else if (token) {
+      resolvedToken = token;
+    } else {
+      return errorEnvelope('parse_error', 'resume requires token or approvalId');
+    }
+    payload = decodeResumeToken(resolvedToken);
   } catch (err: any) {
     return errorEnvelope('parse_error', err?.message ?? String(err));
+  }
+
+  // Clean up approval ID index after use
+  if (resolvedApprovalId) {
+    await deleteApprovalId({ env: runtime.env, approvalId: resolvedApprovalId });
+  } else if (payload?.stateKey) {
+    // --token path: clean up any orphaned approval index for this state key
+    await cleanupApprovalIndexByStateKey({ env: runtime.env, stateKey: payload.stateKey });
   }
 
   if (!approved) {
@@ -230,6 +264,7 @@ export async function resumeToolRequest({
       : null;
 
     if (approval) {
+      const nextAid = generateApprovalId();
       const nextStateKey = await savePipelineResumeState(runtime.env, {
         pipeline: remaining,
         resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
@@ -237,6 +272,7 @@ export async function resumeToolRequest({
         prompt: approval.prompt,
         createdAt: new Date().toISOString(),
       });
+      await writeApprovalIndex({ env: runtime.env, stateKey: nextStateKey, approvalId: nextAid });
       await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 
       const resumeToken = encodeToken({
@@ -249,6 +285,7 @@ export async function resumeToolRequest({
       return okEnvelope('needs_approval', [], {
         ...approval,
         resumeToken,
+        approvalId: nextAid,
       });
     }
 
