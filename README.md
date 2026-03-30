@@ -292,3 +292,86 @@ steps:
     command: |
       jq -n --arg text "$TEXT" '{"result": $text}'
 ```
+
+## Cookbook: Tool calling and LLM patterns
+
+### Which command do I use?
+
+| Goal | Command | Step type |
+|---|---|---|
+| Call an LLM from a workflow | `llm.invoke` | `pipeline:` |
+| Same thing, legacy spelling | `llm_task.invoke` | `pipeline:` (alias, avoid in new files) |
+| Call any OpenClaw tool | `openclaw.invoke --tool <name>` | `run:` |
+
+### Fetch → LLM summarize (minimal)
+
+```yaml
+name: summarize
+steps:
+  - id: fetch
+    run: curl -s https://api.example.com/items
+
+  - id: summary
+    pipeline: llm.invoke --prompt "Summarize this data. Be concise."
+    stdin: $fetch.stdout
+```
+
+### Fetch → LLM → save result (three-step chain)
+
+```yaml
+name: daily-standup
+args:
+  team:
+    default: "engineering"
+steps:
+  - id: tickets
+    run: >
+      openclaw.invoke --tool jira --action search
+      --args-json '{"status":"Todo","team":"${team}"}'
+
+  - id: summarize
+    pipeline: >
+      llm.invoke --prompt "Pick the top 10 most urgent tickets
+      and write a standup summary. Return JSON."
+    stdin: $tickets.stdout
+
+  - id: save
+    run: cat > /tmp/standup.json
+    stdin: $summarize.stdout
+```
+
+### Approval gate before LLM call
+
+```yaml
+name: reviewed-summary
+steps:
+  - id: fetch
+    run: curl -s https://api.example.com/data
+
+  - id: confirm
+    approval: Proceed with LLM summarization?
+    stdin: $fetch.json
+
+  - id: summarize
+    pipeline: llm.invoke --prompt "Summarize this data."
+    stdin: $fetch.json
+    when: $confirm.approved
+```
+
+### Using env vars for shell-safe args
+
+If your prompt or JSON contains quotes or special characters, use env vars instead of `${arg}` substitution:
+
+```yaml
+name: safe-prompt
+args:
+  question:
+    default: "What's the weather?"
+steps:
+  - id: ask
+    env:
+      Q: "$LOBSTER_ARG_QUESTION"
+    run: >
+      openclaw.invoke --tool llm-task --action json
+      --args-json "{\"prompt\":\"$Q\"}"
+```
