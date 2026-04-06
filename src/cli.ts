@@ -236,7 +236,14 @@ function parseRunArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
 
-    if (tok === '--dry-run') {
+    // --dry-run is a lobster-level flag. Consume it unless rest already contains
+    // a pipe character, which indicates we're inside an unquoted pipeline where
+    // '--dry-run' may belong to a stage (e.g. lobster run exec | filter --dry-run).
+    // This supports: lobster run --dry-run file.lobster AND
+    //                lobster run file.lobster --dry-run
+    // but does not steal the flag from unquoted pipeline stage args once a pipe
+    // has appeared.
+    if (tok === '--dry-run' && !rest.some((t) => String(t).includes('|'))) {
       dryRun = true;
       continue;
     }
