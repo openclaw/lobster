@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+import { findStateKeyByApprovalId, writeApprovalIndex } from '../src/state/store.js';
+
 function runCli(args: string[], env: Record<string, string | undefined>) {
   const bin = path.join(process.cwd(), 'bin', 'lobster.js');
   return spawnSync('node', [bin, ...args], {
@@ -184,4 +186,28 @@ test('backward compat: --token still works when approvalId is present', async ()
   const resumedJson = JSON.parse(resumed.stdout);
   assert.equal(resumedJson.status, 'ok');
   assert.deepEqual(resumedJson.output, [{ d: 4 }]);
+});
+
+test('approval index writes never overwrite an existing approval ID mapping', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-aid-collision-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const env = { LOBSTER_STATE_DIR: stateDir };
+
+  await writeApprovalIndex({
+    env,
+    stateKey: 'workflow_resume_original',
+    approvalId: 'deadbeef',
+  });
+
+  await assert.rejects(
+    () => writeApprovalIndex({
+      env,
+      stateKey: 'workflow_resume_replacement',
+      approvalId: 'deadbeef',
+    }),
+    (err: NodeJS.ErrnoException) => err?.code === 'EEXIST',
+  );
+
+  const resolved = await findStateKeyByApprovalId({ env, approvalId: 'deadbeef' });
+  assert.equal(resolved, 'workflow_resume_original');
 });

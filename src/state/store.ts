@@ -61,6 +61,10 @@ export async function deleteStateJson({ env, key }) {
   }
 }
 
+function sanitizeApprovalId(approvalId: string): string {
+  return approvalId.replace(/[^a-f0-9]/g, '');
+}
+
 /**
  * Generate a short, human-friendly approval ID (8 hex chars).
  * These are easy to copy/paste in chat interfaces where full
@@ -80,11 +84,35 @@ export async function writeApprovalIndex({ env, stateKey, approvalId }: {
   approvalId: string;
 }) {
   const stateDir = defaultStateDir(env);
-  const safe = approvalId.replace(/[^a-f0-9]/g, '');
+  const safe = sanitizeApprovalId(approvalId);
   if (!safe) return;
   await fsp.mkdir(stateDir, { recursive: true });
   const indexPath = path.join(stateDir, `approval_${safe}.json`);
-  await fsp.writeFile(indexPath, JSON.stringify({ stateKey, createdAt: new Date().toISOString() }) + '\n', 'utf8');
+  await fsp.writeFile(
+    indexPath,
+    JSON.stringify({ stateKey, createdAt: new Date().toISOString() }) + '\n',
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+  );
+}
+
+/**
+ * Create a unique approval ID index without ever overwriting an existing mapping.
+ */
+export async function createApprovalIndex({ env, stateKey }: {
+  env: Record<string, string | undefined>;
+  stateKey: string;
+}) {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const approvalId = generateApprovalId();
+    try {
+      await writeApprovalIndex({ env, stateKey, approvalId });
+      return approvalId;
+    } catch (err: any) {
+      if (err?.code === 'EEXIST') continue;
+      throw err;
+    }
+  }
+  throw new Error('Could not allocate a unique approval ID');
 }
 
 /**
@@ -96,7 +124,7 @@ export async function findStateKeyByApprovalId({ env, approvalId }: {
   approvalId: string;
 }): Promise<string | null> {
   const stateDir = defaultStateDir(env);
-  const safe = approvalId.replace(/[^a-f0-9]/g, '');
+  const safe = sanitizeApprovalId(approvalId);
   if (!safe) return null;
   const indexPath = path.join(stateDir, `approval_${safe}.json`);
   try {
@@ -117,7 +145,7 @@ export async function deleteApprovalId({ env, approvalId }: {
   approvalId: string;
 }) {
   const stateDir = defaultStateDir(env);
-  const safe = approvalId.replace(/[^a-f0-9]/g, '');
+  const safe = sanitizeApprovalId(approvalId);
   if (!safe) return;
   const indexPath = path.join(stateDir, `approval_${safe}.json`);
   try {

@@ -3,7 +3,7 @@ import { createDefaultRegistry } from './commands/registry.js';
 import { runPipeline } from './runtime.js';
 import { encodeToken } from './token.js';
 import { decodeResumeToken, parseResumeArgs, resolveApprovalId } from './resume.js';
-import { cleanupApprovalIndexByStateKey, deleteApprovalId, generateApprovalId, writeApprovalIndex } from './state/store.js';
+import { cleanupApprovalIndexByStateKey, createApprovalIndex, deleteApprovalId } from './state/store.js';
 import { runWorkflowFile } from './workflows/file.js';
 import { randomUUID } from 'node:crypto';
 import { deleteStateJson, readStateJson, writeStateJson } from './state/store.js';
@@ -175,7 +175,6 @@ async function handleRun({ argv, registry }) {
         : null;
 
       if (approval) {
-        const aid = generateApprovalId();
         const stateKey = await savePipelineResumeState(process.env, {
           pipeline,
           resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
@@ -183,7 +182,7 @@ async function handleRun({ argv, registry }) {
           prompt: approval.prompt,
           createdAt: new Date().toISOString(),
         });
-        await writeApprovalIndex({ env: process.env, stateKey, approvalId: aid });
+        const aid = await createApprovalIndex({ env: process.env, stateKey });
 
         const resumeToken = encodeToken({
           protocolVersion: 1,
@@ -450,8 +449,7 @@ async function handleResume({ argv, registry }) {
       await cleanupIndex();
       await deleteStateJson({ env: process.env, key: previousStateKey });
 
-      const nextAid = generateApprovalId();
-      await writeApprovalIndex({ env: process.env, stateKey: nextStateKey, approvalId: nextAid });
+      const nextAid = await createApprovalIndex({ env: process.env, stateKey: nextStateKey });
 
       const resumeToken = encodeToken({
         protocolVersion: 1,

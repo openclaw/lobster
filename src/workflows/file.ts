@@ -8,7 +8,7 @@ import { PassThrough } from 'node:stream';
 import { parsePipeline } from '../parser.js';
 import { runPipeline } from '../runtime.js';
 import { encodeToken } from '../token.js';
-import { deleteStateJson, readStateJson, writeStateJson, generateApprovalId, writeApprovalIndex, deleteApprovalId } from '../state/store.js';
+import { createApprovalIndex, deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
 import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
 
@@ -264,7 +264,6 @@ export async function runWorkflowFile({
       const approval = extractApprovalRequest(step, results[step.id]);
 
       if (ctx.mode === 'tool' || !isInteractive(ctx.stdin)) {
-        const approvalId = generateApprovalId();
         const stateKey = await saveWorkflowResumeState(ctx.env, {
           filePath: resolvedFilePath,
           resumeAtIndex: idx + 1,
@@ -274,8 +273,7 @@ export async function runWorkflowFile({
           createdAt: new Date().toISOString(),
         });
 
-        // Write approval ID → stateKey reverse index for short-ID resume
-        await writeApprovalIndex({ env: ctx.env, stateKey, approvalId });
+        const approvalId = await createApprovalIndex({ env: ctx.env, stateKey });
 
         if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
           await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });

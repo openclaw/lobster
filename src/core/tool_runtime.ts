@@ -7,7 +7,7 @@ import { parsePipeline } from '../parser.js';
 import { decodeResumeToken, kindFromStateKey } from '../resume.js';
 import { runPipeline } from '../runtime.js';
 import { encodeToken } from '../token.js';
-import { readStateJson, writeStateJson, deleteStateJson, generateApprovalId, writeApprovalIndex, deleteApprovalId, findStateKeyByApprovalId, cleanupApprovalIndexByStateKey } from '../state/store.js';
+import { readStateJson, writeStateJson, deleteStateJson, createApprovalIndex, deleteApprovalId, findStateKeyByApprovalId, cleanupApprovalIndexByStateKey } from '../state/store.js';
 import { runWorkflowFile } from '../workflows/file.js';
 
 type PipelineResumeState = {
@@ -125,7 +125,6 @@ export async function runToolRequest({
       : null;
 
     if (approval) {
-      const aid = generateApprovalId();
       const stateKey = await savePipelineResumeState(runtime.env, {
         pipeline: parsed,
         resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
@@ -133,7 +132,7 @@ export async function runToolRequest({
         prompt: approval.prompt,
         createdAt: new Date().toISOString(),
       });
-      await writeApprovalIndex({ env: runtime.env, stateKey, approvalId: aid });
+      const aid = await createApprovalIndex({ env: runtime.env, stateKey });
 
       const resumeToken = encodeToken({
         protocolVersion: 1,
@@ -269,7 +268,6 @@ export async function resumeToolRequest({
       : null;
 
     if (approval) {
-      const nextAid = generateApprovalId();
       const nextStateKey = await savePipelineResumeState(runtime.env, {
         pipeline: remaining,
         resumeAtIndex: (output.haltedAt?.index ?? -1) + 1,
@@ -277,7 +275,7 @@ export async function resumeToolRequest({
         prompt: approval.prompt,
         createdAt: new Date().toISOString(),
       });
-      await writeApprovalIndex({ env: runtime.env, stateKey: nextStateKey, approvalId: nextAid });
+      const nextAid = await createApprovalIndex({ env: runtime.env, stateKey: nextStateKey });
       await cleanupIndex();
       await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 
