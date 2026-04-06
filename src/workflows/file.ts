@@ -330,6 +330,13 @@ function dryRunStdinNote(stdin: unknown): string | null {
   return null;
 }
 
+function dryRunTemplateNote(input: string): string | null {
+  if (/\$[A-Za-z0-9_-]+\.(stdout|json)/.test(input)) {
+    return '[contains step output refs — unknown at plan time]';
+  }
+  return null;
+}
+
 function dryRunWorkflow({
   steps,
   resolvedArgs,
@@ -377,11 +384,13 @@ function dryRunWorkflow({
     const stdinNote = dryRunStdinNote(step.stdin);
 
     if (execution.kind === 'shell') {
-      const command = resolveTemplate(execution.value, resolvedArgs, results);
+      const command = resolveArgsTemplate(execution.value, resolvedArgs);
+      const commandNote = dryRunTemplateNote(command);
       lines.push(`  ${num}. ${step.id}  [shell]`);
-      lines.push(`     run: ${command}`);
+      lines.push(`     run: ${command}${commandNote ? `  ${commandNote}` : ''}`);
     } else if (execution.kind === 'pipeline') {
-      const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
+      const pipelineText = resolveArgsTemplate(execution.value, resolvedArgs);
+      const pipelineNote = dryRunTemplateNote(pipelineText);
       // Validate pipeline syntax and registry even in dry-run so errors surface early.
       if (!ctx.registry) {
         throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
@@ -394,7 +403,7 @@ function dryRunWorkflow({
         }
       }
       lines.push(`  ${num}. ${step.id}  [pipeline]`);
-      lines.push(`     pipeline: ${pipelineText}`);
+      lines.push(`     pipeline: ${pipelineText}${pipelineNote ? `  ${pipelineNote}` : ''}`);
     } else {
       lines.push(`  ${num}. ${step.id}  [no-op]`);
     }

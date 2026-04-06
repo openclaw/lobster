@@ -324,6 +324,32 @@ test('dry-run annotates valid stdin step refs as unknown at plan time', async ()
   assert.match(getStderr(), /output unknown at plan time/);
 });
 
+test('dry-run preserves step output refs in shell commands instead of collapsing them to empty strings', async () => {
+  const workflow = {
+    steps: [
+      { id: 'fetch', run: 'echo hello' },
+      { id: 'render', run: 'echo A=[$fetch.stdout] B=[$fetch.json]' },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-dry-shellrefs-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const { stdout, stderr, getStderr } = createStreams();
+
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout, stderr, env: { ...process.env }, mode: 'human', dryRun: true },
+  });
+
+  assert.equal(result.status, 'ok');
+  const output = getStderr();
+  assert.match(output, /run: echo A=\[\$fetch\.stdout\] B=\[\$fetch\.json\]/);
+  assert.match(output, /\[contains step output refs — unknown at plan time\]/);
+  assert.doesNotMatch(output, /run: echo A=\[\] B=\[\]/);
+});
+
 test('dry-run throws on pipeline step with unknown command', async () => {
   const registry = createDefaultRegistry();
   const workflow = {
