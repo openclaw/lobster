@@ -191,9 +191,12 @@ test('workflow file input steps pause and resume with structured responses', asy
   const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
   assert.equal(payload.kind, 'workflow-file');
 
+  const resumeEnv: Record<string, string | undefined> = { ...env };
+  delete resumeEnv.LONG_TEXT;
+
   const resumed = await runWorkflowFile({
     filePath,
-    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env: resumeEnv, mode: 'tool' },
     resume: payload,
     response: { decision: 'approve' },
   });
