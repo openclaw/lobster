@@ -415,6 +415,72 @@ test('workflow conditions reject standalone bare identifiers', async () => {
   );
 });
 
+test('workflow conditions reject unknown step refs even under negation', async () => {
+  const workflow = {
+    steps: [
+      { id: 'collect', run: 'echo hello' },
+      { id: 'finish', run: 'echo done', condition: '!$aprove.approved' },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-condition-typo-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  await assert.rejects(
+    () =>
+      runWorkflowFile({
+        filePath,
+        ctx: {
+          stdin: process.stdin,
+          stdout: process.stdout,
+          stderr: process.stderr,
+          env: { ...process.env },
+          mode: 'tool',
+        },
+      }),
+    /Unknown step reference: aprove\.approved/,
+  );
+});
+
+test('workflow conditions compare object refs without key-order sensitivity', async () => {
+  const workflow = {
+    steps: [
+      {
+        id: 'left',
+        run: 'node -e "process.stdout.write(JSON.stringify({a:1,b:2}))"',
+      },
+      {
+        id: 'right',
+        run: 'node -e "process.stdout.write(JSON.stringify({b:2,a:1}))"',
+      },
+      {
+        id: 'finish',
+        run: 'node -e "process.stdout.write(JSON.stringify({ok:true}))"',
+        condition: '$left.json == $right.json',
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-condition-object-eq-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env: { ...process.env },
+      mode: 'tool',
+    },
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, [{ ok: true }]);
+});
+
 test('workflow files can mix shell steps, approval-only steps, and pipeline llm steps', async () => {
   const registry = createDefaultRegistry();
   const requests: any[] = [];

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { PassThrough } from 'node:stream';
 
 import { parsePipeline } from '../parser.js';
@@ -1155,7 +1156,7 @@ function evaluateConditionExpression(
       return value;
     }
     if (token.type === 'step_ref') {
-      return getStepRefValue(token.value, results, false);
+      return getStepRefValue(token.value, results, true);
     }
     if (token.type === 'string' || token.type === 'number' || token.type === 'boolean' || token.type === 'null') {
       return token.value;
@@ -1186,21 +1187,10 @@ function evaluateConditionExpression(
 }
 
 function compareConditionValues(left: unknown, right: unknown) {
-  if (Array.isArray(left) || Array.isArray(right)) {
-    return compareStructuredConditionValues(left, right);
-  }
-  if (isPlainConditionObject(left) || isPlainConditionObject(right)) {
-    return compareStructuredConditionValues(left, right);
+  if (Array.isArray(left) || Array.isArray(right) || isPlainConditionObject(left) || isPlainConditionObject(right)) {
+    return isDeepStrictEqual(left, right);
   }
   return Object.is(left, right);
-}
-
-function compareStructuredConditionValues(left: unknown, right: unknown) {
-  try {
-    return JSON.stringify(left) === JSON.stringify(right);
-  } catch {
-    return false;
-  }
 }
 
 function isPlainConditionObject(value: unknown): value is Record<string, unknown> {
