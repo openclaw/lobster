@@ -64,7 +64,7 @@ export async function runCli(argv) {
 }
 
 async function handleRun({ argv, registry }) {
-  const { mode, rest, filePath, argsJson } = parseRunArgs(argv);
+  const { mode, rest, filePath, argsJson, dryRun } = parseRunArgs(argv);
   const normalizedMode = normalizeMode(mode);
 
   const workflowFile = filePath
@@ -98,6 +98,7 @@ async function handleRun({ argv, registry }) {
           env: process.env,
           mode: normalizedMode,
           registry,
+          dryRun,
         },
       });
 
@@ -164,6 +165,7 @@ async function handleRun({ argv, registry }) {
       stderr: process.stderr,
       env: process.env,
       mode: normalizedMode,
+      dryRun,
     });
 
     if (normalizedMode === 'tool') {
@@ -229,9 +231,15 @@ function parseRunArgs(argv) {
   let mode = 'human';
   let filePath = null;
   let argsJson = null;
+  let dryRun = false;
 
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
+
+    if (tok === '--dry-run') {
+      dryRun = true;
+      continue;
+    }
 
     if (tok === '--mode') {
       const value = argv[i + 1];
@@ -278,7 +286,7 @@ function parseRunArgs(argv) {
     rest.push(tok);
   }
 
-  return { mode, rest, filePath, argsJson };
+  return { mode, rest, filePath, argsJson, dryRun };
 }
 
 function normalizeMode(mode) {
@@ -526,10 +534,14 @@ function helpText() {
     `  lobster run --mode tool '<pipeline>'\n` +
     `  lobster run path/to/workflow.lobster\n` +
     `  lobster run --file path/to/workflow.lobster --args-json '{...}'\n` +
+    `  lobster run --dry-run --file path/to/workflow.lobster\n` +
+    `  lobster run --dry-run '<pipeline>'\n` +
     `  lobster resume --token <token> --approve yes|no\n` +
     `  lobster doctor\n` +
     `  lobster version\n` +
     `  lobster help <command>\n\n` +
+    `Flags:\n` +
+    `  --dry-run  Validate and print the execution plan without running anything\n\n` +
     `Modes:\n` +
     `  - human (default): renderers can write to stdout\n` +
     `  - tool: prints a single JSON envelope for easy integration\n\n` +

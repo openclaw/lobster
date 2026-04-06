@@ -76,6 +76,7 @@ type RunContext = {
     get: (name: string) => any;
   };
   llmAdapters?: Record<string, any>;
+  dryRun?: boolean;
 };
 
 export type WorkflowResumePayload = {
@@ -212,6 +213,10 @@ export async function runWorkflowFile({
     results[resumeState.approvalStepId] = previous;
   }
 
+  if (ctx.dryRun) {
+    return dryRunWorkflow({ steps, resolvedArgs, results, startIndex, ctx });
+  }
+
   let lastStepId: string | null = findLastCompletedStepId(steps, results);
 
   for (let idx = startIndex; idx < steps.length; idx++) {
@@ -304,6 +309,113 @@ export async function runWorkflowFile({
     await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
   }
   return { status: 'ok', output };
+}
+
+// Returns a human-readable note if a step.stdin value references a prior step's
+// output. Because dry-run placeholders have no actual stdout/json, we surface
+// this so users know the value is unknown at plan time rather than silently
+// resolving to an empty string.
+function dryRunStdinNote(stdin: unknown): string | null {
+  if (stdin === null || stdin === undefined) return null;
+  if (typeof stdin !== 'string') return null;
+  const trimmed = stdin.trim();
+  // Strict step ref: '$step-id.stdout' or '$step-id.json'
+  if (/^\$[A-Za-z0-9_-]+\.(stdout|json)$/.test(trimmed)) {
+    return `${trimmed}  [output unknown at plan time]`;
+  }
+  // Inline template ref: contains '$stepid.stdout' or '$stepid.json'
+  if (/\$[A-Za-z0-9_-]+\.(stdout|json)/.test(trimmed)) {
+    return `${trimmed}  [contains step output refs — unknown at plan time]`;
+  }
+  return null;
+}
+
+function dryRunWorkflow({
+  steps,
+  resolvedArgs,
+  results,
+  startIndex,
+  ctx,
+}: {
+  steps: WorkflowStep[];
+  resolvedArgs: Record<string, unknown>;
+  results: Record<string, WorkflowStepResult>;
+  startIndex: number;
+  ctx: RunContext;
+}): WorkflowRunResult {
+  const lines: string[] = [];
+  const totalSteps = steps.length - startIndex;
+  lines.push(`[DRY RUN] Would execute ${totalSteps} step${totalSteps !== 1 ? 's' : ''}:\n`);
+
+  for (let idx = startIndex; idx < steps.length; idx++) {
+    const step = steps[idx];
+    const num = idx - startIndex + 1;
+
+    if (!evaluateCondition(step.when ?? step.condition, results)) {
+      results[step.id] = { id: step.id, skipped: true };
+      lines.push(`  ${num}. ${step.id}  [skipped — condition: false]`);
+      continue;
+    }
+
+    // Validate stdin refs early — throws if a strict ref like '$missing.stdout'
+    // points to a step that doesn't exist at all (real execution would also fail).
+    // We call resolveInputValue with the current results so refs to steps we've
+    // already visited (placeholders) are accepted without throwing.
+    if (step.stdin !== undefined && step.stdin !== null) {
+      try {
+        resolveInputValue(step.stdin, resolvedArgs, results);
+      } catch (err: any) {
+        throw new Error(`Workflow step ${step.id} stdin: ${err?.message ?? String(err)}`);
+      }
+    }
+
+    const execution = getStepExecution(step);
+
+    // Annotate when the resolved command/pipeline references a prior step's output.
+    // Since dry-run placeholders have no actual stdout/json, note it explicitly
+    // rather than silently collapsing the reference to an empty string.
+    const stdinNote = dryRunStdinNote(step.stdin);
+
+    if (execution.kind === 'shell') {
+      const command = resolveTemplate(execution.value, resolvedArgs, results);
+      lines.push(`  ${num}. ${step.id}  [shell]`);
+      lines.push(`     run: ${command}`);
+    } else if (execution.kind === 'pipeline') {
+      const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
+      // Validate pipeline syntax and registry even in dry-run so errors surface early.
+      if (!ctx.registry) {
+        throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+      }
+      // Validate that every stage name is a known command.
+      const stages = parsePipeline(pipelineText);
+      for (const stage of stages) {
+        if (!ctx.registry.get(stage.name)) {
+          throw new Error(`Workflow step ${step.id} pipeline references unknown command: ${stage.name}`);
+        }
+      }
+      lines.push(`  ${num}. ${step.id}  [pipeline]`);
+      lines.push(`     pipeline: ${pipelineText}`);
+    } else {
+      lines.push(`  ${num}. ${step.id}  [no-op]`);
+    }
+
+    if (stdinNote) lines.push(`     stdin: ${stdinNote}`);
+    if (isApprovalStep(step.approval)) {
+      lines.push(`     [approval required]`);
+    }
+
+    // Record a placeholder result so later steps can reference this step in conditions.
+    // For approval steps, model approval as granted so downstream conditions like
+    // $step.approved evaluate correctly in the plan (rather than always being false).
+    // We intentionally omit stdout/json — dryRunStdinNote() surfaces that gap.
+    results[step.id] = isApprovalStep(step.approval)
+      ? { id: step.id, approved: true }
+      : { id: step.id };
+  }
+
+  lines.push('');
+  ctx.stderr.write(lines.join('\n'));
+  return { status: 'ok', output: [] };
 }
 
 export function decodeWorkflowResumePayload(payload: unknown): WorkflowResumePayload | null {
