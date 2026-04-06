@@ -65,8 +65,10 @@ export async function runCli(argv) {
 }
 
 async function handleRun({ argv, registry }) {
-  const { mode, rest, filePath, argsJson, dryRun } = parseRunArgs(argv);
+  const parsed = parseRunArgs(argv);
+  const { mode, argsJson } = parsed;
   const normalizedMode = normalizeMode(mode);
+  const { rest, filePath, dryRun } = await resolveRunTarget(parsed);
 
   const workflowFile = filePath
     ? await resolveWorkflowFile(filePath)
@@ -245,14 +247,11 @@ function parseRunArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
 
-    // --dry-run is a lobster-level flag. Consume it unless rest already contains
-    // a pipe character, which indicates we're inside an unquoted pipeline where
-    // '--dry-run' may belong to a stage (e.g. lobster run exec | filter --dry-run).
-    // This supports: lobster run --dry-run file.lobster AND
-    //                lobster run file.lobster --dry-run
-    // but does not steal the flag from unquoted pipeline stage args once a pipe
-    // has appeared.
-    if (tok === '--dry-run' && !rest.some((t) => String(t).includes('|'))) {
+    // Treat --dry-run as a Lobster flag only before positional command/pipeline
+    // args begin. Once rest has started, the token may belong to the command.
+    // Trailing workflow-file --dry-run is handled later after we can prove the
+    // first positional token is actually a workflow file.
+    if (tok === '--dry-run' && rest.length === 0) {
       dryRun = true;
       continue;
     }
@@ -303,6 +302,24 @@ function parseRunArgs(argv) {
   }
 
   return { mode, rest, filePath, argsJson, dryRun };
+}
+
+async function resolveRunTarget(parsed: {
+  rest: string[];
+  filePath: string | null;
+  dryRun: boolean;
+}) {
+  if (parsed.filePath) return parsed;
+  const restWithoutDryRun = parsed.rest.filter((token) => token !== '--dry-run');
+  if (restWithoutDryRun.length === 1 && restWithoutDryRun.length !== parsed.rest.length) {
+    try {
+      const workflowFile = await resolveWorkflowFile(restWithoutDryRun[0]);
+      return { ...parsed, filePath: workflowFile, rest: [], dryRun: true };
+    } catch {
+      return parsed;
+    }
+  }
+  return parsed;
 }
 
 function normalizeMode(mode) {

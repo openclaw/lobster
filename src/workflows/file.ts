@@ -347,6 +347,10 @@ function dryRunTemplateNote(input: string): string | null {
   return null;
 }
 
+function hasDeferredDryRunStageName(input: string) {
+  return /\$[A-Za-z0-9_-]+\.(stdout|json)/.test(input);
+}
+
 function resolveDryRunTemplate(
   input: string,
   args: Record<string, unknown>,
@@ -424,12 +428,18 @@ function dryRunWorkflow({
       // Validate that every stage name is a known command.
       const stages = parsePipeline(pipelineText);
       for (const stage of stages) {
+        if (hasDeferredDryRunStageName(stage.name)) {
+          continue;
+        }
         if (!ctx.registry.get(stage.name)) {
           throw new Error(`Workflow step ${step.id} pipeline references unknown command: ${stage.name}`);
         }
       }
       lines.push(`  ${num}. ${step.id}  [pipeline]`);
       lines.push(`     pipeline: ${pipelineText}${pipelineNote ? `  ${pipelineNote}` : ''}`);
+      if (stages.some((stage) => hasDeferredDryRunStageName(stage.name))) {
+        lines.push('     [command validation deferred — stage name depends on step output]');
+      }
     } else {
       lines.push(`  ${num}. ${step.id}  [no-op]`);
     }

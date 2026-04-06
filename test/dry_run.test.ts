@@ -425,3 +425,55 @@ test('dry-run flag after positional file arg activates dry-run', async () => {
 
   await fsp.rm(tmpDir, { recursive: true, force: true });
 });
+
+test('dry-run flag still activates after positional workflow file when other Lobster flags are present', async () => {
+  const workflow = {
+    args: { name: { default: 'hello' } },
+    steps: [{ id: 'greet', run: 'echo ${name}' }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-test-args-'));
+  const filePath = path.join(tmpDir, 'test.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+
+  const res = runLobster(['run', filePath, '--args-json', '{"name":"world"}', '--dry-run']);
+  assert.equal(res.status, 0, `expected exit 0\nstdout=${res.stdout}\nstderr=${res.stderr}`);
+  assert.match(res.stderr, /\[DRY RUN\]/);
+  assert.match(res.stderr, /run: echo world/);
+  assert.equal(res.stdout.trim(), '');
+
+  await fsp.rm(tmpDir, { recursive: true, force: true });
+});
+
+test('command-level --dry-run in the first stage is not stolen by Lobster dry-run parsing', () => {
+  const res = runLobster(['run', 'openclaw.invoke', '--tool', 'message', '--action', 'send', '--dry-run']);
+
+  assert.notEqual(res.status, 0, 'expected command execution to fail instead of Lobster dry-run exiting 0');
+  assert.doesNotMatch(res.stderr, /\[DRY RUN\]/);
+  assert.match(res.stderr, /requires --url or OPENCLAW_URL/);
+});
+
+test('dry-run allows pipeline stage names that still depend on prior step output', async () => {
+  const registry = createDefaultRegistry();
+  const workflow = {
+    steps: [
+      { id: 'planner', run: 'echo openclaw.invoke' },
+      { id: 'call', pipeline: '$planner.stdout --tool message --action send' },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-dry-dynamic-stage-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const { stdout, stderr, getStderr } = createStreams();
+
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout, stderr, env: { ...process.env }, mode: 'human', registry, dryRun: true },
+  });
+
+  assert.equal(result.status, 'ok');
+  const output = getStderr();
+  assert.match(output, /pipeline: \$planner\.stdout --tool message --action send/);
+  assert.match(output, /\[command validation deferred — stage name depends on step output\]/);
+});
