@@ -80,3 +80,26 @@ test('resume cancellation cleans up pipeline resume state', async () => {
   const pipelineResumeFiles = files.filter((name) => name.startsWith('pipeline_resume_'));
   assert.deepEqual(pipelineResumeFiles, []);
 });
+
+test('cli resume accepts --response-json for pipeline input requests', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-resume-input-'));
+  const stateDir = path.join(tmpDir, 'state');
+
+  const pipeline =
+    `ask --prompt 'Review?' --schema '{"type":"object","properties":{"decision":{"type":"string"}},"required":["decision"]}'`;
+
+  const first = runCli(['run', '--mode', 'tool', pipeline], { LOBSTER_STATE_DIR: stateDir });
+  assert.equal(first.status, 0);
+  const firstJson = JSON.parse(first.stdout);
+  assert.equal(firstJson.status, 'needs_input');
+  assert.ok(firstJson.requiresInput?.resumeToken);
+
+  const resumed = runCli(
+    ['resume', '--token', firstJson.requiresInput.resumeToken, '--response-json', '{"decision":"approve"}'],
+    { LOBSTER_STATE_DIR: stateDir },
+  );
+  assert.equal(resumed.status, 0);
+  const resumedJson = JSON.parse(resumed.stdout);
+  assert.equal(resumedJson.status, 'ok');
+  assert.deepEqual(resumedJson.output, [{ decision: 'approve' }]);
+});

@@ -57,3 +57,35 @@ test('approve passes through in human interactive mode only (emit required other
   assert.equal(result.halt, true);
   assert.equal(items[0].type, 'approval_request');
 });
+
+test('ask halts pipeline in tool mode with needs_input payload', async () => {
+  const registry = createDefaultRegistry();
+  const cmd = registry.get('ask');
+
+  const result = await cmd.run({
+    input: streamOf([{ text: 'draft v1' }]),
+    args: {
+      _: [],
+      prompt: 'Review?',
+      'subject-from-stdin': true,
+      schema: '{"type":"object","properties":{"decision":{"type":"string"}},"required":["decision"]}',
+    },
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env: process.env,
+      registry,
+      mode: 'tool',
+      render: { json() {}, lines() {} },
+    },
+  });
+
+  const items = [];
+  for await (const it of result.output) items.push(it);
+  assert.equal(result.halt, true);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].type, 'input_request');
+  assert.equal(items[0].prompt, 'Review?');
+  assert.deepEqual(items[0].subject, { text: '{"text":"draft v1"}' });
+});

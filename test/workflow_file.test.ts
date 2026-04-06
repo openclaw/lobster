@@ -143,6 +143,132 @@ test('workflow resume cancellation cleans up resume state', async () => {
   assert.deepEqual(resumeStateFiles, []);
 });
 
+test('workflow file input steps pause and resume with structured responses', async () => {
+  const workflow = {
+    steps: [
+      {
+        id: 'draft',
+        run: 'node -e "process.stdout.write(JSON.stringify({text:\'hello\'}))"',
+      },
+      {
+        id: 'review',
+        input: {
+          prompt: 'Review draft?',
+          responseSchema: {
+            type: 'object',
+            properties: { decision: { type: 'string' } },
+            required: ['decision'],
+          },
+        },
+      },
+      {
+        id: 'finish',
+        run: 'node -e "process.stdout.write(JSON.stringify({decision:process.env.DECISION,subject:process.env.SUBJECT}))"',
+        env: {
+          DECISION: '$review.response.decision',
+          SUBJECT: '$review.subject.text',
+        },
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+  });
+
+  assert.equal(first.status, 'needs_input');
+  assert.deepEqual(first.requiresInput?.subject, { text: 'hello' });
+  assert.ok(first.requiresInput?.resumeToken);
+
+  const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
+  assert.equal(payload.kind, 'workflow-file');
+
+  const resumed = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+    resume: payload,
+    response: { decision: 'approve' },
+  });
+
+  assert.equal(resumed.status, 'ok');
+  assert.deepEqual(resumed.output, [{ decision: 'approve', subject: 'hello' }]);
+});
+
+test('workflow input resumes preserve the full subject even when the tool envelope preview is truncated', async () => {
+  const longText = 'x'.repeat(250_000);
+  const workflow = {
+    steps: [
+      {
+        id: 'draft',
+        run: 'node -e "process.stdout.write(JSON.stringify({text:process.env.LONG_TEXT}))"',
+      },
+      {
+        id: 'review',
+        input: {
+          prompt: 'Review draft?',
+          responseSchema: {
+            type: 'object',
+            properties: { decision: { type: 'string' } },
+            required: ['decision'],
+          },
+        },
+      },
+      {
+        id: 'finish',
+        run: 'node -e "process.stdout.write(JSON.stringify({subjectLength:String(process.env.SUBJECT ?? \'\').length}))"',
+        env: {
+          SUBJECT: '$review.subject.text',
+        },
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-input-truncate-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const env = {
+    ...process.env,
+    LOBSTER_STATE_DIR: stateDir,
+    LOBSTER_MAX_TOOL_ENVELOPE_BYTES: '8192',
+    LONG_TEXT: longText,
+  };
+
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+  });
+
+  assert.equal(first.status, 'needs_input');
+  assert.deepEqual(first.requiresInput?.subject, {
+    truncated: true,
+    bytes: Buffer.byteLength(JSON.stringify({ text: longText }), 'utf8'),
+    preview: JSON.stringify({ text: longText }).slice(0, 2000),
+  });
+
+  const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
+  assert.equal(payload.kind, 'workflow-file');
+
+  const resumed = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+    resume: payload,
+    response: { decision: 'approve' },
+  });
+
+  assert.equal(resumed.status, 'ok');
+  assert.deepEqual(resumed.output, [{ subjectLength: longText.length }]);
+});
+
 test('workflow files can mix shell steps, approval-only steps, and pipeline llm steps', async () => {
   const registry = createDefaultRegistry();
   const requests: any[] = [];

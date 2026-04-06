@@ -126,3 +126,69 @@ test('resumeToolRequest completes approval-gated workflow with injected llm adap
   assert.equal((resumed.output![0] as any).output.data.reason, 'warm');
   assert.equal(calls.length, 1);
 });
+
+test('runToolRequest/resumeToolRequest handles needs_input workflow pauses', async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-core-tool-input-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+
+  await fsp.writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        steps: [
+          {
+            id: 'draft',
+            run: 'node -e "process.stdout.write(JSON.stringify({text:\'hello\'}))"',
+          },
+          {
+            id: 'review',
+            input: {
+              prompt: 'Review draft?',
+              responseSchema: {
+                type: 'object',
+                properties: { decision: { type: 'string' } },
+                required: ['decision'],
+              },
+            },
+          },
+          {
+            id: 'finish',
+            run: 'node -e "process.stdout.write(JSON.stringify({decision:process.env.DECISION,subject:process.env.SUBJECT}))"',
+            env: {
+              DECISION: '$review.response.decision',
+              SUBJECT: '$review.subject.text',
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  const env = {
+    ...process.env,
+    LOBSTER_STATE_DIR: path.join(tmpDir, 'state'),
+  };
+
+  const first = await runToolRequest({
+    filePath,
+    ctx: { cwd: tmpDir, env },
+  });
+
+  assert.equal(first.ok, true);
+  assert.equal(first.status, 'needs_input');
+  assert.deepEqual(first.requiresInput?.subject, { text: 'hello' });
+  assert.ok(first.requiresInput?.resumeToken);
+
+  const resumed = await resumeToolRequest({
+    token: first.requiresInput?.resumeToken ?? '',
+    response: { decision: 'approve' },
+    ctx: { cwd: tmpDir, env },
+  });
+
+  assert.equal(resumed.ok, true);
+  assert.equal(resumed.status, 'ok');
+  assert.deepEqual(resumed.output, [{ decision: 'approve', subject: 'hello' }]);
+});

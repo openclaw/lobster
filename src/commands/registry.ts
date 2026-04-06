@@ -10,6 +10,7 @@ import { templateCommand } from "./stdlib/template.js";
 import { mapCommand } from "./stdlib/map.js";
 import { groupByCommand } from "./stdlib/group_by.js";
 import { approveCommand } from "./stdlib/approve.js";
+import { askCommand } from "./stdlib/ask.js";
 import { clawdInvokeCommand, openclawInvokeCommand } from "./stdlib/openclaw_invoke.js";
 import { llmInvokeCommand } from "./stdlib/llm_invoke.js";
 import { llmTaskInvokeCommand } from "./stdlib/llm_task_invoke.js";
@@ -38,6 +39,7 @@ export function createDefaultRegistry() {
     mapCommand,
     groupByCommand,
     approveCommand,
+    askCommand,
     openclawInvokeCommand,
     clawdInvokeCommand,
     llmInvokeCommand,

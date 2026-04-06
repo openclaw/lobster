@@ -11,6 +11,7 @@ import { encodeToken } from '../token.js';
 import { createApprovalIndex, deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
 import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
+import { sharedAjv } from '../validation.js';
 
 export type WorkflowFile = {
   name?: string;
@@ -30,6 +31,7 @@ export type WorkflowStep = {
   cwd?: string;
   stdin?: unknown;
   approval?: WorkflowApproval;
+  input?: WorkflowInputRequest;
   condition?: unknown;
   when?: unknown;
 };
@@ -44,16 +46,24 @@ export type WorkflowApproval =
     preview?: string;
   };
 
+export type WorkflowInputRequest = {
+  prompt: string;
+  responseSchema: unknown;
+  defaults?: unknown;
+};
+
 export type WorkflowStepResult = {
   id: string;
   stdout?: string;
   json?: unknown;
   approved?: boolean;
+  subject?: unknown;
+  response?: unknown;
   skipped?: boolean;
 };
 
 export type WorkflowRunResult = {
-  status: 'ok' | 'needs_approval' | 'cancelled';
+  status: 'ok' | 'needs_approval' | 'needs_input' | 'cancelled';
   output: unknown[];
   requiresApproval?: {
     type: 'approval_request';
@@ -62,6 +72,14 @@ export type WorkflowRunResult = {
     preview?: string;
     resumeToken?: string;
     approvalId?: string;
+  };
+  requiresInput?: {
+    type: 'input_request';
+    prompt: string;
+    responseSchema: unknown;
+    defaults?: unknown;
+    subject?: unknown;
+    resumeToken?: string;
   };
 };
 
@@ -90,6 +108,9 @@ export type WorkflowResumePayload = {
   steps?: Record<string, WorkflowStepResult>;
   args?: Record<string, unknown>;
   approvalStepId?: string;
+  inputStepId?: string;
+  inputSchema?: unknown;
+  inputSubject?: unknown;
 };
 
 type WorkflowResumeState = {
@@ -98,8 +119,18 @@ type WorkflowResumeState = {
   steps: Record<string, WorkflowStepResult>;
   args: Record<string, unknown>;
   approvalStepId?: string;
+  inputStepId?: string;
+  inputSchema?: unknown;
+  inputSubject?: unknown;
   createdAt: string;
 };
+
+export class WorkflowResumeArgumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkflowResumeArgumentError';
+  }
+}
 
 export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> {
   const text = await fsp.readFile(filePath, 'utf8');
@@ -126,11 +157,17 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     const shellCommand = typeof step.run === 'string' ? step.run : step.command;
     const pipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
     const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline));
-    if (executionCount === 0 && !isApprovalStep(step.approval)) {
-      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, or approval`);
+    if (executionCount === 0 && !isApprovalStep(step.approval) && !isInputStep(step.input)) {
+      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, approval, or input`);
     }
     if (executionCount > 1) {
       throw new Error(`Workflow step ${step.id} can only define one of run, command, or pipeline`);
+    }
+    if (executionCount > 0 && isInputStep(step.input)) {
+      throw new Error(`Workflow step ${step.id} input steps cannot define run, command, or pipeline`);
+    }
+    if (isApprovalStep(step.approval) && isInputStep(step.input)) {
+      throw new Error(`Workflow step ${step.id} cannot define both approval and input`);
     }
     if (step.run !== undefined && typeof step.run !== 'string') {
       throw new Error(`Workflow step ${step.id} run must be a string`);
@@ -140,6 +177,22 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     }
     if (step.pipeline !== undefined && typeof step.pipeline !== 'string') {
       throw new Error(`Workflow step ${step.id} pipeline must be a string`);
+    }
+    if (step.input !== undefined && !isInputStep(step.input)) {
+      throw new Error(`Workflow step ${step.id} input must be an object`);
+    }
+    if (step.input && typeof step.input.prompt !== 'string') {
+      throw new Error(`Workflow step ${step.id} input.prompt must be a string`);
+    }
+    if (step.input && (step.input.responseSchema === undefined || typeof step.input.responseSchema !== 'object')) {
+      throw new Error(`Workflow step ${step.id} input.responseSchema must be an object`);
+    }
+    if (step.input) {
+      try {
+        sharedAjv.compile(step.input.responseSchema as any);
+      } catch (err: any) {
+        throw new Error(`Workflow step ${step.id} input.responseSchema is invalid: ${err?.message ?? String(err)}`);
+      }
     }
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
@@ -176,12 +229,16 @@ export async function runWorkflowFile({
   ctx,
   resume,
   approved,
+  response,
+  cancel,
 }: {
   filePath?: string;
   args?: Record<string, unknown>;
   ctx: RunContext;
   resume?: WorkflowResumePayload;
   approved?: boolean;
+  response?: unknown;
+  cancel?: boolean;
 }): Promise<WorkflowRunResult> {
   const consumedResumeStateKey = resume?.stateKey && typeof resume.stateKey === 'string'
     ? resume.stateKey
@@ -189,6 +246,29 @@ export async function runWorkflowFile({
   const resumeState = resume?.stateKey
     ? await loadWorkflowResumeState(ctx.env, resume.stateKey)
     : resume ?? null;
+  if (resumeState?.approvalStepId && resumeState?.inputStepId) {
+    throw new Error('Invalid workflow resume state');
+  }
+
+  if (resumeState?.approvalStepId) {
+    if (response !== undefined) {
+      throw new WorkflowResumeArgumentError('Workflow resume requires --approve yes|no for approval requests');
+    }
+    if (cancel === true || approved === false) {
+      if (consumedResumeStateKey) {
+        await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+      }
+      return { status: 'cancelled', output: [] };
+    }
+  }
+
+  if (resumeState?.inputStepId && cancel === true) {
+    if (consumedResumeStateKey) {
+      await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+    }
+    return { status: 'cancelled', output: [] };
+  }
+
   const resolvedFilePath = filePath ?? resumeState?.filePath;
   if (!resolvedFilePath) {
     throw new Error('Workflow file path required');
@@ -196,17 +276,11 @@ export async function runWorkflowFile({
   const workflow = await loadWorkflowFile(resolvedFilePath);
   const resolvedArgs = resolveWorkflowArgs(workflow.args, args ?? resumeState?.args);
   const steps = workflow.steps;
+  const stepIndexById = new Map(steps.map((step, idx) => [step.id, idx]));
   const results: Record<string, WorkflowStepResult> = resumeState?.steps
     ? cloneResults(resumeState.steps)
     : {};
   const startIndex = resumeState?.resumeAtIndex ?? 0;
-
-  if (resumeState?.approvalStepId && approved === false) {
-    if (consumedResumeStateKey) {
-      await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
-    }
-    return { status: 'cancelled', output: [] };
-  }
 
   if (resumeState?.approvalStepId && typeof approved === 'boolean') {
     const previous = results[resumeState.approvalStepId] ?? { id: resumeState.approvalStepId };
@@ -214,17 +288,115 @@ export async function runWorkflowFile({
     results[resumeState.approvalStepId] = previous;
   }
 
+  if (resumeState?.inputStepId) {
+    if (approved !== undefined) {
+      throw new WorkflowResumeArgumentError('Workflow resume requires --response-json for input requests');
+    }
+    if (response === undefined) {
+      throw new WorkflowResumeArgumentError('Workflow resume requires --response-json for input requests');
+    }
+    const inputStep = steps[stepIndexById.get(resumeState.inputStepId) ?? -1];
+    if (!inputStep || !isInputStep(inputStep.input)) {
+      throw new Error(`Invalid input step in resume state: ${resumeState.inputStepId}`);
+    }
+    try {
+      validateInputResponse({
+        schema: resumeState.inputSchema ?? inputStep.input.responseSchema,
+        response,
+        stepId: inputStep.id,
+      });
+    } catch (err: any) {
+      throw new WorkflowResumeArgumentError(err?.message ?? String(err));
+    }
+    const previous = results[resumeState.inputStepId] ?? { id: resumeState.inputStepId };
+    previous.subject = resumeState.inputSubject ?? null;
+    previous.response = response;
+    delete previous.skipped;
+    results[resumeState.inputStepId] = previous;
+  }
+
   if (ctx.dryRun) {
     return dryRunWorkflow({ steps, resolvedArgs, results, startIndex, ctx });
   }
 
-  let lastStepId: string | null = findLastCompletedStepId(steps, results);
+  let lastStepId: string | null = resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
 
   for (let idx = startIndex; idx < steps.length; idx++) {
     const step = steps[idx];
 
     if (!evaluateCondition(step.when ?? step.condition, results)) {
       results[step.id] = { id: step.id, skipped: true };
+      continue;
+    }
+
+    if (isInputStep(step.input)) {
+      const subject = resolveInputSubject({
+        step,
+        args: resolvedArgs,
+        results,
+        lastStepId,
+      });
+
+      if (ctx.mode === 'tool' || !isInteractive(ctx.stdin)) {
+        const inputRequest = buildNeedsInputRequest({
+          stepId: step.id,
+          prompt: step.input.prompt,
+          responseSchema: step.input.responseSchema,
+          defaults: step.input.defaults,
+          subject,
+          maxEnvelopeBytes: resolveToolEnvelopeMaxBytes(ctx.env),
+        });
+        const stateKey = await saveWorkflowResumeState(ctx.env, {
+          filePath: resolvedFilePath,
+          resumeAtIndex: idx + 1,
+          steps: results,
+          args: resolvedArgs,
+          inputStepId: step.id,
+          inputSchema: step.input.responseSchema,
+          // Preserve the full resolved subject for resume semantics; the tool
+          // envelope may contain a truncated preview to stay within size limits.
+          inputSubject: subject,
+          createdAt: new Date().toISOString(),
+        });
+
+        if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
+          await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+        }
+
+        const resumeToken = encodeToken({
+          protocolVersion: 1,
+          v: 1,
+          kind: 'workflow-file',
+          stateKey,
+        } satisfies WorkflowResumePayload);
+
+        return {
+          status: 'needs_input',
+          output: [],
+          requiresInput: {
+            ...inputRequest,
+            resumeToken,
+          },
+        };
+      }
+
+      ctx.stdout.write(`${step.input.prompt}\n`);
+      ctx.stdout.write('Enter JSON response: ');
+      const raw = await readLineFromStream(ctx.stdin, {
+        timeoutMs: parseApprovalTimeoutMs(ctx.env),
+      });
+      const parsed = parseResponseJson(String(raw ?? '').trim());
+      validateInputResponse({
+        schema: step.input.responseSchema,
+        response: parsed,
+        stepId: step.id,
+      });
+      results[step.id] = {
+        id: step.id,
+        subject,
+        response: parsed,
+      };
+      lastStepId = step.id;
       continue;
     }
 
@@ -391,6 +563,14 @@ function dryRunWorkflow({
     if (!evaluateCondition(step.when ?? step.condition, results)) {
       results[step.id] = { id: step.id, skipped: true };
       lines.push(`  ${num}. ${step.id}  [skipped — condition: false]`);
+      continue;
+    }
+
+    if (isInputStep(step.input)) {
+      lines.push(`  ${num}. ${step.id}  [input]`);
+      lines.push(`     prompt: ${step.input.prompt}`);
+      lines.push(`     [input required]`);
+      results[step.id] = { id: step.id, response: { pending: true } };
       continue;
     }
 
@@ -585,34 +765,33 @@ function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
 }
 
 function resolveStepRefs(input: string, results: Record<string, WorkflowStepResult>) {
-  return input.replace(/\$([A-Za-z0-9_-]+)\.(stdout|json|approved)/g, (match, id, field) => {
-    const step = results[id];
-    if (!step) return match;
-    if (field === 'stdout') return step.stdout ?? '';
-    if (field === 'json') return step.json !== undefined ? JSON.stringify(step.json) : '';
-    if (field === 'approved') return step.approved === true ? 'true' : 'false';
-    return match;
+  return input.replace(/\$([A-Za-z0-9_-]+)\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)/g, (match, id, pathValue) => {
+    const refValue = getStepRefValue({ id, path: pathValue }, results, false);
+    if (refValue === undefined) {
+      if (pathValue === 'approved' || pathValue === 'skipped') return 'false';
+      return '';
+    }
+    return renderTemplateValue(refValue);
   });
 }
 
 function parseStepRef(value: string) {
-  const match = value.match(/^\$([A-Za-z0-9_-]+)\.(stdout|json)$/);
+  const match = value.match(/^\$([A-Za-z0-9_-]+)\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)$/);
   if (!match) return null;
-  return { id: match[1], field: match[2] as 'stdout' | 'json' };
+  return { id: match[1], path: match[2] };
 }
 
 function getStepRefValue(
-  ref: { id: string; field: 'stdout' | 'json' },
+  ref: { id: string; path: string },
   results: Record<string, WorkflowStepResult>,
   strict: boolean,
 ) {
   const step = results[ref.id];
   if (!step) {
-    if (strict) throw new Error(`Unknown step reference: ${ref.id}.${ref.field}`);
-    return '';
+    if (strict) throw new Error(`Unknown step reference: ${ref.id}.${ref.path}`);
+    return undefined;
   }
-  if (ref.field === 'stdout') return step.stdout ?? '';
-  return step.json;
+  return getValueByPath(step, ref.path);
 }
 
 function evaluateCondition(
@@ -627,13 +806,10 @@ function evaluateCondition(
   if (trimmed === 'true') return true;
   if (trimmed === 'false') return false;
 
-  const match = trimmed.match(/^\$([A-Za-z0-9_-]+)\.(approved|skipped)$/);
-  if (!match) throw new Error(`Unsupported condition: ${condition}`);
-
-  const step = results[match[1]];
-  if (!step) return false;
-
-  return match[2] === 'approved' ? step.approved === true : step.skipped === true;
+  const ref = parseStepRef(trimmed);
+  if (!ref) throw new Error(`Unsupported condition: ${condition}`);
+  const value = getStepRefValue(ref, results, false);
+  return Boolean(value);
 }
 
 function isApprovalStep(approval: WorkflowStep['approval']) {
@@ -641,6 +817,10 @@ function isApprovalStep(approval: WorkflowStep['approval']) {
   if (typeof approval === 'string' && approval.trim().length > 0) return true;
   if (approval && typeof approval === 'object' && !Array.isArray(approval)) return true;
   return false;
+}
+
+function isInputStep(input: WorkflowStep['input']) {
+  return Boolean(input && typeof input === 'object' && !Array.isArray(input));
 }
 
 function extractApprovalRequest(step: WorkflowStep, result: WorkflowStepResult) {
@@ -699,6 +879,9 @@ function toOutputItems(result: WorkflowStepResult | undefined) {
   if (result.json !== undefined) {
     return Array.isArray(result.json) ? result.json : [result.json];
   }
+  if (result.response !== undefined) {
+    return Array.isArray(result.response) ? result.response : [result.response];
+  }
   if (result.stdout !== undefined) {
     return result.stdout === '' ? [] : [result.stdout];
   }
@@ -729,6 +912,181 @@ function parseApprovalTimeoutMs(env: Record<string, string | undefined>) {
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) return 0;
   return Math.floor(value);
+}
+
+const MAX_NEEDS_INPUT_SUBJECT_BYTES = 192_000;
+const DEFAULT_TOOL_ENVELOPE_MAX_BYTES = 512_000;
+const RESUME_TOKEN_PLACEHOLDER = 'x'.repeat(220);
+
+function parseResponseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error('Input response must be valid JSON');
+  }
+}
+
+function validateInputResponse(params: {
+  schema: unknown;
+  response: unknown;
+  stepId: string;
+}) {
+  const validator = sharedAjv.compile(params.schema as object);
+  const ok = validator(params.response);
+  if (ok) return;
+  const first = validator.errors?.[0];
+  const pathValue = first?.instancePath || '/';
+  const reason = first?.message ? ` ${first.message}` : '';
+  throw new Error(
+    `Workflow input step ${params.stepId} response failed schema validation at ${pathValue}:${reason}`,
+  );
+}
+
+function resolveInputSubject(params: {
+  step: WorkflowStep;
+  args: Record<string, unknown>;
+  results: Record<string, WorkflowStepResult>;
+  lastStepId: string | null;
+}) {
+  if (params.step.stdin !== undefined) {
+    return resolveInputValue(params.step.stdin, params.args, params.results);
+  }
+  if (!params.lastStepId) return null;
+  const previous = params.results[params.lastStepId];
+  if (!previous) return null;
+  if (previous.json !== undefined) return previous.json;
+  if (previous.response !== undefined) return previous.response;
+  if (previous.stdout !== undefined) return previous.stdout;
+  return null;
+}
+
+function maybeTruncateInputSubject(subject: unknown): unknown {
+  let serialized = '';
+  try {
+    serialized = JSON.stringify(subject ?? null);
+  } catch {
+    return {
+      truncated: true,
+      bytes: 0,
+      preview: '[unserializable subject]',
+    };
+  }
+  const byteLength = Buffer.byteLength(serialized, 'utf8');
+  if (byteLength <= MAX_NEEDS_INPUT_SUBJECT_BYTES) return subject;
+  return {
+    truncated: true,
+    bytes: byteLength,
+    preview: serialized.slice(0, 2000),
+  };
+}
+
+function resolveToolEnvelopeMaxBytes(env: Record<string, string | undefined>) {
+  const raw = env?.LOBSTER_MAX_TOOL_ENVELOPE_BYTES;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1024) {
+    return DEFAULT_TOOL_ENVELOPE_MAX_BYTES;
+  }
+  return Math.floor(parsed);
+}
+
+function buildNeedsInputRequest(params: {
+  stepId: string;
+  prompt: string;
+  responseSchema: unknown;
+  defaults: unknown;
+  subject: unknown;
+  maxEnvelopeBytes: number;
+}) {
+  const base = {
+    type: 'input_request' as const,
+    prompt: params.prompt,
+    responseSchema: params.responseSchema,
+    ...(params.defaults !== undefined ? { defaults: params.defaults } : null),
+  };
+
+  let subject = params.subject;
+  let request = { ...base, subject };
+  if (fitsNeedsInputEnvelope(request, params.maxEnvelopeBytes)) return request;
+
+  subject = maybeTruncateInputSubject(subject);
+  request = { ...base, subject };
+  if (fitsNeedsInputEnvelope(request, params.maxEnvelopeBytes)) return request;
+
+  request = {
+    ...base,
+    subject: {
+      truncated: true,
+      bytes: estimateSerializedBytes(params.subject),
+      preview: '[subject omitted: envelope size limit]',
+    },
+  };
+  if (fitsNeedsInputEnvelope(request, params.maxEnvelopeBytes)) return request;
+
+  throw new Error(
+    `Workflow input step ${params.stepId} needs_input envelope exceeds ${params.maxEnvelopeBytes} bytes even after subject truncation`,
+  );
+}
+
+function fitsNeedsInputEnvelope(
+  request: {
+    type: 'input_request';
+    prompt: string;
+    responseSchema: unknown;
+    defaults?: unknown;
+    subject: unknown;
+  },
+  maxEnvelopeBytes: number,
+) {
+  const envelope = {
+    protocolVersion: 1,
+    ok: true,
+    status: 'needs_input',
+    output: [],
+    requiresApproval: null,
+    requiresInput: {
+      ...request,
+      resumeToken: RESUME_TOKEN_PLACEHOLDER,
+    },
+  };
+  return estimateSerializedBytes(envelope) <= maxEnvelopeBytes;
+}
+
+function estimateSerializedBytes(value: unknown) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function renderTemplateValue(value: unknown) {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function getValueByPath(value: unknown, pathValue: string) {
+  const fields = pathValue.split('.');
+  let current: unknown = value;
+  for (const field of fields) {
+    if (current === null || current === undefined) return undefined;
+    if (Array.isArray(current)) {
+      const idx = Number(field);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= current.length) return undefined;
+      current = current[idx];
+      continue;
+    }
+    if (typeof current !== 'object') return undefined;
+    current = (current as Record<string, unknown>)[field];
+  }
+  return current;
 }
 
 async function runShellCommand({
