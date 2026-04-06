@@ -254,6 +254,9 @@ export async function runWorkflowFile({
     if (response !== undefined) {
       throw new WorkflowResumeArgumentError('Workflow resume requires --approve yes|no for approval requests');
     }
+    if (cancel !== true && typeof approved !== 'boolean') {
+      throw new WorkflowResumeArgumentError('Workflow resume requires --approve yes|no for approval requests');
+    }
     if (cancel === true || approved === false) {
       if (consumedResumeStateKey) {
         await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
@@ -766,6 +769,9 @@ function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
 
 function resolveStepRefs(input: string, results: Record<string, WorkflowStepResult>) {
   return input.replace(/\$([A-Za-z0-9_-]+)\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)/g, (match, id, pathValue) => {
+    if (!(id in results)) {
+      return match;
+    }
     const refValue = getStepRefValue({ id, path: pathValue }, results, false);
     if (refValue === undefined) {
       if (pathValue === 'approved' || pathValue === 'skipped') return 'false';

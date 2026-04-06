@@ -269,6 +269,49 @@ test('workflow input resumes preserve the full subject even when the tool envelo
   assert.deepEqual(resumed.output, [{ subjectLength: longText.length }]);
 });
 
+test('workflow approval resumes require an explicit decision', async () => {
+  const workflow = {
+    steps: [
+      {
+        id: 'approve_step',
+        command: "node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?', items:[{id:1}]}}))\"",
+        approval: 'required',
+      },
+      {
+        id: 'finish',
+        run: 'node -e "process.stdout.write(JSON.stringify({done:true}))"',
+        condition: '$approve_step.approved',
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-approval-required-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+  });
+
+  assert.equal(first.status, 'needs_approval');
+  const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? '');
+  assert.equal(payload.kind, 'workflow-file');
+
+  await assert.rejects(
+    () =>
+      runWorkflowFile({
+        filePath,
+        ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+        resume: payload,
+      }),
+    /requires --approve yes\|no/i,
+  );
+});
+
 test('workflow files can mix shell steps, approval-only steps, and pipeline llm steps', async () => {
   const registry = createDefaultRegistry();
   const requests: any[] = [];

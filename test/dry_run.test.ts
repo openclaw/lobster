@@ -477,3 +477,19 @@ test('dry-run allows pipeline stage names that still depend on prior step output
   assert.match(output, /pipeline: \$planner\.stdout --tool message --action send/);
   assert.match(output, /\[command validation deferred — stage name depends on step output\]/);
 });
+
+test('dry-run does not eat shell variables that only resemble step refs', async () => {
+  const workflow = {
+    steps: [
+      { id: 'shell_vars', run: 'echo $HOME.json $PATH.stdout' },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-dry-shell-vars-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const res = runLobster(['run', '--dry-run', filePath]);
+  assert.equal(res.status, 0);
+  assert.match(res.stderr, /echo \$HOME\.json \$PATH\.stdout/);
+});
