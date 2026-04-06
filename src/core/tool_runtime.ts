@@ -132,7 +132,13 @@ export async function runToolRequest({
         prompt: approval.prompt,
         createdAt: new Date().toISOString(),
       });
-      const aid = await createApprovalIndex({ env: runtime.env, stateKey });
+      let aid: string;
+      try {
+        aid = await createApprovalIndex({ env: runtime.env, stateKey });
+      } catch (err) {
+        await deleteStateJson({ env: runtime.env, key: stateKey }).catch(() => {});
+        throw err;
+      }
 
       const resumeToken = encodeToken({
         protocolVersion: 1,
@@ -275,7 +281,13 @@ export async function resumeToolRequest({
         prompt: approval.prompt,
         createdAt: new Date().toISOString(),
       });
-      const nextAid = await createApprovalIndex({ env: runtime.env, stateKey: nextStateKey });
+      let nextAid: string;
+      try {
+        nextAid = await createApprovalIndex({ env: runtime.env, stateKey: nextStateKey });
+      } catch (err) {
+        await deleteStateJson({ env: runtime.env, key: nextStateKey }).catch(() => {});
+        throw err;
+      }
       await cleanupIndex();
       await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 

@@ -273,7 +273,13 @@ export async function runWorkflowFile({
           createdAt: new Date().toISOString(),
         });
 
-        const approvalId = await createApprovalIndex({ env: ctx.env, stateKey });
+        let approvalId: string;
+        try {
+          approvalId = await createApprovalIndex({ env: ctx.env, stateKey });
+        } catch (err) {
+          await deleteStateJson({ env: ctx.env, key: stateKey }).catch(() => {});
+          throw err;
+        }
 
         if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
           await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });

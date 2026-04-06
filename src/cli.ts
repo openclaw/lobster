@@ -182,7 +182,13 @@ async function handleRun({ argv, registry }) {
           prompt: approval.prompt,
           createdAt: new Date().toISOString(),
         });
-        const aid = await createApprovalIndex({ env: process.env, stateKey });
+        let aid: string;
+        try {
+          aid = await createApprovalIndex({ env: process.env, stateKey });
+        } catch (err) {
+          await deleteStateJson({ env: process.env, key: stateKey }).catch(() => {});
+          throw err;
+        }
 
         const resumeToken = encodeToken({
           protocolVersion: 1,
@@ -449,7 +455,13 @@ async function handleResume({ argv, registry }) {
       await cleanupIndex();
       await deleteStateJson({ env: process.env, key: previousStateKey });
 
-      const nextAid = await createApprovalIndex({ env: process.env, stateKey: nextStateKey });
+      let nextAid: string;
+      try {
+        nextAid = await createApprovalIndex({ env: process.env, stateKey: nextStateKey });
+      } catch (err) {
+        await deleteStateJson({ env: process.env, key: nextStateKey }).catch(() => {});
+        throw err;
+      }
 
       const resumeToken = encodeToken({
         protocolVersion: 1,
