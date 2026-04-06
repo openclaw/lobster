@@ -116,11 +116,15 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          export RELEASE_VERSION="${RELEASE_TAG#v}"
           node - <<'NODE'
           const fs = require('node:fs');
 
-          const releaseVersion = process.env.RELEASE_VERSION;
+          const releaseTag = process.env.RELEASE_TAG;
+          const releaseVersion = releaseTag?.startsWith('v') ? releaseTag.slice(1) : releaseTag;
+          if (!releaseVersion) {
+            console.error('RELEASE_TAG is required to validate CHANGELOG.md.');
+            process.exit(1);
+          }
           const changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
           const lines = changelog.split(/\r?\n/);
           const heading = `## ${releaseVersion}`;
@@ -317,11 +321,15 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          export RELEASE_VERSION="${RELEASE_TAG#v}"
           node - <<'NODE'
           const fs = require('node:fs');
 
-          const releaseVersion = process.env.RELEASE_VERSION;
+          const releaseTag = process.env.RELEASE_TAG;
+          const releaseVersion = releaseTag?.startsWith('v') ? releaseTag.slice(1) : releaseTag;
+          if (!releaseVersion) {
+            console.error('RELEASE_TAG is required to validate CHANGELOG.md.');
+            process.exit(1);
+          }
           const changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
           const lines = changelog.split(/\r?\n/);
           const heading = `## ${releaseVersion}`;
