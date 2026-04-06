@@ -111,6 +111,44 @@ jobs:
 
           echo "Validated ${PACKAGE_NAME}@${PACKAGE_VERSION}"
 
+      - name: Validate changelog entry for release version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          RELEASE_VERSION="${RELEASE_TAG#v}"
+          node - <<'NODE'
+          const fs = require('node:fs');
+
+          const releaseVersion = process.env.RELEASE_VERSION;
+          const changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
+          const lines = changelog.split(/\r?\n/);
+          const heading = `## ${releaseVersion}`;
+          const start = lines.findIndex((line) => line.trim() === heading);
+
+          if (start === -1) {
+            console.error(`CHANGELOG.md is missing a release section for ${releaseVersion}.`);
+            process.exit(1);
+          }
+
+          let hasBullet = false;
+          for (let idx = start + 1; idx < lines.length; idx += 1) {
+            const trimmed = lines[idx].trim();
+            if (trimmed.startsWith('## ')) break;
+            if (trimmed.startsWith('- ')) {
+              hasBullet = true;
+              break;
+            }
+          }
+
+          if (!hasBullet) {
+            console.error(`CHANGELOG.md section ${heading} must contain at least one bullet item.`);
+            process.exit(1);
+          }
+
+          console.log(`Validated CHANGELOG.md section ${heading}`);
+          NODE
+
       - name: Ensure version is not already published
         env:
           PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
@@ -273,6 +311,44 @@ jobs:
             echo "Unexpected package name ${PACKAGE_NAME}; update the workflow if the publish target changes."
             exit 1
           fi
+
+      - name: Validate changelog entry for release version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          RELEASE_VERSION="${RELEASE_TAG#v}"
+          node - <<'NODE'
+          const fs = require('node:fs');
+
+          const releaseVersion = process.env.RELEASE_VERSION;
+          const changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
+          const lines = changelog.split(/\r?\n/);
+          const heading = `## ${releaseVersion}`;
+          const start = lines.findIndex((line) => line.trim() === heading);
+
+          if (start === -1) {
+            console.error(`CHANGELOG.md is missing a release section for ${releaseVersion}.`);
+            process.exit(1);
+          }
+
+          let hasBullet = false;
+          for (let idx = start + 1; idx < lines.length; idx += 1) {
+            const trimmed = lines[idx].trim();
+            if (trimmed.startsWith('## ')) break;
+            if (trimmed.startsWith('- ')) {
+              hasBullet = true;
+              break;
+            }
+          }
+
+          if (!hasBullet) {
+            console.error(`CHANGELOG.md section ${heading} must contain at least one bullet item.`);
+            process.exit(1);
+          }
+
+          console.log(`Validated CHANGELOG.md section ${heading}`);
+          NODE
 
       - name: Ensure version is not already published
         run: |
