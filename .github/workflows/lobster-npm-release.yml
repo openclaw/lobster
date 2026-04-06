@@ -116,7 +116,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          RELEASE_VERSION="${RELEASE_TAG#v}"
+          export RELEASE_VERSION="${RELEASE_TAG#v}"
           node - <<'NODE'
           const fs = require('node:fs');
 
@@ -317,7 +317,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          RELEASE_VERSION="${RELEASE_TAG#v}"
+          export RELEASE_VERSION="${RELEASE_TAG#v}"
           node - <<'NODE'
           const fs = require('node:fs');
 
