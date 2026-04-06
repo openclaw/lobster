@@ -6,14 +6,14 @@ All notable changes to Lobster will be documented in this file.
 
 ## 2026.4.6
 
-- Add workflow file support for `.lobster`/YAML/JSON files, including args, env, native pipeline steps, and shell-safe `LOBSTER_ARG_*` workflow args.
-- Export the embeddable core runtime via `@clawdbot/lobster/core` so Lobster can be loaded in-process by OpenClaw and other hosts.
-- Add compact state-backed workflow and pipeline resume tokens, plus hardened approval ID handling and safer resume validation.
-- Add structured input pauses with `ask`, workflow `input`, `needs_input`, and `lobster resume --response-json '{...}'`.
+- Add workflow file support for `.lobster`, YAML, and JSON, including workflow args/env, native pipeline steps, and shell-safe `LOBSTER_ARG_*` inputs.
+- Add structured input pauses with `ask`, workflow `input`, `needs_input`, and `lobster resume --response-json '{...}'` for resumable human-in-the-loop flows.
 - Add richer workflow condition expressions with `!`, `==`, `!=`, `&&`, `||`, and parentheses.
+- Export the embeddable runtime via `@clawdbot/lobster/core` so Lobster can run in-process inside OpenClaw and other hosts.
 - Add generic `llm.invoke` adapters, `openclaw.invoke --each`, and keep `clawd.invoke` as a supported alias.
-- Add `exec --stdin raw|json|jsonl`, `approve --preview-from-stdin --limit N`, and extensive dry-run hardening for workflow templates and shell-variable preservation.
-- Improve Windows compatibility for CLI startup/build scripts and fix quoted-argument parser edge cases.
+- Add compact state-backed workflow/pipeline resume tokens, safer resume validation, and hardened approval ID handling.
+- Improve dry-run and shell interoperability with `exec --stdin raw|json|jsonl`, `approve --preview-from-stdin --limit N`, and better template/shell-variable preservation.
+- Improve Windows CLI/build compatibility and fix quoted-argument parser edge cases.
 
 ## 2026.1.21-1
 
