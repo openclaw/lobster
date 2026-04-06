@@ -337,6 +337,22 @@ function dryRunTemplateNote(input: string): string | null {
   return null;
 }
 
+function resolveDryRunTemplate(
+  input: string,
+  args: Record<string, unknown>,
+  results: Record<string, WorkflowStepResult>,
+) {
+  const withArgs = resolveArgsTemplate(input, args);
+  return withArgs.replace(/\$([A-Za-z0-9_-]+)\.(stdout|json|approved)/g, (match, id, field) => {
+    if (field === 'approved') {
+      const step = results[id];
+      if (!step) return match;
+      return step.approved === true ? 'true' : 'false';
+    }
+    return match;
+  });
+}
+
 function dryRunWorkflow({
   steps,
   resolvedArgs,
@@ -384,12 +400,12 @@ function dryRunWorkflow({
     const stdinNote = dryRunStdinNote(step.stdin);
 
     if (execution.kind === 'shell') {
-      const command = resolveArgsTemplate(execution.value, resolvedArgs);
+      const command = resolveDryRunTemplate(execution.value, resolvedArgs, results);
       const commandNote = dryRunTemplateNote(command);
       lines.push(`  ${num}. ${step.id}  [shell]`);
       lines.push(`     run: ${command}${commandNote ? `  ${commandNote}` : ''}`);
     } else if (execution.kind === 'pipeline') {
-      const pipelineText = resolveArgsTemplate(execution.value, resolvedArgs);
+      const pipelineText = resolveDryRunTemplate(execution.value, resolvedArgs, results);
       const pipelineNote = dryRunTemplateNote(pipelineText);
       // Validate pipeline syntax and registry even in dry-run so errors surface early.
       if (!ctx.registry) {

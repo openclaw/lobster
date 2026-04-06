@@ -350,6 +350,31 @@ test('dry-run preserves step output refs in shell commands instead of collapsing
   assert.doesNotMatch(output, /run: echo A=\[\] B=\[\]/);
 });
 
+test('dry-run still resolves approved refs in shell commands', async () => {
+  const workflow = {
+    steps: [
+      { id: 'gate', run: 'echo ok', approval: 'Continue?' },
+      { id: 'render', run: 'echo approved=$gate.approved' },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-dry-approvedref-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const { stdout, stderr, getStderr } = createStreams();
+
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout, stderr, env: { ...process.env }, mode: 'human', dryRun: true },
+  });
+
+  assert.equal(result.status, 'ok');
+  const output = getStderr();
+  assert.match(output, /run: echo approved=true/);
+  assert.doesNotMatch(output, /approved=\$gate\.approved/);
+});
+
 test('dry-run throws on pipeline step with unknown command', async () => {
   const registry = createDefaultRegistry();
   const workflow = {
