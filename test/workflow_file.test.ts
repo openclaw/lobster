@@ -312,6 +312,109 @@ test('workflow approval resumes require an explicit decision', async () => {
   );
 });
 
+test('workflow conditions support comparisons, boolean operators, and parentheses', async () => {
+  const workflow = {
+    steps: [
+      {
+        id: 'collect',
+        run: 'node -e "process.stdout.write(JSON.stringify({kind:\'deploy\',count:2}))"',
+      },
+      {
+        id: 'review',
+        input: {
+          prompt: 'Review draft?',
+          responseSchema: {
+            type: 'object',
+            properties: { decision: { type: 'string' } },
+            required: ['decision'],
+          },
+        },
+      },
+      {
+        id: 'approve_step',
+        command: "node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?', items:[{id:1}]}}))\"",
+        approval: 'required',
+      },
+      {
+        id: 'finish',
+        run: 'node -e "process.stdout.write(JSON.stringify({ok:true}))"',
+        condition:
+          '($approve_step.approved && $review.response.decision == approve) && !($collect.json.kind != deploy || $collect.json.count != 2)',
+      },
+      {
+        id: 'fallback',
+        run: 'node -e "process.stdout.write(JSON.stringify({ok:false}))"',
+        condition: '$review.response.decision == reject || $collect.json.kind == skip',
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-conditions-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+  });
+  assert.equal(first.status, 'needs_input');
+
+  const inputPayload = decodeResumeToken(first.requiresInput?.resumeToken ?? '');
+  assert.equal(inputPayload.kind, 'workflow-file');
+
+  const second = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+    resume: inputPayload,
+    response: { decision: 'approve' },
+  });
+  assert.equal(second.status, 'needs_approval');
+
+  const approvalPayload = decodeResumeToken(second.requiresApproval?.resumeToken ?? '');
+  assert.equal(approvalPayload.kind, 'workflow-file');
+
+  const resumed = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+    resume: approvalPayload,
+    approved: true,
+  });
+
+  assert.equal(resumed.status, 'ok');
+  assert.deepEqual(resumed.output, [{ ok: true }]);
+});
+
+test('workflow conditions reject standalone bare identifiers', async () => {
+  const workflow = {
+    steps: [
+      { id: 'collect', run: 'echo hello' },
+      { id: 'finish', run: 'echo done', condition: 'approve' },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-condition-invalid-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  await assert.rejects(
+    () =>
+      runWorkflowFile({
+        filePath,
+        ctx: {
+          stdin: process.stdin,
+          stdout: process.stdout,
+          stderr: process.stderr,
+          env: { ...process.env },
+          mode: 'tool',
+        },
+      }),
+    /Unsupported condition: approve/,
+  );
+});
+
 test('workflow files can mix shell steps, approval-only steps, and pipeline llm steps', async () => {
   const registry = createDefaultRegistry();
   const requests: any[] = [];

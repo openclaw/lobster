@@ -811,11 +811,7 @@ function evaluateCondition(
   const trimmed = condition.trim();
   if (trimmed === 'true') return true;
   if (trimmed === 'false') return false;
-
-  const ref = parseStepRef(trimmed);
-  if (!ref) throw new Error(`Unsupported condition: ${condition}`);
-  const value = getStepRefValue(ref, results, false);
-  return Boolean(value);
+  return evaluateConditionExpression(trimmed, results);
 }
 
 function isApprovalStep(approval: WorkflowStep['approval']) {
@@ -1093,6 +1089,245 @@ function getValueByPath(value: unknown, pathValue: string) {
     current = (current as Record<string, unknown>)[field];
   }
   return current;
+}
+
+type ConditionToken =
+  | { type: 'lparen' | 'rparen' | 'and' | 'or' | 'eq' | 'neq' | 'not' }
+  | { type: 'step_ref'; value: { id: string; path: string } }
+  | { type: 'string' | 'number' | 'boolean' | 'null' | 'identifier'; value: unknown };
+
+function evaluateConditionExpression(
+  expression: string,
+  results: Record<string, WorkflowStepResult>,
+) {
+  const tokens = tokenizeCondition(expression);
+  if (tokens.length === 0) {
+    throw new Error(`Unsupported condition: ${expression}`);
+  }
+  let index = 0;
+
+  function parseOr(): unknown {
+    let left = parseAnd();
+    while (match('or')) {
+      const right = parseAnd();
+      left = Boolean(left) || Boolean(right);
+    }
+    return left;
+  }
+
+  function parseAnd(): unknown {
+    let left = parseEquality();
+    while (match('and')) {
+      const right = parseEquality();
+      left = Boolean(left) && Boolean(right);
+    }
+    return left;
+  }
+
+  function parseEquality(): unknown {
+    const left = parseUnary(false);
+    if (match('eq')) {
+      return compareConditionValues(left, parseUnary(true));
+    }
+    if (match('neq')) {
+      return !compareConditionValues(left, parseUnary(true));
+    }
+    return left;
+  }
+
+  function parseUnary(allowBareIdentifier: boolean): unknown {
+    if (match('not')) {
+      return !Boolean(parseUnary(allowBareIdentifier));
+    }
+    return parsePrimary(allowBareIdentifier);
+  }
+
+  function parsePrimary(allowBareIdentifier: boolean): unknown {
+    const token = tokens[index];
+    if (!token) {
+      throw new Error(`Unsupported condition: ${expression}`);
+    }
+    index += 1;
+
+    if (token.type === 'lparen') {
+      const value = parseOr();
+      expect('rparen');
+      return value;
+    }
+    if (token.type === 'step_ref') {
+      return getStepRefValue(token.value, results, false);
+    }
+    if (token.type === 'string' || token.type === 'number' || token.type === 'boolean' || token.type === 'null') {
+      return token.value;
+    }
+    if (token.type === 'identifier' && allowBareIdentifier) {
+      return token.value;
+    }
+    throw new Error(`Unsupported condition: ${expression}`);
+  }
+
+  function match(type: ConditionToken['type']) {
+    if (tokens[index]?.type !== type) return false;
+    index += 1;
+    return true;
+  }
+
+  function expect(type: ConditionToken['type']) {
+    if (!match(type)) {
+      throw new Error(`Unsupported condition: ${expression}`);
+    }
+  }
+
+  const value = parseOr();
+  if (index !== tokens.length) {
+    throw new Error(`Unsupported condition: ${expression}`);
+  }
+  return Boolean(value);
+}
+
+function compareConditionValues(left: unknown, right: unknown) {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return compareStructuredConditionValues(left, right);
+  }
+  if (isPlainConditionObject(left) || isPlainConditionObject(right)) {
+    return compareStructuredConditionValues(left, right);
+  }
+  return Object.is(left, right);
+}
+
+function compareStructuredConditionValues(left: unknown, right: unknown) {
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
+function isPlainConditionObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function tokenizeCondition(expression: string): ConditionToken[] {
+  const tokens: ConditionToken[] = [];
+  let index = 0;
+
+  while (index < expression.length) {
+    const ch = expression[index];
+    if (/\s/.test(ch)) {
+      index += 1;
+      continue;
+    }
+    if (ch === '(') {
+      tokens.push({ type: 'lparen' });
+      index += 1;
+      continue;
+    }
+    if (ch === ')') {
+      tokens.push({ type: 'rparen' });
+      index += 1;
+      continue;
+    }
+    if (expression.startsWith('&&', index)) {
+      tokens.push({ type: 'and' });
+      index += 2;
+      continue;
+    }
+    if (expression.startsWith('||', index)) {
+      tokens.push({ type: 'or' });
+      index += 2;
+      continue;
+    }
+    if (expression.startsWith('==', index)) {
+      tokens.push({ type: 'eq' });
+      index += 2;
+      continue;
+    }
+    if (expression.startsWith('!=', index)) {
+      tokens.push({ type: 'neq' });
+      index += 2;
+      continue;
+    }
+    if (ch === '!') {
+      tokens.push({ type: 'not' });
+      index += 1;
+      continue;
+    }
+    if (ch === '$') {
+      const matched = matchConditionStepRef(expression, index);
+      if (!matched) {
+        throw new Error(`Unsupported condition: ${expression}`);
+      }
+      tokens.push({ type: 'step_ref', value: matched.ref });
+      index = matched.nextIndex;
+      continue;
+    }
+    if (ch === '"' || ch === '\'') {
+      const parsed = parseQuotedConditionString(expression, index, ch);
+      tokens.push({ type: 'string', value: parsed.value });
+      index = parsed.nextIndex;
+      continue;
+    }
+    const numberMatch = expression.slice(index).match(/^-?\d+(?:\.\d+)?/);
+    if (numberMatch) {
+      tokens.push({ type: 'number', value: Number(numberMatch[0]) });
+      index += numberMatch[0].length;
+      continue;
+    }
+    const identMatch = expression.slice(index).match(/^[A-Za-z_][A-Za-z0-9_-]*/);
+    if (identMatch) {
+      const raw = identMatch[0];
+      if (raw === 'true') {
+        tokens.push({ type: 'boolean', value: true });
+      } else if (raw === 'false') {
+        tokens.push({ type: 'boolean', value: false });
+      } else if (raw === 'null') {
+        tokens.push({ type: 'null', value: null });
+      } else {
+        tokens.push({ type: 'identifier', value: raw });
+      }
+      index += raw.length;
+      continue;
+    }
+    throw new Error(`Unsupported condition: ${expression}`);
+  }
+
+  return tokens;
+}
+
+function matchConditionStepRef(expression: string, startIndex: number) {
+  const match = expression
+    .slice(startIndex)
+    .match(/^\$([A-Za-z0-9_-]+)\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)/);
+  if (!match) return null;
+  return {
+    ref: { id: match[1], path: match[2] },
+    nextIndex: startIndex + match[0].length,
+  };
+}
+
+function parseQuotedConditionString(
+  expression: string,
+  startIndex: number,
+  quoteChar: '"' | '\'',
+) {
+  let value = '';
+  let index = startIndex + 1;
+  while (index < expression.length) {
+    const ch = expression[index];
+    if (ch === '\\') {
+      const next = expression[index + 1];
+      if (next === undefined) break;
+      value += next;
+      index += 2;
+      continue;
+    }
+    if (ch === quoteChar) {
+      return { value, nextIndex: index + 1 };
+    }
+    value += ch;
+    index += 1;
+  }
+  throw new Error(`Unsupported condition: ${expression}`);
 }
 
 async function runShellCommand({

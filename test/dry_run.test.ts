@@ -493,3 +493,50 @@ test('dry-run does not eat shell variables that only resemble step refs', async 
   assert.equal(res.status, 0);
   assert.match(res.stderr, /echo \$HOME\.json \$PATH\.stdout/);
 });
+
+test('dry-run evaluates compound conditions with approvals, input placeholders, and parentheses', async () => {
+  const workflow = {
+    steps: [
+      { id: 'gate', run: 'echo ok', approval: 'Continue?' },
+      {
+        id: 'review',
+        input: {
+          prompt: 'Review?',
+          responseSchema: {
+            type: 'object',
+            properties: { decision: { type: 'string' } },
+            required: ['decision'],
+          },
+        },
+      },
+      {
+        id: 'deploy',
+        run: 'echo deploy',
+        condition: '$gate.approved && ($review.response.pending == true || $review.skipped)',
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-dry-compound-cond-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const { stdout, stderr, getStderr } = createStreams();
+
+  const result = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout,
+      stderr,
+      env: { ...process.env },
+      mode: 'human',
+      dryRun: true,
+    },
+  });
+
+  assert.equal(result.status, 'ok');
+  const output = getStderr();
+  assert.doesNotMatch(output, /deploy.*skipped/);
+  assert.match(output, /deploy\s+\[shell\]/);
+});
