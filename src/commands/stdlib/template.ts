@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { applyFilters } from '../../core/filters.js';
 
 function getByPath(obj: any, path: string): any {
   if (path === '.' || path === 'this') return obj;
@@ -13,10 +14,17 @@ function getByPath(obj: any, path: string): any {
 
 function renderTemplate(tpl: string, ctx: any): string {
   return tpl.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, expr) => {
-    const key = String(expr ?? '').trim();
-    const val = getByPath(ctx, key);
+    const raw = String(expr ?? '').trim();
+    // Split on | to separate path from filters, but only at top level
+    const parts = raw.split('|').map((s) => s.trim());
+    const key = parts[0];
+    let val: unknown = getByPath(ctx, key);
+    if (parts.length > 1) {
+      val = applyFilters(val, parts.slice(1));
+    }
     if (val === undefined || val === null) return '';
     if (typeof val === 'string') return val;
+    if (typeof val === 'number' || typeof val === 'boolean') return String(val);
     return JSON.stringify(val);
   });
 }
@@ -28,7 +36,7 @@ export const templateCommand = {
     argsSchema: {
       type: 'object',
       properties: {
-        text: { type: 'string', description: 'Template text (supports {{path}}; {{.}} for the whole item)' },
+        text: { type: 'string', description: 'Template text (supports {{path}}, {{path | filter}}, {{.}} for the whole item)' },
         file: { type: 'string', description: 'Template file path' },
         _: { type: 'array', items: { type: 'string' } },
       },
@@ -45,7 +53,12 @@ export const templateCommand = {
       `Template syntax:\n` +
       `  - {{field}} or {{nested.field}}\n` +
       `  - {{.}} for the whole item\n` +
-      `  - Missing values render as empty string\n`
+      `  - {{field | filter}} pipe-based filters\n` +
+      `  - Missing values render as empty string\n\n` +
+      `Filters:\n` +
+      `  upper, lower, trim, truncate N, replace "from" "to", split sep\n` +
+      `  first, last, length, join sep\n` +
+      `  json, string, default val, round N, date fmt\n`
     );
   },
   async run({ input, args }: any) {
