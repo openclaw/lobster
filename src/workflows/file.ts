@@ -1093,7 +1093,7 @@ function getValueByPath(value: unknown, pathValue: string) {
 }
 
 type ConditionToken =
-  | { type: 'lparen' | 'rparen' | 'and' | 'or' | 'eq' | 'neq' | 'not' }
+  | { type: 'lparen' | 'rparen' | 'and' | 'or' | 'eq' | 'neq' | 'lt' | 'lte' | 'gt' | 'gte' | 'not' }
   | { type: 'step_ref'; value: { id: string; path: string } }
   | { type: 'string' | 'number' | 'boolean' | 'null' | 'identifier'; value: unknown };
 
@@ -1132,6 +1132,18 @@ function evaluateConditionExpression(
     }
     if (match('neq')) {
       return !compareConditionValues(left, parseUnary(true));
+    }
+    if (match('lt')) {
+      return numericCompare(left, parseUnary(true), (a, b) => a < b);
+    }
+    if (match('lte')) {
+      return numericCompare(left, parseUnary(true), (a, b) => a <= b);
+    }
+    if (match('gt')) {
+      return numericCompare(left, parseUnary(true), (a, b) => a > b);
+    }
+    if (match('gte')) {
+      return numericCompare(left, parseUnary(true), (a, b) => a >= b);
     }
     return left;
   }
@@ -1193,6 +1205,13 @@ function compareConditionValues(left: unknown, right: unknown) {
   return Object.is(left, right);
 }
 
+function numericCompare(left: unknown, right: unknown, cmp: (a: number, b: number) => boolean): boolean {
+  const a = Number(left);
+  const b = Number(right);
+  if (Number.isNaN(a) || Number.isNaN(b)) return false;
+  return cmp(a, b);
+}
+
 function isPlainConditionObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -1235,6 +1254,26 @@ function tokenizeCondition(expression: string): ConditionToken[] {
     if (expression.startsWith('!=', index)) {
       tokens.push({ type: 'neq' });
       index += 2;
+      continue;
+    }
+    if (expression.startsWith('<=', index)) {
+      tokens.push({ type: 'lte' });
+      index += 2;
+      continue;
+    }
+    if (expression.startsWith('>=', index)) {
+      tokens.push({ type: 'gte' });
+      index += 2;
+      continue;
+    }
+    if (ch === '<') {
+      tokens.push({ type: 'lt' });
+      index += 1;
+      continue;
+    }
+    if (ch === '>') {
+      tokens.push({ type: 'gt' });
+      index += 1;
       continue;
     }
     if (ch === '!') {
