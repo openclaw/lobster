@@ -166,3 +166,34 @@ test('for_each throws on non-array input', async () => {
   };
   await assert.rejects(runWorkflow(workflow), /expected array/);
 });
+
+test('for_each validation rejects approval on the for_each step itself', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      approval: true,
+      steps: [{ id: 'x', command: 'echo hi' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /for_each steps cannot define approval/);
+});
+
+test('for_each validation rejects sub-steps without execution', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      steps: [{ id: 'empty_sub' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /requires run, command, or pipeline/);
+});

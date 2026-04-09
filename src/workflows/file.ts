@@ -172,9 +172,20 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       if (step.pause_ms !== undefined && (typeof step.pause_ms !== 'number' || step.pause_ms < 0)) {
         throw new Error(`Workflow step ${step.id} pause_ms must be a non-negative number`);
       }
+      if (isApprovalStep(step.approval)) {
+        throw new Error(`Workflow step ${step.id} for_each steps cannot define approval (use a separate step after the loop)`);
+      }
       for (const sub of step.steps) {
+        if (!sub || typeof sub !== 'object' || !sub.id || typeof sub.id !== 'string') {
+          throw new Error(`Workflow step ${step.id} for_each sub-step requires an id`);
+        }
         if (isApprovalStep(sub.approval) || isInputStep(sub.input)) {
           throw new Error(`Workflow step ${step.id} for_each sub-steps cannot contain approval or input steps`);
+        }
+        const subShell = typeof sub.run === 'string' ? sub.run : sub.command;
+        const subPipeline = typeof sub.pipeline === 'string' ? sub.pipeline : undefined;
+        if (!subShell && !subPipeline) {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} requires run, command, or pipeline`);
         }
       }
     }
