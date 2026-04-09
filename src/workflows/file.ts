@@ -35,6 +35,12 @@ export type WorkflowStep = {
   input?: WorkflowInputRequest;
   condition?: unknown;
   when?: unknown;
+  for_each?: string;
+  item_var?: string;
+  index_var?: string;
+  batch_size?: number;
+  pause_ms?: number;
+  steps?: WorkflowStep[];
 };
 
 export type WorkflowApproval =
@@ -155,11 +161,28 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (!step.id || typeof step.id !== 'string') {
       throw new Error('Workflow step requires an id');
     }
+    const isForEach = typeof step.for_each === 'string';
+    if (isForEach) {
+      if (!Array.isArray(step.steps) || step.steps.length === 0) {
+        throw new Error(`Workflow step ${step.id} for_each requires a non-empty steps array`);
+      }
+      if (step.batch_size !== undefined && (typeof step.batch_size !== 'number' || step.batch_size < 1)) {
+        throw new Error(`Workflow step ${step.id} batch_size must be a positive integer`);
+      }
+      if (step.pause_ms !== undefined && (typeof step.pause_ms !== 'number' || step.pause_ms < 0)) {
+        throw new Error(`Workflow step ${step.id} pause_ms must be a non-negative number`);
+      }
+      for (const sub of step.steps) {
+        if (isApprovalStep(sub.approval) || isInputStep(sub.input)) {
+          throw new Error(`Workflow step ${step.id} for_each sub-steps cannot contain approval or input steps`);
+        }
+      }
+    }
     const shellCommand = typeof step.run === 'string' ? step.run : step.command;
     const pipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
     const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline));
-    if (executionCount === 0 && !isApprovalStep(step.approval) && !isInputStep(step.input)) {
-      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, approval, or input`);
+    if (executionCount === 0 && !isApprovalStep(step.approval) && !isInputStep(step.input) && !isForEach) {
+      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, approval, input, or for_each`);
     }
     if (executionCount > 1) {
       throw new Error(`Workflow step ${step.id} can only define one of run, command, or pipeline`);
@@ -399,6 +422,91 @@ export async function runWorkflowFile({
         id: step.id,
         subject,
         response: parsed,
+      };
+      lastStepId = step.id;
+      continue;
+    }
+
+    if (typeof step.for_each === 'string' && Array.isArray(step.steps)) {
+      const itemsRef = resolveInputValue(step.for_each, resolvedArgs, results);
+      if (!Array.isArray(itemsRef)) {
+        throw new Error(`Workflow step ${step.id} for_each: expected array, got ${typeof itemsRef}`);
+      }
+      const itemVar = step.item_var ?? 'item';
+      const indexVar = step.index_var ?? 'index';
+      const batchSize = step.batch_size ?? 1;
+      const iterationResults: unknown[] = [];
+
+      for (let itemIdx = 0; itemIdx < itemsRef.length; itemIdx++) {
+        if (step.pause_ms && itemIdx > 0 && itemIdx % batchSize === 0) {
+          await new Promise((r) => setTimeout(r, step.pause_ms));
+        }
+        const item = itemsRef[itemIdx];
+        const scopedResults: Record<string, WorkflowStepResult> = { ...results };
+        scopedResults[itemVar] = {
+          id: itemVar,
+          json: item,
+          stdout: typeof item === 'string' ? item : JSON.stringify(item),
+        };
+        scopedResults[indexVar] = {
+          id: indexVar,
+          json: itemIdx,
+          stdout: String(itemIdx),
+        };
+
+        let lastSubResult: WorkflowStepResult | undefined;
+        for (const subStep of step.steps!) {
+          if (!evaluateCondition(subStep.when ?? subStep.condition, scopedResults)) {
+            scopedResults[subStep.id] = { id: subStep.id, skipped: true };
+            continue;
+          }
+          const subEnv = mergeEnv(ctx.env, workflow.env, subStep.env, resolvedArgs, scopedResults);
+          const subCwd = resolveCwd(subStep.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
+          const subExecution = getStepExecution(subStep);
+
+          let subResult: WorkflowStepResult;
+          if (subExecution.kind === 'shell') {
+            const command = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
+            const stdinValue = resolveShellStdin(subStep.stdin, resolvedArgs, scopedResults);
+            const { stdout } = await runShellCommand({ command, stdin: stdinValue, env: subEnv, cwd: subCwd, signal: ctx.signal });
+            subResult = { id: subStep.id, stdout, json: parseJson(stdout) };
+          } else if (subExecution.kind === 'pipeline') {
+            if (!ctx.registry) {
+              throw new Error(`Workflow step ${subStep.id} requires a command registry for pipeline execution`);
+            }
+            const pipelineText = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
+            const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
+            subResult = await runPipelineStep({
+              stepId: subStep.id,
+              pipelineText,
+              inputValue,
+              ctx,
+              env: subEnv,
+              cwd: subCwd,
+            });
+          } else {
+            const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
+            subResult = createSyntheticStepResult(subStep.id, inputValue);
+          }
+          scopedResults[subStep.id] = subResult;
+          lastSubResult = subResult;
+        }
+
+        // Collect iteration result: merge all sub-step results for this item
+        const iterResult: Record<string, unknown> = { [itemVar]: item, [indexVar]: itemIdx };
+        for (const subStep of step.steps!) {
+          const sr = scopedResults[subStep.id];
+          if (sr && !sr.skipped) {
+            iterResult[subStep.id] = sr.json !== undefined ? sr.json : sr.stdout;
+          }
+        }
+        iterationResults.push(iterResult);
+      }
+
+      results[step.id] = {
+        id: step.id,
+        json: iterationResults,
+        stdout: JSON.stringify(iterationResults),
       };
       lastStepId = step.id;
       continue;
