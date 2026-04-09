@@ -29,7 +29,9 @@ FILTERS.set('round', (v, n) => {
   return isNaN(num) ? v : Number(num.toFixed(dec));
 });
 FILTERS.set('date', (v, fmt) => {
-  const d = new Date(String(v));
+  const d = typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v.trim()))
+    ? new Date(Number(v))
+    : new Date(String(v));
   if (isNaN(d.getTime())) return String(v);
   if (!fmt) return d.toISOString();
   return fmt

@@ -12,11 +12,50 @@ function getByPath(obj: any, path: string): any {
   return cur;
 }
 
+/**
+ * Split a template expression on `|` but only outside of quotes.
+ * e.g. `line | split "|" | first` → [`line`, `split "|"`, `first`]
+ */
+function splitFilterChain(expr: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let i = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      current += ch;
+      i++;
+      while (i < expr.length && expr[i] !== quote) {
+        if (expr[i] === '\\' && i + 1 < expr.length) {
+          current += expr[i] + expr[i + 1];
+          i += 2;
+        } else {
+          current += expr[i];
+          i++;
+        }
+      }
+      if (i < expr.length) {
+        current += expr[i]; // closing quote
+        i++;
+      }
+    } else if (ch === '|') {
+      parts.push(current.trim());
+      current = '';
+      i++;
+    } else {
+      current += ch;
+      i++;
+    }
+  }
+  parts.push(current.trim());
+  return parts;
+}
+
 function renderTemplate(tpl: string, ctx: any): string {
   return tpl.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, expr) => {
     const raw = String(expr ?? '').trim();
-    // Split on | to separate path from filters, but only at top level
-    const parts = raw.split('|').map((s) => s.trim());
+    const parts = splitFilterChain(raw);
     const key = parts[0];
     let val: unknown = getByPath(ctx, key);
     if (parts.length > 1) {

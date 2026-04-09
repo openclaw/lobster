@@ -108,6 +108,17 @@ test('applyFilters unknown filter throws', () => {
   assert.throws(() => applyFilters('x', ['nonexistent']), /Unknown template filter/);
 });
 
+test('applyFilters date with numeric epoch timestamp', () => {
+  // 2024-03-09T16:00:00.000Z
+  const result = applyFilters(1710000000000, ['date "YYYY-MM-DD"']);
+  assert.equal(result, '2024-03-09');
+});
+
+test('applyFilters date with numeric string epoch', () => {
+  const result = applyFilters('1710000000000', ['date "YYYY-MM-DD"']);
+  assert.equal(result, '2024-03-09');
+});
+
 // --- Template integration tests ---
 
 test('template with upper filter', async () => {
@@ -138,4 +149,10 @@ test('template without filters still works', async () => {
 test('template with join filter', async () => {
   const out = await run("template --text '{{tags | join \", \"}}'", [{ tags: ['a', 'b', 'c'] }]);
   assert.deepEqual(out, ['a, b, c']);
+});
+
+test('template with quoted pipe in filter arg does not break splitting', async () => {
+  // The split filter argument contains a literal pipe character
+  const out = await run(`template --text '{{line | split "|" | first}}'`, [{ line: 'a|b|c' }]);
+  assert.deepEqual(out, ['a']);
 });
