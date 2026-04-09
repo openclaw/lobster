@@ -35,12 +35,12 @@ FILTERS.set('date', (v, fmt) => {
   if (isNaN(d.getTime())) return String(v);
   if (!fmt) return d.toISOString();
   return fmt
-    .replace('YYYY', String(d.getFullYear()))
-    .replace('MM', String(d.getMonth() + 1).padStart(2, '0'))
-    .replace('DD', String(d.getDate()).padStart(2, '0'))
-    .replace('HH', String(d.getHours()).padStart(2, '0'))
-    .replace('mm', String(d.getMinutes()).padStart(2, '0'))
-    .replace('ss', String(d.getSeconds()).padStart(2, '0'));
+    .replace('YYYY', String(d.getUTCFullYear()))
+    .replace('MM', String(d.getUTCMonth() + 1).padStart(2, '0'))
+    .replace('DD', String(d.getUTCDate()).padStart(2, '0'))
+    .replace('HH', String(d.getUTCHours()).padStart(2, '0'))
+    .replace('mm', String(d.getUTCMinutes()).padStart(2, '0'))
+    .replace('ss', String(d.getUTCSeconds()).padStart(2, '0'));
 });
 
 export function getFilter(name: string): FilterFn | undefined {
