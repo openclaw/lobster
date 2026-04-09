@@ -1205,11 +1205,15 @@ function compareConditionValues(left: unknown, right: unknown) {
   return Object.is(left, right);
 }
 
+function isStrictlyNumeric(v: unknown): boolean {
+  if (typeof v === 'number') return !Number.isNaN(v);
+  if (typeof v === 'string') return v.trim() !== '' && !Number.isNaN(Number(v));
+  return false;
+}
+
 function numericCompare(left: unknown, right: unknown, cmp: (a: number, b: number) => boolean): boolean {
-  const a = Number(left);
-  const b = Number(right);
-  if (Number.isNaN(a) || Number.isNaN(b)) return false;
-  return cmp(a, b);
+  if (!isStrictlyNumeric(left) || !isStrictlyNumeric(right)) return false;
+  return cmp(Number(left), Number(right));
 }
 
 function isPlainConditionObject(value: unknown): value is Record<string, unknown> {

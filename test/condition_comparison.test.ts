@@ -117,6 +117,34 @@ test('comparison with non-numeric values returns false', async () => {
   assert.deepEqual(result.output, ['no\n']);
 });
 
+test('comparison rejects boolean true as non-numeric', async () => {
+  const workflow = {
+    name: 'bool-test',
+    steps: [
+      { id: 'data', command: 'node -e "process.stdout.write(JSON.stringify({val:true}))"' },
+      { id: 'check', command: 'echo "yes"', when: '$data.json.val > 0' },
+      { id: 'fallback', command: 'echo "no"' },
+    ],
+  };
+  const result = await runWorkflow(workflow);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, ['no\n']);
+});
+
+test('comparison rejects null as non-numeric', async () => {
+  const workflow = {
+    name: 'null-test',
+    steps: [
+      { id: 'data', command: 'node -e "process.stdout.write(JSON.stringify({val:null}))"' },
+      { id: 'check', command: 'echo "yes"', when: '$data.json.val >= 0' },
+      { id: 'fallback', command: 'echo "no"' },
+    ],
+  };
+  const result = await runWorkflow(workflow);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.output, ['no\n']);
+});
+
 test('existing == and != still work', async () => {
   const workflow = {
     name: 'eq-test',
