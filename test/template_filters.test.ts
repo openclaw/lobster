@@ -52,6 +52,10 @@ test('applyFilters truncate', () => {
   assert.equal(applyFilters('hello world', ['truncate 5']), 'hello...');
 });
 
+test('applyFilters truncate 0 returns empty with ellipsis', () => {
+  assert.equal(applyFilters('hello', ['truncate 0']), '...');
+});
+
 test('applyFilters truncate no-op when short', () => {
   assert.equal(applyFilters('hi', ['truncate 5']), 'hi');
 });

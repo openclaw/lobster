@@ -7,7 +7,8 @@ FILTERS.set('lower', (v) => String(v ?? '').toLowerCase());
 FILTERS.set('trim', (v) => String(v ?? '').trim());
 FILTERS.set('truncate', (v, n) => {
   const s = String(v ?? '');
-  const len = parseInt(n) || 80;
+  const parsed = parseInt(n);
+  const len = Number.isNaN(parsed) ? 80 : parsed;
   return s.length > len ? s.slice(0, len) + '...' : s;
 });
 FILTERS.set('replace', (v, from, to) => String(v ?? '').replaceAll(from ?? '', to ?? ''));
