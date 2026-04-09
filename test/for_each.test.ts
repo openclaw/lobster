@@ -244,3 +244,50 @@ test('for_each validation rejects sub-steps with multiple executors', async () =
   await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
   await assert.rejects(loadWorkflowFile(filePath), /can only define one of run, command, or pipeline/);
 });
+
+test('for_each validation rejects non-string command in sub-steps', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      steps: [{ id: 'bad_type', command: 123 }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /command must be a string/);
+});
+
+test('for_each validation rejects non-integer batch_size', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      batch_size: 1.5,
+      steps: [{ id: 'x', command: 'echo hi' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /batch_size must be a positive integer/);
+});
+
+test('for_each validation rejects Infinity batch_size', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      batch_size: Infinity,
+      steps: [{ id: 'x', command: 'echo hi' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /batch_size must be a positive integer/);
+});

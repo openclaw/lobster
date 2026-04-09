@@ -166,7 +166,7 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       if (!Array.isArray(step.steps) || step.steps.length === 0) {
         throw new Error(`Workflow step ${step.id} for_each requires a non-empty steps array`);
       }
-      if (step.batch_size !== undefined && (typeof step.batch_size !== 'number' || step.batch_size < 1)) {
+      if (step.batch_size !== undefined && (typeof step.batch_size !== 'number' || !Number.isInteger(step.batch_size) || step.batch_size < 1)) {
         throw new Error(`Workflow step ${step.id} batch_size must be a positive integer`);
       }
       if (step.pause_ms !== undefined && (typeof step.pause_ms !== 'number' || step.pause_ms < 0)) {
@@ -190,7 +190,16 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
         if (isApprovalStep(sub.approval) || isInputStep(sub.input)) {
           throw new Error(`Workflow step ${step.id} for_each sub-steps cannot contain approval or input steps`);
         }
-        const subShell = typeof sub.run === 'string' ? sub.run : sub.command;
+        if (sub.run !== undefined && typeof sub.run !== 'string') {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} run must be a string`);
+        }
+        if (sub.command !== undefined && typeof sub.command !== 'string') {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} command must be a string`);
+        }
+        if (sub.pipeline !== undefined && typeof sub.pipeline !== 'string') {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} pipeline must be a string`);
+        }
+        const subShell = typeof sub.run === 'string' ? sub.run : (typeof sub.command === 'string' ? sub.command : undefined);
         const subPipeline = typeof sub.pipeline === 'string' ? sub.pipeline : undefined;
         if (!subShell && !subPipeline) {
           throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} requires run, command, or pipeline`);
