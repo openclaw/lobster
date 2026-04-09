@@ -152,6 +152,21 @@ test('on_error: skip_rest preserves output from last successful step', async () 
   assert.equal(output[0].data, 'kept');
 });
 
+test('on_error: continue preserves output when last step fails', async () => {
+  const workflow = {
+    name: 'continue-last-fail',
+    steps: [
+      { id: 'good', command: 'node -e "process.stdout.write(JSON.stringify({kept:true}))"' },
+      { id: 'fail_last', command: 'node -e "process.exit(1)"', on_error: 'continue' },
+    ],
+  };
+  const result = await runWorkflow(workflow);
+  assert.equal(result.status, 'ok');
+  const output = result.output as any[];
+  assert.equal(output.length, 1);
+  assert.equal(output[0].kept, true);
+});
+
 test('abort errors propagate even with on_error: continue', async () => {
   // Simulate an abort by running a command with an already-aborted signal
   const tmpDir = await (await import('node:fs')).promises.mkdtemp(

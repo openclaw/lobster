@@ -453,12 +453,11 @@ export async function runWorkflowFile({
         error: true,
         errorMessage: err?.message ?? String(err),
       };
-      // For skip_rest, preserve lastStepId from prior successful step
-      // so output comes from the last good result, not the error placeholder
+      // Preserve lastStepId from prior successful step so output comes
+      // from the last good result, not the error placeholder
       if (policy === 'skip_rest') {
         break;
       }
-      lastStepId = step.id;
       // policy === 'continue': proceed to next step
       continue;
     }
