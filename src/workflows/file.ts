@@ -35,6 +35,8 @@ export type WorkflowStep = {
   input?: WorkflowInputRequest;
   condition?: unknown;
   when?: unknown;
+  timeout_ms?: number;
+  on_error?: 'stop' | 'continue' | 'skip_rest';
 };
 
 export type WorkflowApproval =
@@ -61,6 +63,8 @@ export type WorkflowStepResult = {
   subject?: unknown;
   response?: unknown;
   skipped?: boolean;
+  error?: boolean;
+  errorMessage?: string;
 };
 
 export type WorkflowRunResult = {
@@ -194,6 +198,12 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       } catch (err: any) {
         throw new Error(`Workflow step ${step.id} input.responseSchema is invalid: ${err?.message ?? String(err)}`);
       }
+    }
+    if (step.timeout_ms !== undefined && (typeof step.timeout_ms !== 'number' || !Number.isFinite(step.timeout_ms) || step.timeout_ms < 1)) {
+      throw new Error(`Workflow step ${step.id} timeout_ms must be a finite positive number`);
+    }
+    if (step.on_error !== undefined && step.on_error !== 'stop' && step.on_error !== 'continue' && step.on_error !== 'skip_rest') {
+      throw new Error(`Workflow step ${step.id} on_error must be "stop", "continue", or "skip_rest"`);
     }
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
@@ -408,29 +418,76 @@ export async function runWorkflowFile({
     const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
     const execution = getStepExecution(step);
 
+    // Build a signal that respects both ctx.signal and per-step timeout
+    let stepSignal: AbortSignal | undefined = ctx.signal;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    if (step.timeout_ms) {
+      const controller = new AbortController();
+      timeoutId = setTimeout(
+        () => controller.abort(new Error(`Step '${step.id}' timed out after ${step.timeout_ms}ms`)),
+        step.timeout_ms,
+      );
+      stepSignal = ctx.signal
+        ? AbortSignal.any([ctx.signal, controller.signal])
+        : controller.signal;
+    }
+
     let result: WorkflowStepResult;
-    if (execution.kind === 'shell') {
-      const command = resolveTemplate(execution.value, resolvedArgs, results);
-      const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
-      const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: ctx.signal });
-      result = { id: step.id, stdout, json: parseJson(stdout) };
-    } else if (execution.kind === 'pipeline') {
-      if (!ctx.registry) {
-        throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+    try {
+      if (execution.kind === 'shell') {
+        const command = resolveTemplate(execution.value, resolvedArgs, results);
+        const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
+        const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: stepSignal });
+        result = { id: step.id, stdout, json: parseJson(stdout) };
+      } else if (execution.kind === 'pipeline') {
+        if (!ctx.registry) {
+          throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+        }
+        const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
+        const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+        result = await runPipelineStep({
+          stepId: step.id,
+          pipelineText,
+          inputValue,
+          ctx: { ...ctx, signal: stepSignal },
+          env,
+          cwd,
+        });
+      } else {
+        const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+        result = createSyntheticStepResult(step.id, inputValue);
       }
-      const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
-      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-      result = await runPipelineStep({
-        stepId: step.id,
-        pipelineText,
-        inputValue,
-        ctx,
-        env,
-        cwd,
-      });
-    } else {
-      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-      result = createSyntheticStepResult(step.id, inputValue);
+    } catch (err: any) {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      // Always re-throw abort errors from ctx.signal (external cancellation)
+      if (ctx.signal?.aborted && (err?.name === 'AbortError' || err?.code === 'ABORT_ERR')) {
+        throw err;
+      }
+      // Always re-throw pipeline halt errors (approval/input gates)
+      if (err?.message && /halted (for approval inside|before completion at) pipeline/.test(err.message)) {
+        throw err;
+      }
+      // Produce a clear message for timeout-triggered aborts
+      const isTimeout = step.timeout_ms && (err?.name === 'AbortError' || err?.code === 'ABORT_ERR');
+      const errorMessage = isTimeout
+        ? `Step '${step.id}' timed out after ${step.timeout_ms}ms`
+        : (err?.message ?? String(err));
+      const policy = step.on_error ?? 'stop';
+      if (policy === 'stop') {
+        throw isTimeout ? new Error(errorMessage) : err;
+      }
+      results[step.id] = {
+        id: step.id,
+        error: true,
+        errorMessage,
+      };
+      if (policy === 'skip_rest') {
+        break;
+      }
+      // policy === 'continue': proceed to next step
+      continue;
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
     }
 
     results[step.id] = result;
@@ -629,6 +686,8 @@ function dryRunWorkflow({
     }
 
     if (stdinNote) lines.push(`     stdin: ${stdinNote}`);
+    if (step.timeout_ms) lines.push(`     timeout: ${step.timeout_ms}ms`);
+    if (step.on_error && step.on_error !== 'stop') lines.push(`     on_error: ${step.on_error}`);
     if (isApprovalStep(step.approval)) {
       lines.push(`     [approval required]`);
     }
