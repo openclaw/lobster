@@ -8,7 +8,7 @@ import { PassThrough } from 'node:stream';
 
 import { parsePipeline } from '../parser.js';
 import { runPipeline } from '../runtime.js';
-import { encodeToken } from '../token.js';
+import { encodeToken, decodeToken } from '../token.js';
 import { createApprovalIndex, deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
 import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
@@ -292,11 +292,12 @@ export async function runWorkflowFile({
   if (!resolvedFilePath) {
     throw new Error('Workflow file path required');
   }
-  // Track active workflows for cycle detection in composition
+  // Track active workflows for cycle detection in composition (realpath resolves symlinks)
   if (!ctx._activeWorkflows) {
     ctx._activeWorkflows = new Set<string>();
   }
-  ctx._activeWorkflows.add(path.resolve(resolvedFilePath));
+  const canonicalFilePath = await fsp.realpath(resolvedFilePath);
+  ctx._activeWorkflows.add(canonicalFilePath);
   const workflow = await loadWorkflowFile(resolvedFilePath);
   const resolvedArgs = resolveWorkflowArgs(workflow.args, args ?? resumeState?.args);
   const steps = workflow.steps;
@@ -435,7 +436,7 @@ export async function runWorkflowFile({
         ? workflowPath
         : path.resolve(path.dirname(resolvedFilePath), workflowPath);
       const activeWorkflows = ctx._activeWorkflows ?? new Set<string>();
-      const canonicalPath = path.resolve(resolvedWorkflowPath);
+      const canonicalPath = await fsp.realpath(resolvedWorkflowPath);
       if (activeWorkflows.has(canonicalPath)) {
         throw new Error(
           `Workflow step ${step.id} creates a cycle: ${canonicalPath} is already being executed`,
@@ -450,6 +451,18 @@ export async function runWorkflowFile({
         ctx: { ...ctx, env, cwd, _activeWorkflows: childActive },
       });
       if (subResult.status === 'needs_approval' || subResult.status === 'needs_input') {
+        // Clean up child resume state artifacts since composition rejects these gates
+        const resumeToken = subResult.requiresApproval?.resumeToken ?? subResult.requiresInput?.resumeToken;
+        if (resumeToken) {
+          try {
+            const decoded = decodeToken(resumeToken);
+            if (decoded?.stateKey) {
+              await deleteStateJson({ env: ctx.env, key: decoded.stateKey }).catch(() => {});
+            }
+          } catch {
+            // best-effort cleanup
+          }
+        }
         throw new Error(
           `Workflow step ${step.id} sub-workflow halted for ${subResult.status === 'needs_approval' ? 'approval' : 'input'}. ` +
           `Sub-workflow approval/input gates are not supported in composition.`,
