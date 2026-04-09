@@ -444,6 +444,10 @@ export async function runWorkflowFile({
       if (err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
         throw err;
       }
+      // Always re-throw approval-halt errors — these are safety mechanisms, not transient failures
+      if (err?.message && /halted for approval inside pipeline/.test(err.message)) {
+        throw err;
+      }
       const policy = step.on_error ?? 'stop';
       if (policy === 'stop') {
         throw err;

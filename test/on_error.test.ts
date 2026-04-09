@@ -152,6 +152,39 @@ test('on_error: skip_rest preserves output from last successful step', async () 
   assert.equal(output[0].data, 'kept');
 });
 
+test('approval-halt errors bypass on_error: continue', async () => {
+  const tmpDir = await (await import('node:fs')).promises.mkdtemp(
+    (await import('node:path')).join((await import('node:os')).tmpdir(), 'lobster-approval-halt-'),
+  );
+  const stateDir = (await import('node:path')).join(tmpDir, 'state');
+  const filePath = (await import('node:path')).join(tmpDir, 'workflow.lobster');
+  const workflow = {
+    name: 'approval-halt-test',
+    steps: [
+      { id: 'bad', pipeline: "approve --prompt 'ok?'", on_error: 'continue' },
+      { id: 'after', command: 'echo "should not run"' },
+    ],
+  };
+  await (await import('node:fs')).promises.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+
+  const { createDefaultRegistry } = await import('../src/commands/registry.js');
+  const { runWorkflowFile: rwf } = await import('../src/workflows/file.js');
+  await assert.rejects(
+    rwf({
+      filePath,
+      ctx: {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env: { ...process.env, LOBSTER_STATE_DIR: stateDir },
+        mode: 'tool',
+        registry: createDefaultRegistry(),
+      },
+    }),
+    /halted for approval inside pipeline/,
+  );
+});
+
 test('on_error: continue preserves output when last step fails', async () => {
   const workflow = {
     name: 'continue-last-fail',
