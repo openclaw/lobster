@@ -178,6 +178,9 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       if (isInputStep(step.input)) {
         throw new Error(`Workflow step ${step.id} for_each steps cannot define input (use a separate step after the loop)`);
       }
+      if (step.stdin !== undefined && step.stdin !== null) {
+        throw new Error(`Workflow step ${step.id} for_each steps cannot define stdin (loop input comes from the for_each expression)`);
+      }
       const forEachShell = typeof step.run === 'string' ? step.run : step.command;
       const forEachPipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
       if (forEachShell || forEachPipeline) {

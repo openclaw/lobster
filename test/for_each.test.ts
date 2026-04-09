@@ -434,6 +434,22 @@ test('for_each dry-run shows loop structure', async () => {
   assert.ok(output.includes('process'), 'should list sub-steps');
 });
 
+test('for_each validation rejects stdin on the for_each step', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      stdin: '$other.stdout',
+      steps: [{ id: 'a', command: 'echo hi' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /for_each steps cannot define stdin/);
+});
+
 test('for_each validation rejects whitespace-only run', async () => {
   const workflow = {
     name: 'bad',
