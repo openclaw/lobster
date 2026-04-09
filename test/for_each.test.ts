@@ -291,3 +291,48 @@ test('for_each validation rejects Infinity batch_size', async () => {
   await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
   await assert.rejects(loadWorkflowFile(filePath), /batch_size must be a positive integer/);
 });
+
+test('for_each validation rejects NaN pause_ms', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      pause_ms: NaN,
+      steps: [{ id: 'x', command: 'echo hi' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /pause_ms must be a finite non-negative number/);
+});
+
+test('for_each propagates step-level env to sub-steps', async () => {
+  const workflow = {
+    name: 'env-test',
+    steps: [
+      {
+        id: 'data',
+        command: 'node -e "process.stdout.write(JSON.stringify([1,2]))"',
+      },
+      {
+        id: 'loop',
+        for_each: '$data.json',
+        env: { MY_FLAG: 'from_loop' },
+        steps: [
+          {
+            id: 'check',
+            command: 'node -e "process.stdout.write(JSON.stringify({flag: process.env.MY_FLAG}))"',
+          },
+        ],
+      },
+    ],
+  };
+  const result = await runWorkflow(workflow);
+  assert.equal(result.status, 'ok');
+  const output = result.output as any[];
+  assert.equal(output.length, 2);
+  assert.equal(output[0].check.flag, 'from_loop');
+  assert.equal(output[1].check.flag, 'from_loop');
+});

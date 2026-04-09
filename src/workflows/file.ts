@@ -169,8 +169,8 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       if (step.batch_size !== undefined && (typeof step.batch_size !== 'number' || !Number.isInteger(step.batch_size) || step.batch_size < 1)) {
         throw new Error(`Workflow step ${step.id} batch_size must be a positive integer`);
       }
-      if (step.pause_ms !== undefined && (typeof step.pause_ms !== 'number' || step.pause_ms < 0)) {
-        throw new Error(`Workflow step ${step.id} pause_ms must be a non-negative number`);
+      if (step.pause_ms !== undefined && (typeof step.pause_ms !== 'number' || !Number.isFinite(step.pause_ms) || step.pause_ms < 0)) {
+        throw new Error(`Workflow step ${step.id} pause_ms must be a finite non-negative number`);
       }
       if (isApprovalStep(step.approval)) {
         throw new Error(`Workflow step ${step.id} for_each steps cannot define approval (use a separate step after the loop)`);
@@ -492,8 +492,9 @@ export async function runWorkflowFile({
             scopedResults[subStep.id] = { id: subStep.id, skipped: true };
             continue;
           }
-          const subEnv = mergeEnv(ctx.env, workflow.env, subStep.env, resolvedArgs, scopedResults);
-          const subCwd = resolveCwd(subStep.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
+          const loopEnv = mergeEnv(ctx.env, workflow.env, step.env, resolvedArgs, scopedResults);
+          const subEnv = subStep.env ? mergeEnv(loopEnv, undefined, subStep.env, resolvedArgs, scopedResults) : loopEnv;
+          const subCwd = resolveCwd(subStep.cwd ?? step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
           const subExecution = getStepExecution(subStep);
 
           let subResult: WorkflowStepResult;
