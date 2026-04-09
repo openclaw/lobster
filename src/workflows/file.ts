@@ -23,6 +23,22 @@ export type WorkflowFile = {
   steps: WorkflowStep[];
 };
 
+export type ParallelBranch = {
+  id: string;
+  run?: string;
+  command?: string;
+  pipeline?: string;
+  env?: Record<string, string>;
+  cwd?: string;
+  stdin?: unknown;
+};
+
+export type ParallelConfig = {
+  wait?: 'all' | 'any';
+  timeout_ms?: number;
+  branches: ParallelBranch[];
+};
+
 export type WorkflowStep = {
   id: string;
   command?: string;
@@ -35,6 +51,7 @@ export type WorkflowStep = {
   input?: WorkflowInputRequest;
   condition?: unknown;
   when?: unknown;
+  parallel?: ParallelConfig;
 };
 
 export type WorkflowApproval =
@@ -155,11 +172,39 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (!step.id || typeof step.id !== 'string') {
       throw new Error('Workflow step requires an id');
     }
+    const isParallel = step.parallel && typeof step.parallel === 'object';
+    if (isParallel) {
+      const pc = step.parallel!;
+      if (!Array.isArray(pc.branches) || pc.branches.length === 0) {
+        throw new Error(`Workflow step ${step.id} parallel requires a non-empty branches array`);
+      }
+      if (pc.wait !== undefined && pc.wait !== 'all' && pc.wait !== 'any') {
+        throw new Error(`Workflow step ${step.id} parallel wait must be "all" or "any"`);
+      }
+      if (pc.timeout_ms !== undefined && (typeof pc.timeout_ms !== 'number' || pc.timeout_ms < 1)) {
+        throw new Error(`Workflow step ${step.id} parallel timeout_ms must be a positive number`);
+      }
+      const branchIds = new Set<string>();
+      for (const branch of pc.branches) {
+        if (!branch.id || typeof branch.id !== 'string') {
+          throw new Error(`Workflow step ${step.id} parallel branch requires an id`);
+        }
+        if (branchIds.has(branch.id)) {
+          throw new Error(`Workflow step ${step.id} duplicate parallel branch id: ${branch.id}`);
+        }
+        branchIds.add(branch.id);
+        const bShell = typeof branch.run === 'string' ? branch.run : branch.command;
+        const bPipeline = typeof branch.pipeline === 'string' ? branch.pipeline : undefined;
+        if (!bShell && !bPipeline) {
+          throw new Error(`Workflow step ${step.id} parallel branch ${branch.id} requires run, command, or pipeline`);
+        }
+      }
+    }
     const shellCommand = typeof step.run === 'string' ? step.run : step.command;
     const pipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
     const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline));
-    if (executionCount === 0 && !isApprovalStep(step.approval) && !isInputStep(step.input)) {
-      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, approval, or input`);
+    if (executionCount === 0 && !isApprovalStep(step.approval) && !isInputStep(step.input) && !isParallel) {
+      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, approval, input, or parallel`);
     }
     if (executionCount > 1) {
       throw new Error(`Workflow step ${step.id} can only define one of run, command, or pipeline`);
@@ -400,6 +445,88 @@ export async function runWorkflowFile({
         subject,
         response: parsed,
       };
+      lastStepId = step.id;
+      continue;
+    }
+
+    if (step.parallel && typeof step.parallel === 'object') {
+      const pc = step.parallel;
+      const branches = pc.branches;
+      const wait = pc.wait ?? 'all';
+
+      const runBranch = async (branch: ParallelBranch): Promise<WorkflowStepResult> => {
+        const branchEnv = mergeEnv(ctx.env, workflow.env, branch.env, resolvedArgs, results);
+        const branchCwd = resolveCwd(branch.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
+        const branchExec = getStepExecution(branch as WorkflowStep);
+
+        if (branchExec.kind === 'shell') {
+          const command = resolveTemplate(branchExec.value, resolvedArgs, results);
+          const stdinValue = resolveShellStdin(branch.stdin, resolvedArgs, results);
+          const { stdout } = await runShellCommand({ command, stdin: stdinValue, env: branchEnv, cwd: branchCwd, signal: ctx.signal });
+          return { id: branch.id, stdout, json: parseJson(stdout) };
+        } else if (branchExec.kind === 'pipeline') {
+          if (!ctx.registry) {
+            throw new Error(`Parallel branch ${branch.id} requires a command registry for pipeline execution`);
+          }
+          const pipelineText = resolveTemplate(branchExec.value, resolvedArgs, results);
+          const inputValue = resolveInputValue(branch.stdin, resolvedArgs, results);
+          return await runPipelineStep({
+            stepId: branch.id,
+            pipelineText,
+            inputValue,
+            ctx,
+            env: branchEnv,
+            cwd: branchCwd,
+          });
+        }
+        return { id: branch.id };
+      };
+
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = pc.timeout_ms
+        ? new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error(`Parallel step ${step.id} timed out after ${pc.timeout_ms}ms`)), pc.timeout_ms);
+        })
+        : null;
+
+      try {
+        if (wait === 'any') {
+          const promises = branches.map((b) => runBranch(b).then((r) => ({ branch: b, result: r })));
+          const allPromises = timeoutPromise ? [...promises, timeoutPromise] : promises;
+          const winner = await Promise.race(allPromises) as { branch: ParallelBranch; result: WorkflowStepResult };
+          results[winner.branch.id] = winner.result;
+          results[step.id] = {
+            id: step.id,
+            json: { [winner.branch.id]: winner.result.json },
+            stdout: winner.result.stdout ?? '',
+          };
+        } else {
+          // wait === 'all'
+          const promises = branches.map((b) => runBranch(b).then((r) => ({ branch: b, result: r })));
+          const allSettled = timeoutPromise
+            ? await Promise.race([Promise.allSettled(promises), timeoutPromise])
+            : await Promise.allSettled(promises);
+          const settled = allSettled as PromiseSettledResult<{ branch: ParallelBranch; result: WorkflowStepResult }>[];
+
+          const merged: Record<string, unknown> = {};
+          for (const s of settled) {
+            if (s.status === 'fulfilled') {
+              results[s.value.branch.id] = s.value.result;
+              merged[s.value.branch.id] = s.value.result.json;
+            } else {
+              throw new Error(`Parallel branch failed: ${s.reason?.message ?? String(s.reason)}`);
+            }
+          }
+          results[step.id] = {
+            id: step.id,
+            json: merged,
+            stdout: JSON.stringify(merged),
+          };
+        }
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+      }
+
       lastStepId = step.id;
       continue;
     }
