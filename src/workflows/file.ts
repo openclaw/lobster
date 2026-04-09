@@ -28,6 +28,8 @@ export type WorkflowStep = {
   command?: string;
   run?: string;
   pipeline?: string;
+  workflow?: string;
+  workflow_args?: Record<string, unknown>;
   env?: Record<string, string>;
   cwd?: string;
   stdin?: unknown;
@@ -157,15 +159,19 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     }
     const shellCommand = typeof step.run === 'string' ? step.run : step.command;
     const pipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
-    const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline));
+    const workflowRef = typeof step.workflow === 'string' ? step.workflow : undefined;
+    const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline)) + Number(Boolean(workflowRef));
     if (executionCount === 0 && !isApprovalStep(step.approval) && !isInputStep(step.input)) {
-      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, approval, or input`);
+      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, workflow, approval, or input`);
     }
     if (executionCount > 1) {
-      throw new Error(`Workflow step ${step.id} can only define one of run, command, or pipeline`);
+      throw new Error(`Workflow step ${step.id} can only define one of run, command, pipeline, or workflow`);
+    }
+    if (step.workflow !== undefined && typeof step.workflow !== 'string') {
+      throw new Error(`Workflow step ${step.id} workflow must be a string (file path)`);
     }
     if (executionCount > 0 && isInputStep(step.input)) {
-      throw new Error(`Workflow step ${step.id} input steps cannot define run, command, or pipeline`);
+      throw new Error(`Workflow step ${step.id} input steps cannot define run, command, pipeline, or workflow`);
     }
     if (isApprovalStep(step.approval) && isInputStep(step.input)) {
       throw new Error(`Workflow step ${step.id} cannot define both approval and input`);
@@ -409,7 +415,27 @@ export async function runWorkflowFile({
     const execution = getStepExecution(step);
 
     let result: WorkflowStepResult;
-    if (execution.kind === 'shell') {
+    if (execution.kind === 'workflow') {
+      const workflowPath = resolveTemplate(execution.value, resolvedArgs, results);
+      const resolvedWorkflowPath = path.isAbsolute(workflowPath)
+        ? workflowPath
+        : path.resolve(path.dirname(resolvedFilePath), workflowPath);
+      const subArgs = resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results);
+      const subResult = await runWorkflowFile({
+        filePath: resolvedWorkflowPath,
+        args: subArgs,
+        ctx: { ...ctx, env, cwd },
+      });
+      if (subResult.status === 'needs_approval' || subResult.status === 'needs_input') {
+        throw new Error(
+          `Workflow step ${step.id} sub-workflow halted for ${subResult.status === 'needs_approval' ? 'approval' : 'input'}. ` +
+          `Sub-workflow approval/input gates are not supported in composition.`,
+        );
+      }
+      const json = subResult.output.length === 1 ? subResult.output[0] : subResult.output;
+      const stdout = subResult.output.length ? JSON.stringify(json) : '';
+      result = { id: step.id, stdout, json };
+    } else if (execution.kind === 'shell') {
       const command = resolveTemplate(execution.value, resolvedArgs, results);
       const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
       const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: ctx.signal });
@@ -759,6 +785,23 @@ function resolveTemplate(
 ) {
   const withArgs = resolveArgsTemplate(input, args);
   return resolveStepRefs(withArgs, results);
+}
+
+function resolveWorkflowStepArgs(
+  workflowArgs: Record<string, unknown> | undefined,
+  parentArgs: Record<string, unknown>,
+  results: Record<string, WorkflowStepResult>,
+): Record<string, unknown> {
+  if (!workflowArgs) return {};
+  const resolved: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(workflowArgs)) {
+    if (typeof value === 'string') {
+      resolved[key] = resolveTemplate(value, parentArgs, results);
+    } else {
+      resolved[key] = value;
+    }
+  }
+  return resolved;
 }
 
 function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
@@ -1368,6 +1411,10 @@ async function runShellCommand({
 }
 
 function getStepExecution(step: WorkflowStep) {
+  if (typeof step.workflow === 'string' && step.workflow.trim()) {
+    return { kind: 'workflow' as const, value: step.workflow };
+  }
+
   if (typeof step.pipeline === 'string' && step.pipeline.trim()) {
     return { kind: 'pipeline' as const, value: step.pipeline };
   }
