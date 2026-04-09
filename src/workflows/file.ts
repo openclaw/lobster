@@ -183,6 +183,12 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       if (forEachShell || forEachPipeline) {
         throw new Error(`Workflow step ${step.id} for_each cannot also define run, command, or pipeline`);
       }
+      if (step.item_var !== undefined && typeof step.item_var !== 'string') {
+        throw new Error(`Workflow step ${step.id} item_var must be a string`);
+      }
+      if (step.index_var !== undefined && typeof step.index_var !== 'string') {
+        throw new Error(`Workflow step ${step.id} index_var must be a string`);
+      }
       const loopItemVar = step.item_var ?? 'item';
       const loopIndexVar = step.index_var ?? 'index';
       if (loopItemVar === loopIndexVar) {
@@ -757,15 +763,21 @@ function dryRunWorkflow({
           throw new Error(`Workflow step ${step.id} for_each: ${err?.message ?? String(err)}`);
         }
       }
-      lines.push(`     item_var: ${step.item_var ?? 'item'}, index_var: ${step.index_var ?? 'index'}`);
+      const dryItemVar = step.item_var ?? 'item';
+      const dryIndexVar = step.index_var ?? 'index';
+      lines.push(`     item_var: ${dryItemVar}, index_var: ${dryIndexVar}`);
       if (step.batch_size) lines.push(`     batch_size: ${step.batch_size}`);
       lines.push(`     sub-steps: ${step.steps.length}`);
+      // Inject loop variable placeholders so sub-step ref validation accepts $item/$index
+      const loopScopedResults = { ...results };
+      loopScopedResults[dryItemVar] = { id: dryItemVar };
+      loopScopedResults[dryIndexVar] = { id: dryIndexVar };
       for (let si = 0; si < step.steps.length; si++) {
         const sub = step.steps[si];
-        // Validate sub-step stdin refs
+        // Validate sub-step stdin refs against loop-scoped results
         if (sub.stdin !== undefined && sub.stdin !== null) {
           try {
-            resolveInputValue(sub.stdin, resolvedArgs, results);
+            resolveInputValue(sub.stdin, resolvedArgs, loopScopedResults);
           } catch (err: any) {
             throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} stdin: ${err?.message ?? String(err)}`);
           }
@@ -792,6 +804,8 @@ function dryRunWorkflow({
           }
           lines.push(`       ${si + 1}. ${sub.id}  [pipeline] pipeline: ${pl}`);
         }
+        // Add sub-step placeholder so later sub-steps can reference it
+        loopScopedResults[sub.id] = { id: sub.id };
       }
       results[step.id] = { id: step.id };
       continue;
