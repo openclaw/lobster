@@ -43,7 +43,7 @@ test('timeout_ms validation rejects non-number', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-timeout-'));
   const filePath = path.join(tmpDir, 'w.lobster');
   await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
-  await assert.rejects(loadWorkflowFile(filePath), /timeout_ms must be a finite positive number/);
+  await assert.rejects(loadWorkflowFile(filePath), /timeout_ms must be a positive integer between 1 and 2147483647/);
 });
 
 test('timeout_ms validation rejects zero', async () => {
@@ -54,7 +54,7 @@ test('timeout_ms validation rejects zero', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-timeout-'));
   const filePath = path.join(tmpDir, 'w.lobster');
   await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
-  await assert.rejects(loadWorkflowFile(filePath), /timeout_ms must be a finite positive number/);
+  await assert.rejects(loadWorkflowFile(filePath), /timeout_ms must be a positive integer between 1 and 2147483647/);
 });
 
 test('timeout_ms validation rejects Infinity', async () => {
@@ -65,7 +65,18 @@ test('timeout_ms validation rejects Infinity', async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-timeout-'));
   const filePath = path.join(tmpDir, 'w.lobster');
   await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
-  await assert.rejects(loadWorkflowFile(filePath), /timeout_ms must be a finite positive number/);
+  await assert.rejects(loadWorkflowFile(filePath), /timeout_ms must be a positive integer between 1 and 2147483647/);
+});
+
+test('timeout_ms validation rejects value exceeding Node timer max', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{ id: 'x', command: 'echo hi', timeout_ms: 2_147_483_648 }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-timeout-'));
+  const filePath = path.join(tmpDir, 'w.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /timeout_ms must be a positive integer between 1 and 2147483647/);
 });
 
 test('on_error validation rejects invalid values', async () => {

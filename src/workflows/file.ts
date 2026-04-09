@@ -199,8 +199,8 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
         throw new Error(`Workflow step ${step.id} input.responseSchema is invalid: ${err?.message ?? String(err)}`);
       }
     }
-    if (step.timeout_ms !== undefined && (typeof step.timeout_ms !== 'number' || !Number.isFinite(step.timeout_ms) || step.timeout_ms < 1)) {
-      throw new Error(`Workflow step ${step.id} timeout_ms must be a finite positive number`);
+    if (step.timeout_ms !== undefined && (typeof step.timeout_ms !== 'number' || !Number.isFinite(step.timeout_ms) || step.timeout_ms < 1 || step.timeout_ms > 2_147_483_647)) {
+      throw new Error(`Workflow step ${step.id} timeout_ms must be a positive integer between 1 and 2147483647`);
     }
     if (step.on_error !== undefined && step.on_error !== 'stop' && step.on_error !== 'continue' && step.on_error !== 'skip_rest') {
       throw new Error(`Workflow step ${step.id} on_error must be "stop", "continue", or "skip_rest"`);
