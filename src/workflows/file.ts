@@ -776,8 +776,11 @@ function dryRunWorkflow({
       lines.push(`     sub-steps: ${step.steps.length}`);
       // Inject loop variable placeholders so sub-step ref validation accepts $item/$index
       const loopScopedResults = { ...results };
-      loopScopedResults[dryItemVar] = { id: dryItemVar };
-      loopScopedResults[dryIndexVar] = { id: dryIndexVar };
+      // Seed loop vars with json placeholders so conditions like
+      // $item.json.field or $index.json == 0 evaluate truthy in dry-run
+      // rather than always being false due to missing json field.
+      loopScopedResults[dryItemVar] = { id: dryItemVar, json: { _placeholder: true } };
+      loopScopedResults[dryIndexVar] = { id: dryIndexVar, json: 0 };
       for (let si = 0; si < step.steps.length; si++) {
         const sub = step.steps[si];
         // Skip validation for conditional sub-steps (they may reference
