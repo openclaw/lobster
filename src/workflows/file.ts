@@ -433,7 +433,7 @@ export async function runWorkflowFile({
         );
       }
       const json = subResult.output.length === 1 ? subResult.output[0] : subResult.output;
-      const stdout = subResult.output.length ? JSON.stringify(json) : '';
+      const stdout = subResult.output.length ? serializeValueForStdout(json) : '';
       result = { id: step.id, stdout, json };
     } else if (execution.kind === 'shell') {
       const command = resolveTemplate(execution.value, resolvedArgs, results);
@@ -623,7 +623,18 @@ function dryRunWorkflow({
     // rather than silently collapsing the reference to an empty string.
     const stdinNote = dryRunStdinNote(step.stdin);
 
-    if (execution.kind === 'shell') {
+    if (execution.kind === 'workflow') {
+      const workflowPath = resolveDryRunTemplate(execution.value, resolvedArgs, results);
+      const pathNote = dryRunTemplateNote(workflowPath);
+      lines.push(`  ${num}. ${step.id}  [workflow]`);
+      lines.push(`     workflow: ${workflowPath}${pathNote ? `  ${pathNote}` : ''}`);
+      if (step.workflow_args && typeof step.workflow_args === 'object') {
+        const argKeys = Object.keys(step.workflow_args);
+        if (argKeys.length) {
+          lines.push(`     args: ${argKeys.join(', ')}`);
+        }
+      }
+    } else if (execution.kind === 'shell') {
       const command = resolveDryRunTemplate(execution.value, resolvedArgs, results);
       const commandNote = dryRunTemplateNote(command);
       lines.push(`  ${num}. ${step.id}  [shell]`);

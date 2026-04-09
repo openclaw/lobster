@@ -163,6 +163,71 @@ test('workflow validation rejects workflow combined with pipeline', async () => 
   await assert.rejects(loadWorkflowFile(filePath), /can only define one of/);
 });
 
+test('sub-workflow string output is raw in stdout, not JSON-quoted', async () => {
+  const { stateDir, paths } = await setupWorkflows({
+    'child.lobster': {
+      name: 'child',
+      steps: [
+        { id: 'out', command: 'echo "plain text"' },
+      ],
+    },
+    'parent.lobster': {
+      name: 'parent',
+      steps: [
+        { id: 'sub', workflow: 'child.lobster' },
+        {
+          id: 'check',
+          command: 'node -e "process.stdout.write(JSON.stringify({got: process.env.LOBSTER_ARG_VAL}))"',
+          env: { LOBSTER_ARG_VAL: '$sub.stdout' },
+        },
+      ],
+    },
+  });
+
+  const result = await runWorkflow(paths['parent.lobster'], stateDir);
+  assert.equal(result.status, 'ok');
+  const output = result.output as any[];
+  // Should be raw "plain text\n", not '"plain text\n"'
+  assert.equal(output[0].got, 'plain text\n');
+});
+
+test('dry-run shows workflow steps instead of no-op', async () => {
+  const { stateDir, paths } = await setupWorkflows({
+    'child.lobster': {
+      name: 'child',
+      steps: [{ id: 'out', command: 'echo hi' }],
+    },
+    'parent.lobster': {
+      name: 'parent',
+      steps: [
+        { id: 'sub', workflow: 'child.lobster', workflow_args: { key: 'val' } },
+      ],
+    },
+  });
+
+  const chunks: string[] = [];
+  const stderr = new (await import('node:stream')).PassThrough();
+  stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
+
+  const { runWorkflowFile: rwf } = await import('../src/workflows/file.js');
+  await rwf({
+    filePath: paths['parent.lobster'],
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr,
+      env: { ...process.env, LOBSTER_STATE_DIR: stateDir },
+      mode: 'tool',
+      dryRun: true,
+    },
+  });
+
+  const dryRunOutput = chunks.join('');
+  assert.ok(dryRunOutput.includes('[workflow]'), 'should show [workflow] tag');
+  assert.ok(dryRunOutput.includes('child.lobster'), 'should show workflow path');
+  assert.ok(dryRunOutput.includes('args: key'), 'should show workflow_args keys');
+});
+
 test('chained workflow composition', async () => {
   const { stateDir, paths } = await setupWorkflows({
     'leaf.lobster': {
