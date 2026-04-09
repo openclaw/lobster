@@ -490,7 +490,7 @@ export async function runWorkflowFile({
 
       for (let itemIdx = 0; itemIdx < itemsRef.length; itemIdx++) {
         if (step.pause_ms && itemIdx > 0 && itemIdx % batchSize === 0) {
-          await new Promise((r) => setTimeout(r, step.pause_ms));
+          await abortableSleep(step.pause_ms, ctx.signal);
         }
         const item = itemsRef[itemIdx];
         const scopedResults: Record<string, WorkflowStepResult> = { ...results };
@@ -1683,6 +1683,26 @@ function createSyntheticStepResult(stepId: string, value: unknown): WorkflowStep
     stdout: serializeValueForStdout(value),
     json: value,
   };
+}
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((r) => setTimeout(r, ms));
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function encodeShellInput(value: unknown) {
