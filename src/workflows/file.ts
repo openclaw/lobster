@@ -35,6 +35,7 @@ export type WorkflowStep = {
   input?: WorkflowInputRequest;
   condition?: unknown;
   when?: unknown;
+  on_error?: 'stop' | 'continue' | 'skip_rest';
 };
 
 export type WorkflowApproval =
@@ -61,6 +62,8 @@ export type WorkflowStepResult = {
   subject?: unknown;
   response?: unknown;
   skipped?: boolean;
+  error?: boolean;
+  errorMessage?: string;
 };
 
 export type WorkflowRunResult = {
@@ -194,6 +197,9 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       } catch (err: any) {
         throw new Error(`Workflow step ${step.id} input.responseSchema is invalid: ${err?.message ?? String(err)}`);
       }
+    }
+    if (step.on_error !== undefined && step.on_error !== 'stop' && step.on_error !== 'continue' && step.on_error !== 'skip_rest') {
+      throw new Error(`Workflow step ${step.id} on_error must be "stop", "continue", or "skip_rest"`);
     }
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
@@ -409,28 +415,46 @@ export async function runWorkflowFile({
     const execution = getStepExecution(step);
 
     let result: WorkflowStepResult;
-    if (execution.kind === 'shell') {
-      const command = resolveTemplate(execution.value, resolvedArgs, results);
-      const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
-      const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: ctx.signal });
-      result = { id: step.id, stdout, json: parseJson(stdout) };
-    } else if (execution.kind === 'pipeline') {
-      if (!ctx.registry) {
-        throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+    try {
+      if (execution.kind === 'shell') {
+        const command = resolveTemplate(execution.value, resolvedArgs, results);
+        const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
+        const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: ctx.signal });
+        result = { id: step.id, stdout, json: parseJson(stdout) };
+      } else if (execution.kind === 'pipeline') {
+        if (!ctx.registry) {
+          throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+        }
+        const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
+        const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+        result = await runPipelineStep({
+          stepId: step.id,
+          pipelineText,
+          inputValue,
+          ctx,
+          env,
+          cwd,
+        });
+      } else {
+        const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+        result = createSyntheticStepResult(step.id, inputValue);
       }
-      const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
-      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-      result = await runPipelineStep({
-        stepId: step.id,
-        pipelineText,
-        inputValue,
-        ctx,
-        env,
-        cwd,
-      });
-    } else {
-      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-      result = createSyntheticStepResult(step.id, inputValue);
+    } catch (err: any) {
+      const policy = step.on_error ?? 'stop';
+      if (policy === 'stop') {
+        throw err;
+      }
+      results[step.id] = {
+        id: step.id,
+        error: true,
+        errorMessage: err?.message ?? String(err),
+      };
+      lastStepId = step.id;
+      if (policy === 'skip_rest') {
+        break;
+      }
+      // policy === 'continue': proceed to next step
+      continue;
     }
 
     results[step.id] = result;
