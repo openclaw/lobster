@@ -437,7 +437,10 @@ export async function runWorkflowFile({
       if (execution.kind === 'shell') {
         const command = resolveTemplate(execution.value, resolvedArgs, results);
         const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
-        const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: stepSignal });
+        const { stdout } = await runShellCommand({
+          command, stdin: stdinValue, env, cwd, signal: stepSignal,
+          ...(step.timeout_ms ? { killSignal: 'SIGKILL' as NodeJS.Signals } : {}),
+        });
         result = { id: step.id, stdout, json: parseJson(stdout) };
       } else if (execution.kind === 'pipeline') {
         if (!ctx.registry) {
@@ -1385,12 +1388,14 @@ async function runShellCommand({
   env,
   cwd,
   signal,
+  killSignal,
 }: {
   command: string;
   stdin: string | null;
   env: Record<string, string | undefined>;
   cwd?: string;
   signal?: AbortSignal;
+  killSignal?: NodeJS.Signals;
 }) {
   const { spawn } = await import('node:child_process');
 
@@ -1400,6 +1405,7 @@ async function runShellCommand({
       env,
       cwd,
       signal,
+      killSignal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
