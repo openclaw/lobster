@@ -440,6 +440,10 @@ export async function runWorkflowFile({
         result = createSyntheticStepResult(step.id, inputValue);
       }
     } catch (err: any) {
+      // Always re-throw abort/cancellation errors regardless of on_error policy
+      if (err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
+        throw err;
+      }
       const policy = step.on_error ?? 'stop';
       if (policy === 'stop') {
         throw err;
@@ -449,10 +453,12 @@ export async function runWorkflowFile({
         error: true,
         errorMessage: err?.message ?? String(err),
       };
-      lastStepId = step.id;
+      // For skip_rest, preserve lastStepId from prior successful step
+      // so output comes from the last good result, not the error placeholder
       if (policy === 'skip_rest') {
         break;
       }
+      lastStepId = step.id;
       // policy === 'continue': proceed to next step
       continue;
     }

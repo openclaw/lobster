@@ -136,3 +136,54 @@ test('multiple steps with on_error: continue collects all errors', async () => {
   assert.equal(output[0].a_err, 'true');
   assert.equal(output[0].b_err, 'true');
 });
+
+test('on_error: skip_rest preserves output from last successful step', async () => {
+  const workflow = {
+    name: 'skip-rest-output',
+    steps: [
+      { id: 'good', command: 'node -e "process.stdout.write(JSON.stringify({data:\\"kept\\"}))"' },
+      { id: 'fail', command: 'node -e "process.exit(1)"', on_error: 'skip_rest' },
+      { id: 'skipped', command: 'echo "never"' },
+    ],
+  };
+  const result = await runWorkflow(workflow);
+  assert.equal(result.status, 'ok');
+  const output = result.output as any[];
+  assert.equal(output[0].data, 'kept');
+});
+
+test('abort errors propagate even with on_error: continue', async () => {
+  // Simulate an abort by running a command with an already-aborted signal
+  const tmpDir = await (await import('node:fs')).promises.mkdtemp(
+    (await import('node:path')).join((await import('node:os')).tmpdir(), 'lobster-abort-'),
+  );
+  const stateDir = (await import('node:path')).join(tmpDir, 'state');
+  const filePath = (await import('node:path')).join(tmpDir, 'workflow.lobster');
+  const workflow = {
+    name: 'abort-test',
+    steps: [
+      { id: 'slow', command: 'sleep 60', on_error: 'continue' },
+    ],
+  };
+  await (await import('node:fs')).promises.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+
+  const controller = new AbortController();
+  // Abort immediately
+  controller.abort();
+
+  const { runWorkflowFile } = await import('../src/workflows/file.js');
+  await assert.rejects(
+    runWorkflowFile({
+      filePath,
+      ctx: {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env: { ...process.env, LOBSTER_STATE_DIR: stateDir },
+        mode: 'tool',
+        signal: controller.signal,
+      },
+    }),
+    (err: any) => err.name === 'AbortError' || err.code === 'ABORT_ERR',
+  );
+});
