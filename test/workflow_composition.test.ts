@@ -228,6 +228,65 @@ test('dry-run shows workflow steps instead of no-op', async () => {
   assert.ok(dryRunOutput.includes('args: key'), 'should show workflow_args keys');
 });
 
+test('direct self-reference cycle is detected', async () => {
+  const { stateDir, paths } = await setupWorkflows({
+    'self.lobster': {
+      name: 'self',
+      steps: [
+        { id: 'recurse', workflow: 'self.lobster' },
+      ],
+    },
+  });
+  await assert.rejects(runWorkflow(paths['self.lobster'], stateDir), /creates a cycle/);
+});
+
+test('indirect cycle (a -> b -> a) is detected', async () => {
+  const { stateDir, paths } = await setupWorkflows({
+    'a.lobster': {
+      name: 'a',
+      steps: [{ id: 'call_b', workflow: 'b.lobster' }],
+    },
+    'b.lobster': {
+      name: 'b',
+      steps: [{ id: 'call_a', workflow: 'a.lobster' }],
+    },
+  });
+  await assert.rejects(runWorkflow(paths['a.lobster'], stateDir), /creates a cycle/);
+});
+
+test('validation rejects blank workflow path', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{ id: 'x', workflow: '   ' }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-compose-'));
+  const filePath = path.join(tmpDir, 'w.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /workflow path cannot be blank/);
+});
+
+test('validation rejects non-object workflow_args', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{ id: 'x', workflow: 'child.lobster', workflow_args: 'not-an-object' }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-compose-'));
+  const filePath = path.join(tmpDir, 'w.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /workflow_args must be a plain object/);
+});
+
+test('validation rejects array workflow_args', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{ id: 'x', workflow: 'child.lobster', workflow_args: ['a', 'b'] }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-compose-'));
+  const filePath = path.join(tmpDir, 'w.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /workflow_args must be a plain object/);
+});
+
 test('chained workflow composition', async () => {
   const { stateDir, paths } = await setupWorkflows({
     'leaf.lobster': {

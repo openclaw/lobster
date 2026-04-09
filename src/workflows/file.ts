@@ -99,6 +99,7 @@ type RunContext = {
   };
   llmAdapters?: Record<string, any>;
   dryRun?: boolean;
+  _activeWorkflows?: Set<string>;
 };
 
 export type WorkflowResumePayload = {
@@ -157,18 +158,26 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (!step.id || typeof step.id !== 'string') {
       throw new Error('Workflow step requires an id');
     }
+    if (step.workflow !== undefined && typeof step.workflow !== 'string') {
+      throw new Error(`Workflow step ${step.id} workflow must be a string (file path)`);
+    }
+    if (typeof step.workflow === 'string' && !step.workflow.trim()) {
+      throw new Error(`Workflow step ${step.id} workflow path cannot be blank`);
+    }
+    if (step.workflow_args !== undefined) {
+      if (!step.workflow_args || typeof step.workflow_args !== 'object' || Array.isArray(step.workflow_args)) {
+        throw new Error(`Workflow step ${step.id} workflow_args must be a plain object`);
+      }
+    }
     const shellCommand = typeof step.run === 'string' ? step.run : step.command;
     const pipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
-    const workflowRef = typeof step.workflow === 'string' ? step.workflow : undefined;
+    const workflowRef = typeof step.workflow === 'string' && step.workflow.trim() ? step.workflow : undefined;
     const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline)) + Number(Boolean(workflowRef));
     if (executionCount === 0 && !isApprovalStep(step.approval) && !isInputStep(step.input)) {
       throw new Error(`Workflow step ${step.id} requires run, command, pipeline, workflow, approval, or input`);
     }
     if (executionCount > 1) {
       throw new Error(`Workflow step ${step.id} can only define one of run, command, pipeline, or workflow`);
-    }
-    if (step.workflow !== undefined && typeof step.workflow !== 'string') {
-      throw new Error(`Workflow step ${step.id} workflow must be a string (file path)`);
     }
     if (executionCount > 0 && isInputStep(step.input)) {
       throw new Error(`Workflow step ${step.id} input steps cannot define run, command, pipeline, or workflow`);
@@ -283,6 +292,11 @@ export async function runWorkflowFile({
   if (!resolvedFilePath) {
     throw new Error('Workflow file path required');
   }
+  // Track active workflows for cycle detection in composition
+  if (!ctx._activeWorkflows) {
+    ctx._activeWorkflows = new Set<string>();
+  }
+  ctx._activeWorkflows.add(path.resolve(resolvedFilePath));
   const workflow = await loadWorkflowFile(resolvedFilePath);
   const resolvedArgs = resolveWorkflowArgs(workflow.args, args ?? resumeState?.args);
   const steps = workflow.steps;
@@ -420,11 +434,20 @@ export async function runWorkflowFile({
       const resolvedWorkflowPath = path.isAbsolute(workflowPath)
         ? workflowPath
         : path.resolve(path.dirname(resolvedFilePath), workflowPath);
+      const activeWorkflows = ctx._activeWorkflows ?? new Set<string>();
+      const canonicalPath = path.resolve(resolvedWorkflowPath);
+      if (activeWorkflows.has(canonicalPath)) {
+        throw new Error(
+          `Workflow step ${step.id} creates a cycle: ${canonicalPath} is already being executed`,
+        );
+      }
+      const childActive = new Set(activeWorkflows);
+      childActive.add(canonicalPath);
       const subArgs = resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results);
       const subResult = await runWorkflowFile({
         filePath: resolvedWorkflowPath,
         args: subArgs,
-        ctx: { ...ctx, env, cwd },
+        ctx: { ...ctx, env, cwd, _activeWorkflows: childActive },
       });
       if (subResult.status === 'needs_approval' || subResult.status === 'needs_input') {
         throw new Error(
