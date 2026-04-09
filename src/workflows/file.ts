@@ -183,10 +183,18 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       if (forEachShell || forEachPipeline) {
         throw new Error(`Workflow step ${step.id} for_each cannot also define run, command, or pipeline`);
       }
+      const loopItemVar = step.item_var ?? 'item';
+      const loopIndexVar = step.index_var ?? 'index';
+      if (loopItemVar === loopIndexVar) {
+        throw new Error(`Workflow step ${step.id} item_var and index_var cannot be the same`);
+      }
       const subStepIds = new Set<string>();
       for (const sub of step.steps) {
         if (!sub || typeof sub !== 'object' || !sub.id || typeof sub.id !== 'string') {
           throw new Error(`Workflow step ${step.id} for_each sub-step requires an id`);
+        }
+        if (sub.id === loopItemVar || sub.id === loopIndexVar) {
+          throw new Error(`Workflow step ${step.id} for_each sub-step id '${sub.id}' conflicts with loop variable`);
         }
         if (subStepIds.has(sub.id)) {
           throw new Error(`Workflow step ${step.id} duplicate for_each sub-step id: ${sub.id}`);
@@ -734,6 +742,27 @@ function dryRunWorkflow({
       } catch (err: any) {
         throw new Error(`Workflow step ${step.id} stdin: ${err?.message ?? String(err)}`);
       }
+    }
+
+    if (typeof step.for_each === 'string' && Array.isArray(step.steps)) {
+      lines.push(`  ${num}. ${step.id}  [for_each]`);
+      lines.push(`     for_each: ${step.for_each}`);
+      lines.push(`     item_var: ${step.item_var ?? 'item'}, index_var: ${step.index_var ?? 'index'}`);
+      if (step.batch_size) lines.push(`     batch_size: ${step.batch_size}`);
+      lines.push(`     sub-steps: ${step.steps.length}`);
+      for (let si = 0; si < step.steps.length; si++) {
+        const sub = step.steps[si];
+        const subExec = getStepExecution(sub as WorkflowStep);
+        if (subExec.kind === 'shell') {
+          const cmd = resolveDryRunTemplate(subExec.value, resolvedArgs, results);
+          lines.push(`       ${si + 1}. ${sub.id}  [shell] run: ${cmd}`);
+        } else if (subExec.kind === 'pipeline') {
+          const pl = resolveDryRunTemplate(subExec.value, resolvedArgs, results);
+          lines.push(`       ${si + 1}. ${sub.id}  [pipeline] pipeline: ${pl}`);
+        }
+      }
+      results[step.id] = { id: step.id };
+      continue;
     }
 
     const execution = getStepExecution(step);

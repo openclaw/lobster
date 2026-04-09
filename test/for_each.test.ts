@@ -355,6 +355,85 @@ test('for_each validation rejects duplicate sub-step ids', async () => {
   await assert.rejects(loadWorkflowFile(filePath), /duplicate for_each sub-step id: dup/);
 });
 
+test('for_each validation rejects sub-step id shadowing item_var', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      steps: [{ id: 'item', command: 'echo hi' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /conflicts with loop variable/);
+});
+
+test('for_each validation rejects item_var equal to index_var', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      item_var: 'x',
+      index_var: 'x',
+      steps: [{ id: 'a', command: 'echo hi' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /item_var and index_var cannot be the same/);
+});
+
+test('for_each dry-run shows loop structure', async () => {
+  const workflow = {
+    name: 'dry-run-foreach',
+    steps: [
+      { id: 'data', command: 'echo "[1,2]"' },
+      {
+        id: 'loop',
+        for_each: '$data.json',
+        batch_size: 2,
+        steps: [
+          { id: 'process', command: 'echo hi' },
+          { id: 'analyze', pipeline: 'json' },
+        ],
+      },
+    ],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const { PassThrough } = await import('node:stream');
+  const { createDefaultRegistry } = await import('../src/commands/registry.js');
+  const chunks: string[] = [];
+  const stderr = new PassThrough();
+  stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
+
+  await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr,
+      env: { ...process.env, LOBSTER_STATE_DIR: stateDir },
+      mode: 'tool',
+      registry: createDefaultRegistry(),
+      dryRun: true,
+    },
+  });
+
+  const output = chunks.join('');
+  assert.ok(output.includes('[for_each]'), 'should show [for_each] tag');
+  assert.ok(output.includes('sub-steps: 2'), 'should show sub-step count');
+  assert.ok(output.includes('batch_size: 2'), 'should show batch_size');
+  assert.ok(output.includes('process'), 'should list sub-steps');
+});
+
 test('for_each validation rejects whitespace-only run', async () => {
   const workflow = {
     name: 'bad',
