@@ -197,3 +197,50 @@ test('for_each validation rejects sub-steps without execution', async () => {
   await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
   await assert.rejects(loadWorkflowFile(filePath), /requires run, command, or pipeline/);
 });
+
+test('for_each validation rejects input on the for_each step', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      input: { prompt: 'test?', responseSchema: { type: 'object' } },
+      steps: [{ id: 'x', command: 'echo hi' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /for_each steps cannot define input/);
+});
+
+test('for_each validation rejects run/command/pipeline alongside for_each', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      run: 'echo ignored',
+      steps: [{ id: 'x', command: 'echo hi' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /for_each cannot also define run, command, or pipeline/);
+});
+
+test('for_each validation rejects sub-steps with multiple executors', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      steps: [{ id: 'multi', run: 'echo a', pipeline: 'json' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /can only define one of run, command, or pipeline/);
+});

@@ -175,6 +175,14 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       if (isApprovalStep(step.approval)) {
         throw new Error(`Workflow step ${step.id} for_each steps cannot define approval (use a separate step after the loop)`);
       }
+      if (isInputStep(step.input)) {
+        throw new Error(`Workflow step ${step.id} for_each steps cannot define input (use a separate step after the loop)`);
+      }
+      const forEachShell = typeof step.run === 'string' ? step.run : step.command;
+      const forEachPipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
+      if (forEachShell || forEachPipeline) {
+        throw new Error(`Workflow step ${step.id} for_each cannot also define run, command, or pipeline`);
+      }
       for (const sub of step.steps) {
         if (!sub || typeof sub !== 'object' || !sub.id || typeof sub.id !== 'string') {
           throw new Error(`Workflow step ${step.id} for_each sub-step requires an id`);
@@ -186,6 +194,10 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
         const subPipeline = typeof sub.pipeline === 'string' ? sub.pipeline : undefined;
         if (!subShell && !subPipeline) {
           throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} requires run, command, or pipeline`);
+        }
+        const subExecCount = Number(Boolean(subShell)) + Number(Boolean(subPipeline));
+        if (subExecCount > 1) {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} can only define one of run, command, or pipeline`);
         }
       }
     }
