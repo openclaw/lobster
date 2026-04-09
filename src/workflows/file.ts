@@ -298,6 +298,7 @@ export async function runWorkflowFile({
   }
   const canonicalFilePath = await fsp.realpath(resolvedFilePath);
   ctx._activeWorkflows.add(canonicalFilePath);
+  try {
   const workflow = await loadWorkflowFile(resolvedFilePath);
   const resolvedArgs = resolveWorkflowArgs(workflow.args, args ?? resumeState?.args);
   const steps = workflow.steps;
@@ -557,6 +558,9 @@ export async function runWorkflowFile({
     await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
   }
   return { status: 'ok', output };
+  } finally {
+    ctx._activeWorkflows?.delete(canonicalFilePath);
+  }
 }
 
 // Returns a human-readable note if a step.stdin value references a prior step's
