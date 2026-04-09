@@ -746,7 +746,17 @@ function dryRunWorkflow({
 
     if (typeof step.for_each === 'string' && Array.isArray(step.steps)) {
       lines.push(`  ${num}. ${step.id}  [for_each]`);
-      lines.push(`     for_each: ${step.for_each}`);
+      const forEachRef = step.for_each;
+      const forEachNote = dryRunTemplateNote(forEachRef);
+      lines.push(`     for_each: ${forEachRef}${forEachNote ? `  ${forEachNote}` : ''}`);
+      // Validate the for_each source ref if it points to a known step
+      if (forEachRef.trim().startsWith('$')) {
+        try {
+          resolveInputValue(forEachRef, resolvedArgs, results);
+        } catch (err: any) {
+          throw new Error(`Workflow step ${step.id} for_each: ${err?.message ?? String(err)}`);
+        }
+      }
       lines.push(`     item_var: ${step.item_var ?? 'item'}, index_var: ${step.index_var ?? 'index'}`);
       if (step.batch_size) lines.push(`     batch_size: ${step.batch_size}`);
       lines.push(`     sub-steps: ${step.steps.length}`);
@@ -758,6 +768,19 @@ function dryRunWorkflow({
           lines.push(`       ${si + 1}. ${sub.id}  [shell] run: ${cmd}`);
         } else if (subExec.kind === 'pipeline') {
           const pl = resolveDryRunTemplate(subExec.value, resolvedArgs, results);
+          if (ctx.registry) {
+            try {
+              const stages = parsePipeline(pl);
+              for (const stage of stages) {
+                if (hasDeferredDryRunStageName(stage.name)) continue;
+                if (!ctx.registry.get(stage.name)) {
+                  throw new Error(`unknown command: ${stage.name}`);
+                }
+              }
+            } catch (err: any) {
+              throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} pipeline: ${err?.message ?? String(err)}`);
+            }
+          }
           lines.push(`       ${si + 1}. ${sub.id}  [pipeline] pipeline: ${pl}`);
         }
       }
