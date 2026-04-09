@@ -13,6 +13,8 @@ import { createApprovalIndex, deleteStateJson, readStateJson, writeStateJson } f
 import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
 import { sharedAjv } from '../validation.js';
+import { CostTracker } from '../core/cost_tracker.js';
+import type { CostLimit, CostSummary } from '../core/cost_tracker.js';
 
 export type WorkflowFile = {
   name?: string;
@@ -21,6 +23,7 @@ export type WorkflowFile = {
   env?: Record<string, string>;
   cwd?: string;
   steps: WorkflowStep[];
+  cost_limit?: CostLimit;
 };
 
 export type WorkflowStep = {
@@ -81,6 +84,9 @@ export type WorkflowRunResult = {
     defaults?: unknown;
     subject?: unknown;
     resumeToken?: string;
+  };
+  _meta?: {
+    cost?: CostSummary;
   };
 };
 
@@ -323,6 +329,7 @@ export async function runWorkflowFile({
     return dryRunWorkflow({ steps, resolvedArgs, results, startIndex, ctx });
   }
 
+  const costTracker = new CostTracker(CostTracker.parsePricingFromEnv(ctx.env));
   let lastStepId: string | null = resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
 
   for (let idx = startIndex; idx < steps.length; idx++) {
@@ -436,6 +443,12 @@ export async function runWorkflowFile({
     results[step.id] = result;
     lastStepId = step.id;
 
+    // Track LLM cost from pipeline step results that contain usage data
+    trackStepCost(costTracker, step.id, result);
+    if (workflow.cost_limit) {
+      costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
+    }
+
     if (isApprovalStep(step.approval)) {
       const approval = extractApprovalRequest(step, results[step.id]);
 
@@ -494,7 +507,11 @@ export async function runWorkflowFile({
   if (consumedResumeStateKey) {
     await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
   }
-  return { status: 'ok', output };
+  const runResult: WorkflowRunResult = { status: 'ok', output };
+  if (costTracker.hasUsage()) {
+    runResult._meta = { cost: costTracker.getSummary() };
+  }
+  return runResult;
 }
 
 // Returns a human-readable note if a step.stdin value references a prior step's
@@ -865,6 +882,19 @@ function extractApprovalRequest(step: WorkflowStep, result: WorkflowStepResult) 
     items,
     ...(preview ? { preview } : null),
   };
+}
+
+function trackStepCost(costTracker: CostTracker, stepId: string, result: WorkflowStepResult): void {
+  const json = result.json;
+  if (!json || typeof json !== 'object') return;
+  // Handle both single item and array of items (pipeline output)
+  const items = Array.isArray(json) ? json : [json];
+  for (const item of items) {
+    if (item && typeof item === 'object' && 'usage' in item && item.usage && typeof item.usage === 'object') {
+      const model = ('model' in item && typeof item.model === 'string') ? item.model : null;
+      costTracker.recordUsage(stepId, model, item.usage as Record<string, unknown>);
+    }
+  }
 }
 
 function parseJson(stdout: string) {
