@@ -762,24 +762,33 @@ function dryRunWorkflow({
       lines.push(`     sub-steps: ${step.steps.length}`);
       for (let si = 0; si < step.steps.length; si++) {
         const sub = step.steps[si];
+        // Validate sub-step stdin refs
+        if (sub.stdin !== undefined && sub.stdin !== null) {
+          try {
+            resolveInputValue(sub.stdin, resolvedArgs, results);
+          } catch (err: any) {
+            throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} stdin: ${err?.message ?? String(err)}`);
+          }
+        }
         const subExec = getStepExecution(sub as WorkflowStep);
         if (subExec.kind === 'shell') {
           const cmd = resolveDryRunTemplate(subExec.value, resolvedArgs, results);
           lines.push(`       ${si + 1}. ${sub.id}  [shell] run: ${cmd}`);
         } else if (subExec.kind === 'pipeline') {
+          if (!ctx.registry) {
+            throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} requires a command registry for pipeline execution`);
+          }
           const pl = resolveDryRunTemplate(subExec.value, resolvedArgs, results);
-          if (ctx.registry) {
-            try {
-              const stages = parsePipeline(pl);
-              for (const stage of stages) {
-                if (hasDeferredDryRunStageName(stage.name)) continue;
-                if (!ctx.registry.get(stage.name)) {
-                  throw new Error(`unknown command: ${stage.name}`);
-                }
+          try {
+            const stages = parsePipeline(pl);
+            for (const stage of stages) {
+              if (hasDeferredDryRunStageName(stage.name)) continue;
+              if (!ctx.registry.get(stage.name)) {
+                throw new Error(`unknown command: ${stage.name}`);
               }
-            } catch (err: any) {
-              throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} pipeline: ${err?.message ?? String(err)}`);
             }
+          } catch (err: any) {
+            throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} pipeline: ${err?.message ?? String(err)}`);
           }
           lines.push(`       ${si + 1}. ${sub.id}  [pipeline] pipeline: ${pl}`);
         }
