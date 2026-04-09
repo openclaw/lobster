@@ -161,6 +161,9 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (!step.id || typeof step.id !== 'string') {
       throw new Error('Workflow step requires an id');
     }
+    if (step.for_each !== undefined && typeof step.for_each !== 'string') {
+      throw new Error(`Workflow step ${step.id} for_each must be a string (step reference expression)`);
+    }
     const isForEach = typeof step.for_each === 'string';
     if (isForEach) {
       if (!Array.isArray(step.steps) || step.steps.length === 0) {
@@ -777,6 +780,13 @@ function dryRunWorkflow({
       loopScopedResults[dryIndexVar] = { id: dryIndexVar };
       for (let si = 0; si < step.steps.length; si++) {
         const sub = step.steps[si];
+        // Skip validation for conditional sub-steps (they may reference
+        // variables that only exist in certain runtime conditions)
+        if (!evaluateCondition(sub.when ?? sub.condition, loopScopedResults)) {
+          lines.push(`       ${si + 1}. ${sub.id}  [skipped — condition: false]`);
+          loopScopedResults[sub.id] = { id: sub.id, skipped: true };
+          continue;
+        }
         // Validate sub-step stdin refs against loop-scoped results
         if (sub.stdin !== undefined && sub.stdin !== null) {
           try {
