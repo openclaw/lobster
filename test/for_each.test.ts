@@ -336,3 +336,36 @@ test('for_each propagates step-level env to sub-steps', async () => {
   assert.equal(output[0].check.flag, 'from_loop');
   assert.equal(output[1].check.flag, 'from_loop');
 });
+
+test('for_each validation rejects duplicate sub-step ids', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      steps: [
+        { id: 'dup', command: 'echo a' },
+        { id: 'dup', command: 'echo b' },
+      ],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /duplicate for_each sub-step id: dup/);
+});
+
+test('for_each validation rejects whitespace-only run', async () => {
+  const workflow = {
+    name: 'bad',
+    steps: [{
+      id: 'loop',
+      for_each: '$x.json',
+      steps: [{ id: 'blank', run: '   ' }],
+    }],
+  };
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-foreach-'));
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow), 'utf8');
+  await assert.rejects(loadWorkflowFile(filePath), /requires run, command, or pipeline/);
+});

@@ -183,10 +183,15 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       if (forEachShell || forEachPipeline) {
         throw new Error(`Workflow step ${step.id} for_each cannot also define run, command, or pipeline`);
       }
+      const subStepIds = new Set<string>();
       for (const sub of step.steps) {
         if (!sub || typeof sub !== 'object' || !sub.id || typeof sub.id !== 'string') {
           throw new Error(`Workflow step ${step.id} for_each sub-step requires an id`);
         }
+        if (subStepIds.has(sub.id)) {
+          throw new Error(`Workflow step ${step.id} duplicate for_each sub-step id: ${sub.id}`);
+        }
+        subStepIds.add(sub.id);
         if (isApprovalStep(sub.approval) || isInputStep(sub.input)) {
           throw new Error(`Workflow step ${step.id} for_each sub-steps cannot contain approval or input steps`);
         }
@@ -199,8 +204,8 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
         if (sub.pipeline !== undefined && typeof sub.pipeline !== 'string') {
           throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} pipeline must be a string`);
         }
-        const subShell = typeof sub.run === 'string' ? sub.run : (typeof sub.command === 'string' ? sub.command : undefined);
-        const subPipeline = typeof sub.pipeline === 'string' ? sub.pipeline : undefined;
+        const subShell = typeof sub.run === 'string' && sub.run.trim() ? sub.run : (typeof sub.command === 'string' && sub.command.trim() ? sub.command : undefined);
+        const subPipeline = typeof sub.pipeline === 'string' && sub.pipeline.trim() ? sub.pipeline : undefined;
         if (!subShell && !subPipeline) {
           throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} requires run, command, or pipeline`);
         }
