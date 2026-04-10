@@ -15,6 +15,8 @@ import { resolveInlineShellCommand } from '../shell.js';
 import { sharedAjv } from '../validation.js';
 import { CostTracker } from '../core/cost_tracker.js';
 import type { CostLimit, CostSummary } from '../core/cost_tracker.js';
+import { withRetry, resolveRetryConfig } from '../core/retry.js';
+import type { RetryConfig } from '../core/retry.js';
 
 export type WorkflowFile = {
   name?: string;
@@ -65,6 +67,13 @@ export type WorkflowStep = {
   steps?: WorkflowStep[];
   timeout_ms?: number;
   on_error?: 'stop' | 'continue' | 'skip_rest';
+  retry?: {
+    max?: number;
+    backoff?: 'fixed' | 'exponential';
+    delay_ms?: number;
+    max_delay_ms?: number;
+    jitter?: boolean;
+  };
 };
 
 export type WorkflowApproval =
@@ -483,6 +492,27 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     ) {
       throw new Error(`Workflow step ${step.id} on_error must be "stop", "continue", or "skip_rest"`);
     }
+    if (step.retry !== undefined) {
+      if (!step.retry || typeof step.retry !== 'object' || Array.isArray(step.retry)) {
+        throw new Error(`Workflow step ${step.id} retry must be an object`);
+      }
+      const r = step.retry;
+      if (r.max !== undefined && (typeof r.max !== 'number' || !Number.isInteger(r.max) || r.max < 1)) {
+        throw new Error(`Workflow step ${step.id} retry.max must be a positive integer`);
+      }
+      if (r.backoff !== undefined && r.backoff !== 'fixed' && r.backoff !== 'exponential') {
+        throw new Error(`Workflow step ${step.id} retry.backoff must be "fixed" or "exponential"`);
+      }
+      if (r.delay_ms !== undefined && (typeof r.delay_ms !== 'number' || !Number.isFinite(r.delay_ms) || r.delay_ms < 0)) {
+        throw new Error(`Workflow step ${step.id} retry.delay_ms must be a finite non-negative number`);
+      }
+      if (r.max_delay_ms !== undefined && (typeof r.max_delay_ms !== 'number' || !Number.isFinite(r.max_delay_ms) || r.max_delay_ms < 0)) {
+        throw new Error(`Workflow step ${step.id} retry.max_delay_ms must be a finite non-negative number`);
+      }
+      if (r.jitter !== undefined && typeof r.jitter !== 'boolean') {
+        throw new Error(`Workflow step ${step.id} retry.jitter must be a boolean`);
+      }
+    }
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
     }
@@ -815,200 +845,230 @@ export async function runWorkflowFile({
     const env = mergeEnv(ctx.env, workflow.env, step.env, resolvedArgs, results);
     const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
     const execution = getStepExecution(step);
+    const retryConfig = resolveRetryConfig(step.retry);
 
-    // Combine external cancellation and optional per-step timeout into one signal.
-    let stepSignal: AbortSignal | undefined = ctx.signal;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    if (step.timeout_ms) {
-      const timeoutController = new AbortController();
-      timeoutId = setTimeout(
-        () => timeoutController.abort(new Error(`Step '${step.id}' timed out after ${step.timeout_ms}ms`)),
-        step.timeout_ms,
-      );
-      stepSignal = ctx.signal
-        ? AbortSignal.any([ctx.signal, timeoutController.signal])
-        : timeoutController.signal;
-    }
+    const executeStepAttempt = async (): Promise<{
+      result: WorkflowStepResult;
+      parallelBranchResults: Record<string, WorkflowStepResult> | null;
+    }> => {
+      // Combine external cancellation and optional per-step timeout into one signal.
+      let stepSignal: AbortSignal | undefined = ctx.signal;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      if (step.timeout_ms) {
+        const timeoutController = new AbortController();
+        timeoutId = setTimeout(
+          () => timeoutController.abort(new Error(`Step '${step.id}' timed out after ${step.timeout_ms}ms`)),
+          step.timeout_ms,
+        );
+        stepSignal = ctx.signal
+          ? AbortSignal.any([ctx.signal, timeoutController.signal])
+          : timeoutController.signal;
+      }
+
+      let result: WorkflowStepResult;
+      let parallelBranchResults: Record<string, WorkflowStepResult> | null = null;
+      try {
+        if (execution.kind === 'parallel') {
+          const parallel = execution.value;
+          const wait = parallel.wait ?? 'all';
+          const branchAbortController = new AbortController();
+          const branchSignal = stepSignal
+            ? AbortSignal.any([stepSignal, branchAbortController.signal])
+            : branchAbortController.signal;
+          const shouldForceKill = Boolean(step.timeout_ms || parallel.timeout_ms);
+          const runBranch = async (branch: ParallelBranch): Promise<{ branchId: string; result: WorkflowStepResult }> => {
+            const mergedBranchEnv = { ...(step.env ?? {}), ...(branch.env ?? {}) };
+            const branchEnv = mergeEnv(ctx.env, workflow.env, mergedBranchEnv, resolvedArgs, results);
+            const branchCwd = resolveCwd(branch.cwd ?? step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
+            const branchShell = typeof branch.run === 'string' ? branch.run : branch.command;
+            const branchExec = typeof branch.pipeline === 'string' && branch.pipeline.trim()
+              ? { kind: 'pipeline' as const, value: branch.pipeline }
+              : (typeof branchShell === 'string' && branchShell.trim()
+                ? { kind: 'shell' as const, value: branchShell }
+                : { kind: 'none' as const });
+
+            if (branchExec.kind === 'shell') {
+              const command = resolveTemplate(branchExec.value, resolvedArgs, results);
+              const stdinValue = resolveShellStdin(branch.stdin, resolvedArgs, results);
+              const { stdout } = await runShellCommand({
+                command,
+                stdin: stdinValue,
+                env: branchEnv,
+                cwd: branchCwd,
+                signal: branchSignal,
+                ...(shouldForceKill ? { killSignal: 'SIGKILL' as NodeJS.Signals } : {}),
+              });
+              return { branchId: branch.id, result: { id: branch.id, stdout, json: parseJson(stdout) } };
+            }
+
+            if (branchExec.kind === 'pipeline') {
+              if (!ctx.registry) {
+                throw new Error(`Parallel branch ${branch.id} requires a command registry for pipeline execution`);
+              }
+              const pipelineText = resolveTemplate(branchExec.value, resolvedArgs, results);
+              const inputValue = resolveInputValue(branch.stdin, resolvedArgs, results);
+              const branchResult = await runPipelineStep({
+                stepId: branch.id,
+                pipelineText,
+                inputValue,
+                ctx: { ...ctx, signal: branchSignal },
+                env: branchEnv,
+                cwd: branchCwd,
+              });
+              return { branchId: branch.id, result: branchResult };
+            }
+
+            return { branchId: branch.id, result: { id: branch.id } };
+          };
+
+          let parallelTimeoutId: ReturnType<typeof setTimeout> | undefined;
+          const timeoutPromise = parallel.timeout_ms
+            ? new Promise<never>((_resolve, reject) => {
+              parallelTimeoutId = setTimeout(() => {
+                branchAbortController.abort();
+                reject(new Error(`Parallel step ${step.id} timed out after ${parallel.timeout_ms}ms`));
+              }, parallel.timeout_ms);
+            })
+            : null;
+
+          try {
+            if (wait === 'any') {
+              const branchPromises = parallel.branches.map((branch) => runBranch(branch));
+              const winner = await (timeoutPromise
+                ? Promise.race([...branchPromises, timeoutPromise])
+                : Promise.race(branchPromises)) as { branchId: string; result: WorkflowStepResult };
+              parallelBranchResults = { [winner.branchId]: winner.result };
+              branchAbortController.abort();
+            } else {
+              const branchPromises = parallel.branches.map((branch) => runBranch(branch));
+              const settled = await (timeoutPromise
+                ? Promise.race([Promise.allSettled(branchPromises), timeoutPromise])
+                : Promise.allSettled(branchPromises)) as PromiseSettledResult<{ branchId: string; result: WorkflowStepResult }>[];
+
+              parallelBranchResults = {};
+              for (const entry of settled) {
+                if (entry.status === 'rejected') {
+                  throw new Error(`Parallel branch failed: ${entry.reason?.message ?? String(entry.reason)}`);
+                }
+                parallelBranchResults[entry.value.branchId] = entry.value.result;
+              }
+            }
+          } finally {
+            if (parallelTimeoutId !== undefined) clearTimeout(parallelTimeoutId);
+          }
+
+          const merged: Record<string, unknown> = {};
+          for (const [branchId, branchResult] of Object.entries(parallelBranchResults ?? {})) {
+            merged[branchId] = branchResult.json;
+          }
+          result = {
+            id: step.id,
+            json: merged,
+            stdout: wait === 'any'
+              ? (Object.values(parallelBranchResults ?? {})[0]?.stdout ?? '')
+              : JSON.stringify(merged),
+          };
+        } else if (execution.kind === 'workflow') {
+          const workflowPath = resolveTemplate(execution.value, resolvedArgs, results);
+          const resolvedWorkflowPath = path.isAbsolute(workflowPath)
+            ? workflowPath
+            : path.resolve(path.dirname(resolvedFilePath), workflowPath);
+          const activeWorkflows = ctx._activeWorkflows ?? new Set<string>();
+          let canonicalWorkflowPath: string;
+          try {
+            canonicalWorkflowPath = await fsp.realpath(resolvedWorkflowPath);
+          } catch {
+            throw new Error(`Workflow step ${step.id} workflow file not found: ${resolvedWorkflowPath}`);
+          }
+          if (activeWorkflows.has(canonicalWorkflowPath)) {
+            throw new Error(`Workflow step ${step.id} creates a cycle: ${canonicalWorkflowPath} is already being executed`);
+          }
+          const childActive = new Set(activeWorkflows);
+          childActive.add(canonicalWorkflowPath);
+          const subArgs = resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results);
+          const subResult = await runWorkflowFile({
+            filePath: resolvedWorkflowPath,
+            args: subArgs,
+            ctx: { ...ctx, env, cwd, _activeWorkflows: childActive },
+          });
+          if (subResult.status === 'needs_approval' || subResult.status === 'needs_input') {
+            const resumeToken = subResult.requiresApproval?.resumeToken ?? subResult.requiresInput?.resumeToken;
+            if (resumeToken) {
+              try {
+                const decoded = decodeToken(resumeToken) as { stateKey?: string } | null;
+                if (decoded?.stateKey) {
+                  await deleteStateJson({ env: ctx.env, key: decoded.stateKey }).catch(() => {});
+                }
+              } catch {
+                // best-effort cleanup
+              }
+            }
+            throw new Error(
+              `Workflow step ${step.id} sub-workflow halted for ${
+                subResult.status === 'needs_approval' ? 'approval' : 'input'
+              }. Sub-workflow approval/input gates are not supported in composition.`,
+            );
+          }
+          const json = subResult.output.length === 1 ? subResult.output[0] : subResult.output;
+          const stdout = subResult.output.length ? serializeValueForStdout(json) : '';
+          result = { id: step.id, stdout, json };
+        } else if (execution.kind === 'shell') {
+          const command = resolveTemplate(execution.value, resolvedArgs, results);
+          const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
+          const { stdout } = await runShellCommand({
+            command,
+            stdin: stdinValue,
+            env,
+            cwd,
+            signal: stepSignal,
+            ...(step.timeout_ms ? { killSignal: 'SIGKILL' as NodeJS.Signals } : {}),
+          });
+          result = { id: step.id, stdout, json: parseJson(stdout) };
+        } else if (execution.kind === 'pipeline') {
+          if (!ctx.registry) {
+            throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+          }
+          const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
+          const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+          result = await runPipelineStep({
+            stepId: step.id,
+            pipelineText,
+            inputValue,
+            ctx: { ...ctx, signal: stepSignal },
+            env,
+            cwd,
+          });
+        } else {
+          const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+          result = createSyntheticStepResult(step.id, inputValue);
+        }
+
+        return { result, parallelBranchResults };
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+      }
+    };
 
     let result: WorkflowStepResult;
     let parallelBranchResults: Record<string, WorkflowStepResult> | null = null;
     try {
-      if (execution.kind === 'parallel') {
-        const parallel = execution.value;
-        const wait = parallel.wait ?? 'all';
-        const branchAbortController = new AbortController();
-        const branchSignal = stepSignal
-          ? AbortSignal.any([stepSignal, branchAbortController.signal])
-          : branchAbortController.signal;
-        const shouldForceKill = Boolean(step.timeout_ms || parallel.timeout_ms);
-        const runBranch = async (branch: ParallelBranch): Promise<{ branchId: string; result: WorkflowStepResult }> => {
-          const mergedBranchEnv = { ...(step.env ?? {}), ...(branch.env ?? {}) };
-          const branchEnv = mergeEnv(ctx.env, workflow.env, mergedBranchEnv, resolvedArgs, results);
-          const branchCwd = resolveCwd(branch.cwd ?? step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
-          const branchShell = typeof branch.run === 'string' ? branch.run : branch.command;
-          const branchExec = typeof branch.pipeline === 'string' && branch.pipeline.trim()
-            ? { kind: 'pipeline' as const, value: branch.pipeline }
-            : (typeof branchShell === 'string' && branchShell.trim()
-              ? { kind: 'shell' as const, value: branchShell }
-              : { kind: 'none' as const });
-
-          if (branchExec.kind === 'shell') {
-            const command = resolveTemplate(branchExec.value, resolvedArgs, results);
-            const stdinValue = resolveShellStdin(branch.stdin, resolvedArgs, results);
-            const { stdout } = await runShellCommand({
-              command,
-              stdin: stdinValue,
-              env: branchEnv,
-              cwd: branchCwd,
-              signal: branchSignal,
-              ...(shouldForceKill ? { killSignal: 'SIGKILL' as NodeJS.Signals } : {}),
-            });
-            return { branchId: branch.id, result: { id: branch.id, stdout, json: parseJson(stdout) } };
-          }
-
-          if (branchExec.kind === 'pipeline') {
-            if (!ctx.registry) {
-              throw new Error(`Parallel branch ${branch.id} requires a command registry for pipeline execution`);
-            }
-            const pipelineText = resolveTemplate(branchExec.value, resolvedArgs, results);
-            const inputValue = resolveInputValue(branch.stdin, resolvedArgs, results);
-            const branchResult = await runPipelineStep({
-              stepId: branch.id,
-              pipelineText,
-              inputValue,
-              ctx: { ...ctx, signal: branchSignal },
-              env: branchEnv,
-              cwd: branchCwd,
-            });
-            return { branchId: branch.id, result: branchResult };
-          }
-
-          return { branchId: branch.id, result: { id: branch.id } };
-        };
-
-        let parallelTimeoutId: ReturnType<typeof setTimeout> | undefined;
-        const timeoutPromise = parallel.timeout_ms
-          ? new Promise<never>((_resolve, reject) => {
-            parallelTimeoutId = setTimeout(() => {
-              branchAbortController.abort();
-              reject(new Error(`Parallel step ${step.id} timed out after ${parallel.timeout_ms}ms`));
-            }, parallel.timeout_ms);
-          })
-          : null;
-
-        try {
-          if (wait === 'any') {
-            const branchPromises = parallel.branches.map((branch) => runBranch(branch));
-            const winner = await (timeoutPromise
-              ? Promise.race([...branchPromises, timeoutPromise])
-              : Promise.race(branchPromises)) as { branchId: string; result: WorkflowStepResult };
-            parallelBranchResults = { [winner.branchId]: winner.result };
-            branchAbortController.abort();
-          } else {
-            const branchPromises = parallel.branches.map((branch) => runBranch(branch));
-            const settled = await (timeoutPromise
-              ? Promise.race([Promise.allSettled(branchPromises), timeoutPromise])
-              : Promise.allSettled(branchPromises)) as PromiseSettledResult<{ branchId: string; result: WorkflowStepResult }>[];
-
-            parallelBranchResults = {};
-            for (const entry of settled) {
-              if (entry.status === 'rejected') {
-                throw new Error(`Parallel branch failed: ${entry.reason?.message ?? String(entry.reason)}`);
-              }
-              parallelBranchResults[entry.value.branchId] = entry.value.result;
-            }
-          }
-        } finally {
-          if (parallelTimeoutId !== undefined) clearTimeout(parallelTimeoutId);
-        }
-
-        const merged: Record<string, unknown> = {};
-        for (const [branchId, branchResult] of Object.entries(parallelBranchResults ?? {})) {
-          merged[branchId] = branchResult.json;
-        }
-        result = {
-          id: step.id,
-          json: merged,
-          stdout: wait === 'any'
-            ? (Object.values(parallelBranchResults ?? {})[0]?.stdout ?? '')
-            : JSON.stringify(merged),
-        };
-      } else if (execution.kind === 'workflow') {
-        const workflowPath = resolveTemplate(execution.value, resolvedArgs, results);
-        const resolvedWorkflowPath = path.isAbsolute(workflowPath)
-          ? workflowPath
-          : path.resolve(path.dirname(resolvedFilePath), workflowPath);
-        const activeWorkflows = ctx._activeWorkflows ?? new Set<string>();
-        let canonicalWorkflowPath: string;
-        try {
-          canonicalWorkflowPath = await fsp.realpath(resolvedWorkflowPath);
-        } catch {
-          throw new Error(`Workflow step ${step.id} workflow file not found: ${resolvedWorkflowPath}`);
-        }
-        if (activeWorkflows.has(canonicalWorkflowPath)) {
-          throw new Error(`Workflow step ${step.id} creates a cycle: ${canonicalWorkflowPath} is already being executed`);
-        }
-        const childActive = new Set(activeWorkflows);
-        childActive.add(canonicalWorkflowPath);
-        const subArgs = resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results);
-        const subResult = await runWorkflowFile({
-          filePath: resolvedWorkflowPath,
-          args: subArgs,
-          ctx: { ...ctx, env, cwd, _activeWorkflows: childActive },
-        });
-        if (subResult.status === 'needs_approval' || subResult.status === 'needs_input') {
-          const resumeToken = subResult.requiresApproval?.resumeToken ?? subResult.requiresInput?.resumeToken;
-          if (resumeToken) {
-            try {
-              const decoded = decodeToken(resumeToken) as { stateKey?: string } | null;
-              if (decoded?.stateKey) {
-                await deleteStateJson({ env: ctx.env, key: decoded.stateKey }).catch(() => {});
-              }
-            } catch {
-              // best-effort cleanup
-            }
-          }
-          throw new Error(
-            `Workflow step ${step.id} sub-workflow halted for ${
-              subResult.status === 'needs_approval' ? 'approval' : 'input'
-            }. Sub-workflow approval/input gates are not supported in composition.`,
-          );
-        }
-        const json = subResult.output.length === 1 ? subResult.output[0] : subResult.output;
-        const stdout = subResult.output.length ? serializeValueForStdout(json) : '';
-        result = { id: step.id, stdout, json };
-      } else if (execution.kind === 'shell') {
-        const command = resolveTemplate(execution.value, resolvedArgs, results);
-        const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
-        const { stdout } = await runShellCommand({
-          command,
-          stdin: stdinValue,
-          env,
-          cwd,
-          signal: stepSignal,
-          ...(step.timeout_ms ? { killSignal: 'SIGKILL' as NodeJS.Signals } : {}),
-        });
-        result = { id: step.id, stdout, json: parseJson(stdout) };
-      } else if (execution.kind === 'pipeline') {
-        if (!ctx.registry) {
-          throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
-        }
-        const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
-        const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-        result = await runPipelineStep({
-          stepId: step.id,
-          pipelineText,
-          inputValue,
-          ctx: { ...ctx, signal: stepSignal },
-          env,
-          cwd,
-        });
-      } else {
-        const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-        result = createSyntheticStepResult(step.id, inputValue);
-      }
+      const attemptResult = retryConfig.max > 1
+        ? await withRetry(executeStepAttempt, retryConfig, {
+          signal: ctx.signal,
+          shouldRetry: (error) => {
+            const message = error?.message ?? String(error);
+            return !/halted (for approval inside|before completion at) pipeline/.test(message);
+          },
+          onRetry: (attempt, error, delayMs) => {
+            ctx.stderr.write(
+              `[RETRY] Step '${step.id}' failed (attempt ${attempt}/${retryConfig.max}): ${error?.message ?? String(error)}. Retrying in ${delayMs}ms...\n`,
+            );
+          },
+        })
+        : await executeStepAttempt();
+      result = attemptResult.result;
+      parallelBranchResults = attemptResult.parallelBranchResults;
     } catch (err: any) {
-      if (timeoutId !== undefined) clearTimeout(timeoutId);
       if (ctx.signal?.aborted && (err?.name === 'AbortError' || err?.code === 'ABORT_ERR')) {
         throw err;
       }
@@ -1037,8 +1097,6 @@ export async function runWorkflowFile({
         break;
       }
       continue;
-    } finally {
-      if (timeoutId !== undefined) clearTimeout(timeoutId);
     }
 
     if (parallelBranchResults) {
@@ -1373,6 +1431,12 @@ function dryRunWorkflow({
     if (stdinNote) lines.push(`     stdin: ${stdinNote}`);
     if (step.timeout_ms) lines.push(`     timeout: ${step.timeout_ms}ms`);
     if (step.on_error && step.on_error !== 'stop') lines.push(`     on_error: ${step.on_error}`);
+    if (step.retry && typeof step.retry === 'object') {
+      const rc = resolveRetryConfig(step.retry as RetryConfig);
+      if (rc.max > 1) {
+        lines.push(`     retry: up to ${rc.max} attempts, ${rc.backoff} backoff (base: ${rc.delay_ms}ms${rc.jitter ? ', jitter' : ''})`);
+      }
+    }
     if (isApprovalStep(step.approval)) {
       lines.push(`     [approval required]`);
     }
