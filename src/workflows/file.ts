@@ -8,7 +8,7 @@ import { PassThrough } from 'node:stream';
 
 import { parsePipeline } from '../parser.js';
 import { runPipeline } from '../runtime.js';
-import { encodeToken } from '../token.js';
+import { encodeToken, decodeToken } from '../token.js';
 import { createApprovalIndex, deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
 import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
@@ -28,6 +28,8 @@ export type WorkflowStep = {
   command?: string;
   run?: string;
   pipeline?: string;
+  workflow?: string;
+  workflow_args?: Record<string, unknown>;
   env?: Record<string, string>;
   cwd?: string;
   stdin?: unknown;
@@ -35,6 +37,8 @@ export type WorkflowStep = {
   input?: WorkflowInputRequest;
   condition?: unknown;
   when?: unknown;
+  timeout_ms?: number;
+  on_error?: 'stop' | 'continue' | 'skip_rest';
 };
 
 export type WorkflowApproval =
@@ -61,6 +65,8 @@ export type WorkflowStepResult = {
   subject?: unknown;
   response?: unknown;
   skipped?: boolean;
+  error?: boolean;
+  errorMessage?: string;
 };
 
 export type WorkflowRunResult = {
@@ -97,6 +103,7 @@ type RunContext = {
   };
   llmAdapters?: Record<string, any>;
   dryRun?: boolean;
+  _activeWorkflows?: Set<string>;
 };
 
 export type WorkflowResumePayload = {
@@ -155,17 +162,29 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     if (!step.id || typeof step.id !== 'string') {
       throw new Error('Workflow step requires an id');
     }
+    if (step.workflow !== undefined && typeof step.workflow !== 'string') {
+      throw new Error(`Workflow step ${step.id} workflow must be a string (file path)`);
+    }
+    if (typeof step.workflow === 'string' && !step.workflow.trim()) {
+      throw new Error(`Workflow step ${step.id} workflow path cannot be blank`);
+    }
+    if (step.workflow_args !== undefined) {
+      if (!step.workflow_args || typeof step.workflow_args !== 'object' || Array.isArray(step.workflow_args)) {
+        throw new Error(`Workflow step ${step.id} workflow_args must be a plain object`);
+      }
+    }
     const shellCommand = typeof step.run === 'string' ? step.run : step.command;
     const pipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
-    const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline));
+    const workflowRef = typeof step.workflow === 'string' && step.workflow.trim() ? step.workflow : undefined;
+    const executionCount = Number(Boolean(shellCommand)) + Number(Boolean(pipeline)) + Number(Boolean(workflowRef));
     if (executionCount === 0 && !isApprovalStep(step.approval) && !isInputStep(step.input)) {
-      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, approval, or input`);
+      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, workflow, approval, or input`);
     }
     if (executionCount > 1) {
-      throw new Error(`Workflow step ${step.id} can only define one of run, command, or pipeline`);
+      throw new Error(`Workflow step ${step.id} can only define one of run, command, pipeline, or workflow`);
     }
     if (executionCount > 0 && isInputStep(step.input)) {
-      throw new Error(`Workflow step ${step.id} input steps cannot define run, command, or pipeline`);
+      throw new Error(`Workflow step ${step.id} input steps cannot define run, command, pipeline, or workflow`);
     }
     if (isApprovalStep(step.approval) && isInputStep(step.input)) {
       throw new Error(`Workflow step ${step.id} cannot define both approval and input`);
@@ -194,6 +213,26 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
       } catch (err: any) {
         throw new Error(`Workflow step ${step.id} input.responseSchema is invalid: ${err?.message ?? String(err)}`);
       }
+    }
+    if (
+      step.timeout_ms !== undefined
+      && (
+        typeof step.timeout_ms !== 'number'
+        || !Number.isFinite(step.timeout_ms)
+        || !Number.isInteger(step.timeout_ms)
+        || step.timeout_ms < 1
+        || step.timeout_ms > 2_147_483_647
+      )
+    ) {
+      throw new Error(`Workflow step ${step.id} timeout_ms must be a positive integer between 1 and 2147483647`);
+    }
+    if (
+      step.on_error !== undefined
+      && step.on_error !== 'stop'
+      && step.on_error !== 'continue'
+      && step.on_error !== 'skip_rest'
+    ) {
+      throw new Error(`Workflow step ${step.id} on_error must be "stop", "continue", or "skip_rest"`);
     }
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
@@ -277,56 +316,62 @@ export async function runWorkflowFile({
   if (!resolvedFilePath) {
     throw new Error('Workflow file path required');
   }
-  const workflow = await loadWorkflowFile(resolvedFilePath);
-  const resolvedArgs = resolveWorkflowArgs(workflow.args, args ?? resumeState?.args);
-  const steps = workflow.steps;
-  const stepIndexById = new Map(steps.map((step, idx) => [step.id, idx]));
-  const results: Record<string, WorkflowStepResult> = resumeState?.steps
-    ? cloneResults(resumeState.steps)
-    : {};
-  const startIndex = resumeState?.resumeAtIndex ?? 0;
-
-  if (resumeState?.approvalStepId && typeof approved === 'boolean') {
-    const previous = results[resumeState.approvalStepId] ?? { id: resumeState.approvalStepId };
-    previous.approved = approved;
-    results[resumeState.approvalStepId] = previous;
+  if (!ctx._activeWorkflows) {
+    ctx._activeWorkflows = new Set<string>();
   }
+  const canonicalFilePath = await fsp.realpath(resolvedFilePath);
+  ctx._activeWorkflows.add(canonicalFilePath);
+  try {
+    const workflow = await loadWorkflowFile(resolvedFilePath);
+    const resolvedArgs = resolveWorkflowArgs(workflow.args, args ?? resumeState?.args);
+    const steps = workflow.steps;
+    const stepIndexById = new Map(steps.map((step, idx) => [step.id, idx]));
+    const results: Record<string, WorkflowStepResult> = resumeState?.steps
+      ? cloneResults(resumeState.steps)
+      : {};
+    const startIndex = resumeState?.resumeAtIndex ?? 0;
 
-  if (resumeState?.inputStepId) {
-    if (approved !== undefined) {
-      throw new WorkflowResumeArgumentError('Workflow resume requires --response-json for input requests');
+    if (resumeState?.approvalStepId && typeof approved === 'boolean') {
+      const previous = results[resumeState.approvalStepId] ?? { id: resumeState.approvalStepId };
+      previous.approved = approved;
+      results[resumeState.approvalStepId] = previous;
     }
-    if (response === undefined) {
-      throw new WorkflowResumeArgumentError('Workflow resume requires --response-json for input requests');
-    }
-    const inputStep = steps[stepIndexById.get(resumeState.inputStepId) ?? -1];
-    if (!inputStep || !isInputStep(inputStep.input)) {
-      throw new Error(`Invalid input step in resume state: ${resumeState.inputStepId}`);
-    }
-    try {
-      validateInputResponse({
-        schema: resumeState.inputSchema ?? inputStep.input.responseSchema,
-        response,
-        stepId: inputStep.id,
-      });
-    } catch (err: any) {
-      throw new WorkflowResumeArgumentError(err?.message ?? String(err));
-    }
-    const previous = results[resumeState.inputStepId] ?? { id: resumeState.inputStepId };
-    previous.subject = resumeState.inputSubject ?? null;
-    previous.response = response;
-    delete previous.skipped;
-    results[resumeState.inputStepId] = previous;
-  }
 
-  if (ctx.dryRun) {
-    return dryRunWorkflow({ steps, resolvedArgs, results, startIndex, ctx });
-  }
+    if (resumeState?.inputStepId) {
+      if (approved !== undefined) {
+        throw new WorkflowResumeArgumentError('Workflow resume requires --response-json for input requests');
+      }
+      if (response === undefined) {
+        throw new WorkflowResumeArgumentError('Workflow resume requires --response-json for input requests');
+      }
+      const inputStep = steps[stepIndexById.get(resumeState.inputStepId) ?? -1];
+      if (!inputStep || !isInputStep(inputStep.input)) {
+        throw new Error(`Invalid input step in resume state: ${resumeState.inputStepId}`);
+      }
+      try {
+        validateInputResponse({
+          schema: resumeState.inputSchema ?? inputStep.input.responseSchema,
+          response,
+          stepId: inputStep.id,
+        });
+      } catch (err: any) {
+        throw new WorkflowResumeArgumentError(err?.message ?? String(err));
+      }
+      const previous = results[resumeState.inputStepId] ?? { id: resumeState.inputStepId };
+      previous.subject = resumeState.inputSubject ?? null;
+      previous.response = response;
+      delete previous.skipped;
+      results[resumeState.inputStepId] = previous;
+    }
 
-  let lastStepId: string | null = resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
+    if (ctx.dryRun) {
+      return dryRunWorkflow({ steps, resolvedArgs, results, startIndex, ctx });
+    }
 
-  for (let idx = startIndex; idx < steps.length; idx++) {
-    const step = steps[idx];
+    let lastStepId: string | null = resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
+
+    for (let idx = startIndex; idx < steps.length; idx++) {
+      const step = steps[idx];
 
     if (!evaluateCondition(step.when ?? step.condition, results)) {
       results[step.id] = { id: step.id, skipped: true };
@@ -408,29 +453,128 @@ export async function runWorkflowFile({
     const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
     const execution = getStepExecution(step);
 
+    // Combine external cancellation and optional per-step timeout into one signal.
+    let stepSignal: AbortSignal | undefined = ctx.signal;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    if (step.timeout_ms) {
+      const timeoutController = new AbortController();
+      timeoutId = setTimeout(
+        () => timeoutController.abort(new Error(`Step '${step.id}' timed out after ${step.timeout_ms}ms`)),
+        step.timeout_ms,
+      );
+      stepSignal = ctx.signal
+        ? AbortSignal.any([ctx.signal, timeoutController.signal])
+        : timeoutController.signal;
+    }
+
     let result: WorkflowStepResult;
-    if (execution.kind === 'shell') {
-      const command = resolveTemplate(execution.value, resolvedArgs, results);
-      const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
-      const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd, signal: ctx.signal });
-      result = { id: step.id, stdout, json: parseJson(stdout) };
-    } else if (execution.kind === 'pipeline') {
-      if (!ctx.registry) {
-        throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+    try {
+      if (execution.kind === 'workflow') {
+        const workflowPath = resolveTemplate(execution.value, resolvedArgs, results);
+        const resolvedWorkflowPath = path.isAbsolute(workflowPath)
+          ? workflowPath
+          : path.resolve(path.dirname(resolvedFilePath), workflowPath);
+        const activeWorkflows = ctx._activeWorkflows ?? new Set<string>();
+        let canonicalWorkflowPath: string;
+        try {
+          canonicalWorkflowPath = await fsp.realpath(resolvedWorkflowPath);
+        } catch {
+          throw new Error(`Workflow step ${step.id} workflow file not found: ${resolvedWorkflowPath}`);
+        }
+        if (activeWorkflows.has(canonicalWorkflowPath)) {
+          throw new Error(`Workflow step ${step.id} creates a cycle: ${canonicalWorkflowPath} is already being executed`);
+        }
+        const childActive = new Set(activeWorkflows);
+        childActive.add(canonicalWorkflowPath);
+        const subArgs = resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results);
+        const subResult = await runWorkflowFile({
+          filePath: resolvedWorkflowPath,
+          args: subArgs,
+          ctx: { ...ctx, env, cwd, _activeWorkflows: childActive },
+        });
+        if (subResult.status === 'needs_approval' || subResult.status === 'needs_input') {
+          const resumeToken = subResult.requiresApproval?.resumeToken ?? subResult.requiresInput?.resumeToken;
+          if (resumeToken) {
+            try {
+              const decoded = decodeToken(resumeToken) as { stateKey?: string } | null;
+              if (decoded?.stateKey) {
+                await deleteStateJson({ env: ctx.env, key: decoded.stateKey }).catch(() => {});
+              }
+            } catch {
+              // best-effort cleanup
+            }
+          }
+          throw new Error(
+            `Workflow step ${step.id} sub-workflow halted for ${
+              subResult.status === 'needs_approval' ? 'approval' : 'input'
+            }. Sub-workflow approval/input gates are not supported in composition.`,
+          );
+        }
+        const json = subResult.output.length === 1 ? subResult.output[0] : subResult.output;
+        const stdout = subResult.output.length ? serializeValueForStdout(json) : '';
+        result = { id: step.id, stdout, json };
+      } else if (execution.kind === 'shell') {
+        const command = resolveTemplate(execution.value, resolvedArgs, results);
+        const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
+        const { stdout } = await runShellCommand({
+          command,
+          stdin: stdinValue,
+          env,
+          cwd,
+          signal: stepSignal,
+          ...(step.timeout_ms ? { killSignal: 'SIGKILL' as NodeJS.Signals } : {}),
+        });
+        result = { id: step.id, stdout, json: parseJson(stdout) };
+      } else if (execution.kind === 'pipeline') {
+        if (!ctx.registry) {
+          throw new Error(`Workflow step ${step.id} requires a command registry for pipeline execution`);
+        }
+        const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
+        const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+        result = await runPipelineStep({
+          stepId: step.id,
+          pipelineText,
+          inputValue,
+          ctx: { ...ctx, signal: stepSignal },
+          env,
+          cwd,
+        });
+      } else {
+        const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
+        result = createSyntheticStepResult(step.id, inputValue);
       }
-      const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
-      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-      result = await runPipelineStep({
-        stepId: step.id,
-        pipelineText,
-        inputValue,
-        ctx,
-        env,
-        cwd,
-      });
-    } else {
-      const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
-      result = createSyntheticStepResult(step.id, inputValue);
+    } catch (err: any) {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      if (ctx.signal?.aborted && (err?.name === 'AbortError' || err?.code === 'ABORT_ERR')) {
+        throw err;
+      }
+      if (err?.message && /halted (for approval inside|before completion at) pipeline/.test(err.message)) {
+        throw err;
+      }
+
+      const isAbortErr = err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
+      const isTimeout = Boolean(step.timeout_ms) && isAbortErr;
+      const errorMessage = isTimeout
+        ? `Step '${step.id}' timed out after ${step.timeout_ms}ms`
+        : (err?.message ?? String(err));
+      const policy = step.on_error ?? 'stop';
+
+      if (policy === 'stop') {
+        throw isTimeout ? new Error(errorMessage) : err;
+      }
+
+      results[step.id] = {
+        id: step.id,
+        error: true,
+        errorMessage,
+      };
+
+      if (policy === 'skip_rest') {
+        break;
+      }
+      continue;
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
     }
 
     results[step.id] = result;
@@ -490,11 +634,14 @@ export async function runWorkflowFile({
     }
   }
 
-  const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
-  if (consumedResumeStateKey) {
-    await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+    const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
+    if (consumedResumeStateKey) {
+      await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+    }
+    return { status: 'ok', output };
+  } finally {
+    ctx._activeWorkflows?.delete(canonicalFilePath);
   }
-  return { status: 'ok', output };
 }
 
 // Returns a human-readable note if a step.stdin value references a prior step's
@@ -597,7 +744,18 @@ function dryRunWorkflow({
     // rather than silently collapsing the reference to an empty string.
     const stdinNote = dryRunStdinNote(step.stdin);
 
-    if (execution.kind === 'shell') {
+    if (execution.kind === 'workflow') {
+      const workflowPath = resolveDryRunTemplate(execution.value, resolvedArgs, results);
+      const pathNote = dryRunTemplateNote(workflowPath);
+      lines.push(`  ${num}. ${step.id}  [workflow]`);
+      lines.push(`     workflow: ${workflowPath}${pathNote ? `  ${pathNote}` : ''}`);
+      if (step.workflow_args && typeof step.workflow_args === 'object') {
+        const argKeys = Object.keys(step.workflow_args);
+        if (argKeys.length) {
+          lines.push(`     args: ${argKeys.join(', ')}`);
+        }
+      }
+    } else if (execution.kind === 'shell') {
       const command = resolveDryRunTemplate(execution.value, resolvedArgs, results);
       const commandNote = dryRunTemplateNote(command);
       lines.push(`  ${num}. ${step.id}  [shell]`);
@@ -629,6 +787,8 @@ function dryRunWorkflow({
     }
 
     if (stdinNote) lines.push(`     stdin: ${stdinNote}`);
+    if (step.timeout_ms) lines.push(`     timeout: ${step.timeout_ms}ms`);
+    if (step.on_error && step.on_error !== 'stop') lines.push(`     on_error: ${step.on_error}`);
     if (isApprovalStep(step.approval)) {
       lines.push(`     [approval required]`);
     }
@@ -759,6 +919,23 @@ function resolveTemplate(
 ) {
   const withArgs = resolveArgsTemplate(input, args);
   return resolveStepRefs(withArgs, results);
+}
+
+function resolveWorkflowStepArgs(
+  workflowArgs: Record<string, unknown> | undefined,
+  parentArgs: Record<string, unknown>,
+  results: Record<string, WorkflowStepResult>,
+): Record<string, unknown> {
+  if (!workflowArgs) return {};
+  const resolved: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(workflowArgs)) {
+    if (typeof value === 'string') {
+      resolved[key] = resolveTemplate(value, parentArgs, results);
+    } else {
+      resolved[key] = value;
+    }
+  }
+  return resolved;
 }
 
 function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
@@ -1326,12 +1503,14 @@ async function runShellCommand({
   env,
   cwd,
   signal,
+  killSignal,
 }: {
   command: string;
   stdin: string | null;
   env: Record<string, string | undefined>;
   cwd?: string;
   signal?: AbortSignal;
+  killSignal?: NodeJS.Signals;
 }) {
   const { spawn } = await import('node:child_process');
 
@@ -1341,6 +1520,7 @@ async function runShellCommand({
       env,
       cwd,
       signal,
+      killSignal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -1368,6 +1548,10 @@ async function runShellCommand({
 }
 
 function getStepExecution(step: WorkflowStep) {
+  if (typeof step.workflow === 'string' && step.workflow.trim()) {
+    return { kind: 'workflow' as const, value: step.workflow };
+  }
+
   if (typeof step.pipeline === 'string' && step.pipeline.trim()) {
     return { kind: 'pipeline' as const, value: step.pipeline };
   }
