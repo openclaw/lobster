@@ -143,6 +143,60 @@ test('workflow resume cancellation cleans up resume state', async () => {
   assert.deepEqual(resumeStateFiles, []);
 });
 
+test('workflow resume accepts workflow-resume_ state key aliases and cleans up state', async () => {
+  const workflow = {
+    steps: [
+      {
+        id: 'approve_step',
+        command: "node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?', items:[{id:1}]}}))\"",
+        approval: 'required',
+      },
+      {
+        id: 'finish',
+        command: "node -e \"process.stdout.write(JSON.stringify({done:true}))\"",
+        condition: '$approve_step.approved',
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-workflow-alias-'));
+  const stateDir = path.join(tmpDir, 'state');
+  const filePath = path.join(tmpDir, 'workflow.lobster');
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), 'utf8');
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+  });
+  assert.equal(first.status, 'needs_approval');
+
+  const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? '');
+  assert.equal(payload.kind, 'workflow-file');
+  assert.ok(payload.stateKey?.startsWith('workflow_resume_'));
+
+  const aliasedPayload = {
+    ...payload,
+    stateKey: (payload.stateKey ?? '').replace('workflow_resume_', 'workflow-resume_'),
+  };
+  assert.ok(aliasedPayload.stateKey.startsWith('workflow-resume_'));
+
+  const resumed = await runWorkflowFile({
+    filePath,
+    ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env, mode: 'tool' },
+    resume: aliasedPayload,
+    approved: true,
+  });
+  assert.equal(resumed.status, 'ok');
+  assert.deepEqual(resumed.output, [{ done: true }]);
+
+  const files = await fsp.readdir(stateDir);
+  const resumeStateFiles = files.filter(
+    (name) => name.startsWith('workflow_resume_') || name.startsWith('workflow-resume_'),
+  );
+  assert.deepEqual(resumeStateFiles, []);
+});
+
 test('workflow file input steps pause and resume with structured responses', async () => {
   const workflow = {
     steps: [

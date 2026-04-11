@@ -566,10 +566,10 @@ export async function runWorkflowFile({
   cancel?: boolean;
 }): Promise<WorkflowRunResult> {
   const consumedResumeStateKey = resume?.stateKey && typeof resume.stateKey === 'string'
-    ? resume.stateKey
+    ? await resolveWorkflowResumeStateKey(ctx.env, resume.stateKey)
     : null;
   const resumeState = resume?.stateKey
-    ? await loadWorkflowResumeState(ctx.env, resume.stateKey)
+    ? await loadWorkflowResumeState(ctx.env, consumedResumeStateKey ?? resume.stateKey)
     : resume ?? null;
   if (resumeState?.approvalStepId && resumeState?.inputStepId) {
     throw new Error('Invalid workflow resume state');
@@ -1476,14 +1476,39 @@ async function saveWorkflowResumeState(env: Record<string, string | undefined>, 
   return stateKey;
 }
 
+function alternateWorkflowResumeStateKey(stateKey: string): string | null {
+  if (stateKey.includes('workflow-resume_')) {
+    return stateKey.replace('workflow-resume_', 'workflow_resume_');
+  }
+  if (stateKey.includes('workflow_resume_')) {
+    return stateKey.replace('workflow_resume_', 'workflow-resume_');
+  }
+  return null;
+}
+
+async function resolveWorkflowResumeStateKey(
+  env: Record<string, string | undefined>,
+  stateKey: string,
+): Promise<string> {
+  const stored = await readStateJson({ env, key: stateKey });
+  if (stored && typeof stored === 'object') {
+    return stateKey;
+  }
+  const altKey = alternateWorkflowResumeStateKey(stateKey);
+  if (!altKey) {
+    return stateKey;
+  }
+  const altStored = await readStateJson({ env, key: altKey });
+  if (altStored && typeof altStored === 'object') {
+    return altKey;
+  }
+  return stateKey;
+}
+
 async function loadWorkflowResumeState(env: Record<string, string | undefined>, stateKey: string) {
   let stored = await readStateJson({ env, key: stateKey });
   if ((!stored || typeof stored !== 'object') && typeof stateKey === 'string') {
-    const altKey = stateKey.includes('workflow-resume_')
-      ? stateKey.replace('workflow-resume_', 'workflow_resume_')
-      : stateKey.includes('workflow_resume_')
-        ? stateKey.replace('workflow_resume_', 'workflow-resume_')
-        : null;
+    const altKey = alternateWorkflowResumeStateKey(stateKey);
     if (altKey) {
       stored = await readStateJson({ env, key: altKey });
     }
