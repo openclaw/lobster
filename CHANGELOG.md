@@ -4,6 +4,7 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Add per-step workflow `retry` policies (`max`, `backoff`, `delay_ms`, `max_delay_ms`, `jitter`) with retry-aware stderr logs and dry-run visibility. Thanks to [@scottgl9](https://github.com/scottgl9) (PR [#84](https://github.com/openclaw/lobster/pull/84)).
 - Add optional approval identity constraints for workflow gates (`approval.initiated_by`, `approval.required_approver`, `approval.require_different_approver`) with resume-time enforcement via `LOBSTER_APPROVAL_APPROVED_BY` and envelope metadata for integrations. Thanks to [@coolmanns](https://github.com/coolmanns) (Issue [#44](https://github.com/openclaw/lobster/issues/44)).
 - Clarify `pipeline:` vs `run:` usage for `llm.invoke` / `llm_task.invoke` in workflow files, and add regression coverage to ensure `stdin: $step.stdout` is forwarded as LLM artifacts for `llm_task.invoke` pipeline steps. Thanks to [@RatkoJ](https://github.com/RatkoJ) (Issue [#41](https://github.com/openclaw/lobster/issues/41)).
 - Add `lobster graph` workflow visualization with `mermaid` (default), `dot`, and `ascii` outputs, including step-type nodes, `stdin` data-flow edges, conditional dependency labels (`when`/`condition`), approval-gate diamond shapes, and `--args-json` label resolution support. Thanks to [@vignesh07](https://github.com/vignesh07) (Issue [#53](https://github.com/openclaw/lobster/issues/53)).
