@@ -10,6 +10,7 @@ All notable changes to Lobster will be documented in this file.
 - Add workflow condition comparison operators `<`, `<=`, `>`, and `>=` with strict numeric semantics (booleans/null do not coerce), including mixed boolean-expression support with `&&`/`||`. Thanks to [@scottgl9](https://github.com/scottgl9) (PR [#71](https://github.com/openclaw/lobster/pull/71)).
 - Add workflow-level LLM cost tracking with `_meta.cost` summaries, per-step usage attribution, and optional `cost_limit` controls with `warn`/`stop` actions (plus custom pricing via `LOBSTER_LLM_PRICING_JSON`). Thanks to [@scottgl9](https://github.com/scottgl9) (PR [#70](https://github.com/openclaw/lobster/pull/70)).
 - Add `parallel` workflow steps with branch fan-out, `wait: all|any`, block-level timeout support, and branch result references in downstream steps. Thanks to [@scottgl9](https://github.com/scottgl9) (PR [#69](https://github.com/openclaw/lobster/pull/69)).
+- Add `for_each` workflow steps for per-item sub-step execution over arrays, including loop-scoped vars (`item_var`/`index_var`), optional `batch_size` + `pause_ms`, and collected iteration outputs for downstream steps. Thanks to [@scottgl9](https://github.com/scottgl9) (PR [#68](https://github.com/openclaw/lobster/pull/68)).
 
 ## 2026.4.6
 

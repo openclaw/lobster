@@ -57,6 +57,12 @@ export type WorkflowStep = {
   condition?: unknown;
   when?: unknown;
   parallel?: ParallelConfig;
+  for_each?: string;
+  item_var?: string;
+  index_var?: string;
+  batch_size?: number;
+  pause_ms?: number;
+  steps?: WorkflowStep[];
   timeout_ms?: number;
   on_error?: 'stop' | 'continue' | 'skip_rest';
 };
@@ -272,21 +278,116 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
         }
       }
     }
+    if (step.for_each !== undefined && typeof step.for_each !== 'string') {
+      throw new Error(`Workflow step ${step.id} for_each must be a string (step reference expression)`);
+    }
+    const isForEach = typeof step.for_each === 'string';
+    if (isForEach) {
+      if (!Array.isArray(step.steps) || step.steps.length === 0) {
+        throw new Error(`Workflow step ${step.id} for_each requires a non-empty steps array`);
+      }
+      if (
+        step.batch_size !== undefined
+        && (
+          typeof step.batch_size !== 'number'
+          || !Number.isInteger(step.batch_size)
+          || step.batch_size < 1
+        )
+      ) {
+        throw new Error(`Workflow step ${step.id} batch_size must be a positive integer`);
+      }
+      if (
+        step.pause_ms !== undefined
+        && (
+          typeof step.pause_ms !== 'number'
+          || !Number.isFinite(step.pause_ms)
+          || step.pause_ms < 0
+        )
+      ) {
+        throw new Error(`Workflow step ${step.id} pause_ms must be a finite non-negative number`);
+      }
+      if (isApprovalStep(step.approval)) {
+        throw new Error(`Workflow step ${step.id} for_each steps cannot define approval (use a separate step after the loop)`);
+      }
+      if (isInputStep(step.input)) {
+        throw new Error(`Workflow step ${step.id} for_each steps cannot define input (use a separate step after the loop)`);
+      }
+      if (step.stdin !== undefined && step.stdin !== null) {
+        throw new Error(`Workflow step ${step.id} for_each steps cannot define stdin (loop input comes from the for_each expression)`);
+      }
+      const loopShell = typeof step.run === 'string' ? step.run : step.command;
+      const loopPipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
+      if (loopShell || loopPipeline || step.workflow || step.parallel) {
+        throw new Error(`Workflow step ${step.id} for_each cannot also define run, command, pipeline, workflow, or parallel`);
+      }
+      if (step.item_var !== undefined && typeof step.item_var !== 'string') {
+        throw new Error(`Workflow step ${step.id} item_var must be a string`);
+      }
+      if (step.index_var !== undefined && typeof step.index_var !== 'string') {
+        throw new Error(`Workflow step ${step.id} index_var must be a string`);
+      }
+      const loopItemVar = step.item_var ?? 'item';
+      const loopIndexVar = step.index_var ?? 'index';
+      if (loopItemVar === loopIndexVar) {
+        throw new Error(`Workflow step ${step.id} item_var and index_var cannot be the same`);
+      }
+      const subStepIds = new Set<string>();
+      for (const sub of step.steps) {
+        if (!sub || typeof sub !== 'object' || !sub.id || typeof sub.id !== 'string') {
+          throw new Error(`Workflow step ${step.id} for_each sub-step requires an id`);
+        }
+        if (sub.id === loopItemVar || sub.id === loopIndexVar) {
+          throw new Error(`Workflow step ${step.id} for_each sub-step id '${sub.id}' conflicts with loop variable`);
+        }
+        if (subStepIds.has(sub.id)) {
+          throw new Error(`Workflow step ${step.id} duplicate for_each sub-step id: ${sub.id}`);
+        }
+        subStepIds.add(sub.id);
+        if (isApprovalStep(sub.approval) || isInputStep(sub.input)) {
+          throw new Error(`Workflow step ${step.id} for_each sub-steps cannot contain approval or input steps`);
+        }
+        if (sub.run !== undefined && typeof sub.run !== 'string') {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} run must be a string`);
+        }
+        if (sub.command !== undefined && typeof sub.command !== 'string') {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} command must be a string`);
+        }
+        if (sub.pipeline !== undefined && typeof sub.pipeline !== 'string') {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} pipeline must be a string`);
+        }
+        if (sub.workflow || sub.parallel || sub.for_each) {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} cannot define workflow, parallel, or for_each`);
+        }
+        const subShell = typeof sub.run === 'string' && sub.run.trim()
+          ? sub.run
+          : (typeof sub.command === 'string' && sub.command.trim() ? sub.command : undefined);
+        const subPipeline = typeof sub.pipeline === 'string' && sub.pipeline.trim()
+          ? sub.pipeline
+          : undefined;
+        if (!subShell && !subPipeline) {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} requires run, command, or pipeline`);
+        }
+        if (Number(Boolean(subShell)) + Number(Boolean(subPipeline)) > 1) {
+          throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} can only define one of run, command, or pipeline`);
+        }
+      }
+    }
     const shellCommand = typeof step.run === 'string' ? step.run : step.command;
     const pipeline = typeof step.pipeline === 'string' ? step.pipeline : undefined;
     const workflowRef = typeof step.workflow === 'string' && step.workflow.trim() ? step.workflow : undefined;
     const executionCount = Number(Boolean(shellCommand))
       + Number(Boolean(pipeline))
       + Number(Boolean(workflowRef))
-      + Number(isParallel);
+      + Number(isParallel)
+      + Number(isForEach);
     if (executionCount === 0 && !isApprovalStep(step.approval) && !isInputStep(step.input)) {
-      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, workflow, parallel, approval, or input`);
+      throw new Error(`Workflow step ${step.id} requires run, command, pipeline, workflow, parallel, for_each, approval, or input`);
     }
     if (executionCount > 1) {
-      throw new Error(`Workflow step ${step.id} can only define one of run, command, pipeline, workflow, or parallel`);
+      throw new Error(`Workflow step ${step.id} can only define one of run, command, pipeline, workflow, parallel, or for_each`);
     }
     if (executionCount > 0 && isInputStep(step.input)) {
-      throw new Error(`Workflow step ${step.id} input steps cannot define run, command, pipeline, workflow, or parallel`);
+      throw new Error(`Workflow step ${step.id} input steps cannot define run, command, pipeline, workflow, parallel, or for_each`);
     }
     if (isApprovalStep(step.approval) && isInputStep(step.input)) {
       throw new Error(`Workflow step ${step.id} cannot define both approval and input`);
@@ -555,6 +656,104 @@ export async function runWorkflowFile({
         response: parsed,
       };
       lastStepId = step.id;
+      continue;
+    }
+
+    if (typeof step.for_each === 'string' && Array.isArray(step.steps)) {
+      const itemsRef = resolveInputValue(step.for_each, resolvedArgs, results);
+      if (!Array.isArray(itemsRef)) {
+        throw new Error(`Workflow step ${step.id} for_each: expected array, got ${typeof itemsRef}`);
+      }
+
+      const itemVar = step.item_var ?? 'item';
+      const indexVar = step.index_var ?? 'index';
+      const batchSize = step.batch_size ?? 1;
+      const iterationResults: unknown[] = [];
+
+      for (let itemIdx = 0; itemIdx < itemsRef.length; itemIdx++) {
+        if (step.pause_ms && itemIdx > 0 && itemIdx % batchSize === 0) {
+          await abortableSleep(step.pause_ms, ctx.signal);
+        }
+
+        const item = itemsRef[itemIdx];
+        const scopedResults: Record<string, WorkflowStepResult> = { ...results };
+        scopedResults[itemVar] = {
+          id: itemVar,
+          json: item,
+          stdout: typeof item === 'string' ? item : JSON.stringify(item),
+        };
+        scopedResults[indexVar] = {
+          id: indexVar,
+          json: itemIdx,
+          stdout: String(itemIdx),
+        };
+
+        for (const subStep of step.steps) {
+          if (!evaluateCondition(subStep.when ?? subStep.condition, scopedResults)) {
+            scopedResults[subStep.id] = { id: subStep.id, skipped: true };
+            continue;
+          }
+
+          const loopEnvBase = mergeEnv(ctx.env, workflow.env, step.env, resolvedArgs, scopedResults);
+          const subEnv = subStep.env
+            ? mergeEnv(loopEnvBase, undefined, subStep.env, resolvedArgs, scopedResults)
+            : loopEnvBase;
+          const subCwd = resolveCwd(subStep.cwd ?? step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
+          const subExecution = getStepExecution(subStep);
+
+          let subResult: WorkflowStepResult;
+          if (subExecution.kind === 'shell') {
+            const command = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
+            const stdinValue = resolveShellStdin(subStep.stdin, resolvedArgs, scopedResults);
+            const { stdout } = await runShellCommand({ command, stdin: stdinValue, env: subEnv, cwd: subCwd, signal: ctx.signal });
+            subResult = { id: subStep.id, stdout, json: parseJson(stdout) };
+          } else if (subExecution.kind === 'pipeline') {
+            if (!ctx.registry) {
+              throw new Error(`Workflow step ${step.id} for_each sub-step ${subStep.id} requires a command registry for pipeline execution`);
+            }
+            const pipelineText = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
+            const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
+            subResult = await runPipelineStep({
+              stepId: subStep.id,
+              pipelineText,
+              inputValue,
+              ctx,
+              env: subEnv,
+              cwd: subCwd,
+            });
+          } else {
+            const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
+            subResult = createSyntheticStepResult(subStep.id, inputValue);
+          }
+
+          scopedResults[subStep.id] = subResult;
+          trackStepCost(costTracker, `${step.id}.${subStep.id}`, subResult);
+          if (workflow.cost_limit) {
+            costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
+          }
+        }
+
+        const iterResult: Record<string, unknown> = { [itemVar]: item, [indexVar]: itemIdx };
+        for (const subStep of step.steps) {
+          const subResult = scopedResults[subStep.id];
+          if (subResult && !subResult.skipped) {
+            iterResult[subStep.id] = subResult.json !== undefined ? subResult.json : subResult.stdout;
+          }
+        }
+        iterationResults.push(iterResult);
+      }
+
+      const loopResult: WorkflowStepResult = {
+        id: step.id,
+        json: iterationResults,
+        stdout: JSON.stringify(iterationResults),
+      };
+      results[step.id] = loopResult;
+      lastStepId = step.id;
+      trackStepCost(costTracker, step.id, loopResult);
+      if (workflow.cost_limit) {
+        costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
+      }
       continue;
     }
 
@@ -947,6 +1146,68 @@ function dryRunWorkflow({
       lines.push(`     prompt: ${step.input.prompt}`);
       lines.push(`     [input required]`);
       results[step.id] = { id: step.id, response: { pending: true } };
+      continue;
+    }
+
+    if (typeof step.for_each === 'string' && Array.isArray(step.steps)) {
+      lines.push(`  ${num}. ${step.id}  [for_each]`);
+      const forEachRef = step.for_each;
+      const forEachNote = dryRunTemplateNote(forEachRef);
+      lines.push(`     for_each: ${forEachRef}${forEachNote ? `  ${forEachNote}` : ''}`);
+      if (forEachRef.trim().startsWith('$')) {
+        try {
+          resolveInputValue(forEachRef, resolvedArgs, results);
+        } catch (err: any) {
+          throw new Error(`Workflow step ${step.id} for_each: ${err?.message ?? String(err)}`);
+        }
+      }
+      const dryItemVar = step.item_var ?? 'item';
+      const dryIndexVar = step.index_var ?? 'index';
+      lines.push(`     item_var: ${dryItemVar}, index_var: ${dryIndexVar}`);
+      if (step.batch_size) lines.push(`     batch_size: ${step.batch_size}`);
+      if (step.pause_ms) lines.push(`     pause_ms: ${step.pause_ms}`);
+      lines.push(`     sub-steps: ${step.steps.length}`);
+
+      const loopScopedResults = { ...results };
+      loopScopedResults[dryItemVar] = { id: dryItemVar, json: { _placeholder: true } };
+      loopScopedResults[dryIndexVar] = { id: dryIndexVar, json: 0 };
+      for (let subIdx = 0; subIdx < step.steps.length; subIdx++) {
+        const sub = step.steps[subIdx];
+        if (!evaluateCondition(sub.when ?? sub.condition, loopScopedResults)) {
+          lines.push(`       ${subIdx + 1}. ${sub.id}  [skipped — condition: false]`);
+          loopScopedResults[sub.id] = { id: sub.id, skipped: true };
+          continue;
+        }
+        if (sub.stdin !== undefined && sub.stdin !== null) {
+          try {
+            resolveInputValue(sub.stdin, resolvedArgs, loopScopedResults);
+          } catch (err: any) {
+            throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} stdin: ${err?.message ?? String(err)}`);
+          }
+        }
+        const subExec = getStepExecution(sub);
+        if (subExec.kind === 'shell') {
+          const command = resolveDryRunTemplate(subExec.value, resolvedArgs, loopScopedResults);
+          lines.push(`       ${subIdx + 1}. ${sub.id}  [shell] run: ${command}`);
+        } else if (subExec.kind === 'pipeline') {
+          if (!ctx.registry) {
+            throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} requires a command registry for pipeline execution`);
+          }
+          const pipelineText = resolveDryRunTemplate(subExec.value, resolvedArgs, loopScopedResults);
+          const stages = parsePipeline(pipelineText);
+          for (const stage of stages) {
+            if (hasDeferredDryRunStageName(stage.name)) continue;
+            if (!ctx.registry.get(stage.name)) {
+              throw new Error(`Workflow step ${step.id} for_each sub-step ${sub.id} pipeline: unknown command: ${stage.name}`);
+            }
+          }
+          lines.push(`       ${subIdx + 1}. ${sub.id}  [pipeline] pipeline: ${pipelineText}`);
+        } else {
+          lines.push(`       ${subIdx + 1}. ${sub.id}  [no-op]`);
+        }
+        loopScopedResults[sub.id] = { id: sub.id };
+      }
+      results[step.id] = { id: step.id };
       continue;
     }
 
@@ -1964,6 +2225,28 @@ function createSyntheticStepResult(stepId: string, value: unknown): WorkflowStep
     stdout: serializeValueForStdout(value),
     json: value,
   };
+}
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function encodeShellInput(value: unknown) {

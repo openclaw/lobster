@@ -113,7 +113,10 @@ test('workflow validation rejects workflow combined with run', async () => {
   await fsp.writeFile(filePath, JSON.stringify({
     steps: [{ id: 'x', workflow: 'child.lobster', run: 'echo hi' }],
   }), 'utf8');
-  await assert.rejects(() => loadWorkflowFile(filePath), /can only define one of run, command, pipeline, workflow, or parallel/);
+  await assert.rejects(
+    () => loadWorkflowFile(filePath),
+    /can only define one of run, command, pipeline, workflow, parallel, or for_each/,
+  );
 });
 
 test('workflow validation rejects workflow combined with pipeline', async () => {
@@ -122,7 +125,10 @@ test('workflow validation rejects workflow combined with pipeline', async () => 
   await fsp.writeFile(filePath, JSON.stringify({
     steps: [{ id: 'x', workflow: 'child.lobster', pipeline: 'json' }],
   }), 'utf8');
-  await assert.rejects(() => loadWorkflowFile(filePath), /can only define one of run, command, pipeline, workflow, or parallel/);
+  await assert.rejects(
+    () => loadWorkflowFile(filePath),
+    /can only define one of run, command, pipeline, workflow, parallel, or for_each/,
+  );
 });
 
 test('workflow validation rejects blank workflow path', async () => {
