@@ -1,6 +1,6 @@
 import { runPipelineInternal } from './runtime.js';
 import { encodeToken, decodeToken } from './token.js';
-import { sharedAjv } from '../validation.js';
+import { compileCached } from '../validation.js';
 
 type SdkResumePayload = {
   protocolVersion: 1;
@@ -212,7 +212,7 @@ export class Lobster {
       }
       let validator;
       try {
-        validator = sharedAjv.compile(schema as any);
+        validator = compileCached(schema as any);
       } catch {
         throw new Error('resume token input schema is invalid');
       }

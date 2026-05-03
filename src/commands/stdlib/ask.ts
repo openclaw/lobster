@@ -1,4 +1,4 @@
-import { sharedAjv } from '../../validation.js';
+import { compileCached } from '../../validation.js';
 
 function isInteractive(stdin) {
   return Boolean(stdin.isTTY);
@@ -6,7 +6,7 @@ function isInteractive(stdin) {
 
 function compileAskValidator(schema) {
   try {
-    return sharedAjv.compile(schema);
+    return compileCached(schema);
   } catch {
     throw new Error('ask response schema is invalid');
   }

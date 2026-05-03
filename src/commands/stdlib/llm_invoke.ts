@@ -5,9 +5,11 @@ import { Ajv } from 'ajv';
 import type { ErrorObject } from 'ajv';
 
 import { readStateJson, writeStateJson, stableStringify } from '../../state/store.js';
+import { createCompileCached } from '../../validation.js';
 import type { LobsterCommand } from '../types.js';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
+const compileCachedLocal = createCompileCached(ajv);
 
 const artifactSchema = {
   type: 'object',
@@ -369,7 +371,7 @@ async function runLlmInvoke({ input, args, ctx, config }: { input: AsyncIterable
     throw new Error(`${config.name} payload invalid: ${ajv.errorsText(validatePayload.errors)}`);
   }
 
-  const validator = userOutputSchema ? ajv.compile(userOutputSchema) : null;
+  const validator = userOutputSchema ? compileCachedLocal(userOutputSchema) : null;
   let attempt = 0;
   let lastValidationErrors: string[] = [];
 

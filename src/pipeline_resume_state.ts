@@ -8,7 +8,7 @@ import {
   readStateJson,
   writeStateJson,
 } from './state/store.js';
-import { sharedAjv } from './validation.js';
+import { compileCached } from './validation.js';
 
 export type PipelineResumeState = {
   pipeline: Array<{ name: string; args: Record<string, unknown>; raw: string }>;
@@ -217,7 +217,7 @@ export function validatePipelineInputResponse(schema: unknown, response: unknown
   }
   let validator;
   try {
-    validator = sharedAjv.compile(schema as any);
+    validator = compileCached(schema as any);
   } catch {
     throw new Error('pipeline input response schema is invalid');
   }
