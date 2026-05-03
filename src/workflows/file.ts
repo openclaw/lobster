@@ -12,7 +12,7 @@ import { encodeToken, decodeToken } from '../token.js';
 import { createApprovalIndex, deleteStateJson, readStateJson, writeStateJson } from '../state/store.js';
 import { readLineFromStream } from '../read_line.js';
 import { resolveInlineShellCommand } from '../shell.js';
-import { sharedAjv } from '../validation.js';
+import { compileCached } from '../validation.js';
 import { CostTracker } from '../core/cost_tracker.js';
 import type { CostLimit, CostSummary } from '../core/cost_tracker.js';
 import { withRetry, resolveRetryConfig } from '../core/retry.js';
@@ -440,7 +440,7 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     }
     if (step.input) {
       try {
-        sharedAjv.compile(step.input.responseSchema as any);
+        compileCached(step.input.responseSchema as any);
       } catch (err: any) {
         throw new Error(`Workflow step ${step.id} input.responseSchema is invalid: ${err?.message ?? String(err)}`);
       }
@@ -1923,7 +1923,7 @@ function validateInputResponse(params: {
   response: unknown;
   stepId: string;
 }) {
-  const validator = sharedAjv.compile(params.schema as object);
+  const validator = compileCached(params.schema as object);
   const ok = validator(params.response);
   if (ok) return;
   const first = validator.errors?.[0];
