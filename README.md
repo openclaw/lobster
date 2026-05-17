@@ -319,6 +319,46 @@ steps:
 
 Use `stdin: $stepId.stdout` to pipe output from one step into the next.
 
+### Example: approval-gated TweetClaw workflow
+
+[TweetClaw](https://github.com/Xquik-dev/tweetclaw) is an OpenClaw plugin for
+X/Twitter automation. Install the official `@xquik/tweetclaw` npm package and
+enable its two tools before using it from Lobster:
+
+```bash
+openclaw plugins install @xquik/tweetclaw
+openclaw config set tools.alsoAllow '["explore", "tweetclaw"]'
+```
+
+`explore` is the local endpoint catalog. `tweetclaw` performs the live Xquik
+API call, so keep a Lobster approval step in front of reads that may consume
+credits and any visible X/Twitter action such as posting, replying, following,
+DMs, monitors, webhooks, or giveaway draws.
+
+```yaml
+name: tweetclaw-search-review
+steps:
+  - id: endpoint
+    run: >
+      openclaw.invoke --tool explore --action json
+      --args-json '{"query":"search tweets","category":"twitter","method":"GET","limit":5}'
+
+  - id: approve_search
+    approval: Search public X/Twitter posts about OpenClaw with TweetClaw?
+    stdin: $endpoint.stdout
+
+  - id: search
+    run: >
+      openclaw.invoke --tool tweetclaw --action json
+      --args-json '{"path":"/api/v1/x/tweets/search","method":"GET","query":{"q":"openclaw plugin","limit":20}}'
+    when: $approve_search.approved
+```
+
+Store the Xquik API key or MPP signing key in OpenClaw plugin config, not in
+workflow files. Use the
+[ClawHub listing](https://clawhub.ai/plugins/@xquik/tweetclaw) for discovery,
+and prefer env vars for user-provided query text as described below.
+
 ## Args and shell-safety
 
 `${arg}` substitution is a raw string replace into the shell command text.
