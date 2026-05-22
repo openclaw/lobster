@@ -1,0 +1,19 @@
+# Protect ownership and automation rules.
+/.github/CODEOWNERS @openclaw/openclaw-secops
+/.github/dependabot.yml @openclaw/openclaw-secops
+/.github/workflows/ @openclaw/openclaw-secops
+/.agents/skills/ @openclaw/openclaw-secops
+/.crabbox.yaml @openclaw/openclaw-secops
+/SECURITY.md @openclaw/openclaw-secops
+/AGENTS.md @openclaw/openclaw-secops
+
+# Package, release, and security-sensitive surfaces.
+/package.json @openclaw/openclaw-secops
+/pnpm-lock.yaml @openclaw/openclaw-secops
+/package-lock.json @openclaw/openclaw-secops
+/src/ @openclaw/openclaw-secops
+/Sources/ @openclaw/openclaw-secops
+/cmd/ @openclaw/openclaw-secops
+/internal/ @openclaw/openclaw-secops
+/scripts/ @openclaw/openclaw-secops
+/docs/ @openclaw/openclaw-secops
