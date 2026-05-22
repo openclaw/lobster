@@ -2,6 +2,8 @@
 
 All notable changes to Lobster will be documented in this file.
 
+## Unreleased
+
 ## 2026.5.22
 
 - Memoize Ajv schema compilation for repeated validation paths to avoid retained SchemaEnv/closure growth in long-running processes. Thanks to [@KrasimirKralev](https://github.com/KrasimirKralev) (PR [#98](https://github.com/openclaw/lobster/pull/98)) and [@cmi525](https://github.com/cmi525) (Issue [#96](https://github.com/openclaw/lobster/issues/96)).
