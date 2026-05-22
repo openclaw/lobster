@@ -5,6 +5,7 @@ import { decodeResumeToken, parseResumeArgs, resolveApprovalId } from "./resume.
 import { cleanupApprovalIndexByStateKey, deleteApprovalId } from "./state/store.js";
 import {
   WorkflowResumeArgumentError,
+  deleteWorkflowResumeStateTree,
   loadWorkflowFile,
   resolveWorkflowArgs,
   runWorkflowFile,
@@ -537,7 +538,7 @@ async function handleResume({ argv, registry }) {
   if (cancel === true) {
     await cleanupIndex();
     if (payload.kind === "workflow-file" && payload.stateKey) {
-      await deleteStateJson({ env: process.env, key: payload.stateKey });
+      await deleteWorkflowResumeStateTree(process.env, payload.stateKey);
     }
     if (payload.kind === "pipeline-resume" && payload.stateKey) {
       await deleteStateJson({ env: process.env, key: payload.stateKey });

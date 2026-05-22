@@ -6,10 +6,11 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { PassThrough } from "node:stream";
 
-import { parsePipeline } from "../parser.js";
+import { parsePipeline, tokenizeCommand } from "../parser.js";
 import { runPipeline } from "../runtime.js";
 import { encodeToken, decodeToken } from "../token.js";
 import {
+  cleanupApprovalIndexByStateKey,
   createApprovalIndex,
   deleteStateJson,
   readStateJson,
@@ -49,6 +50,8 @@ export type ParallelConfig = {
   branches: ParallelBranch[];
 };
 
+export type FlowRule = { when: string; goto: string } | { default: string };
+
 export type WorkflowStep = {
   id: string;
   command?: string;
@@ -72,6 +75,8 @@ export type WorkflowStep = {
   steps?: WorkflowStep[];
   timeout_ms?: number;
   on_error?: "stop" | "continue" | "skip_rest";
+  flow?: FlowRule[];
+  max_iterations?: number;
   retry?: {
     max?: number;
     backoff?: "fixed" | "exponential";
@@ -180,6 +185,10 @@ export type WorkflowResumePayload = {
   inputStepId?: string;
   inputSchema?: unknown;
   inputSubject?: unknown;
+  visitCounts?: Record<string, number>;
+  flowPending?: boolean;
+  childStateKey?: string;
+  childFilePath?: string;
 };
 
 type WorkflowResumeState = {
@@ -192,6 +201,10 @@ type WorkflowResumeState = {
   inputStepId?: string;
   inputSchema?: unknown;
   inputSubject?: unknown;
+  visitCounts?: Record<string, number>;
+  flowPending?: boolean;
+  childStateKey?: string;
+  childFilePath?: string;
   createdAt: string;
 };
 
@@ -233,6 +246,13 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
     }
   }
 
+  const topLevelStepIds = new Set(
+    steps
+      .map((step) =>
+        step && typeof step === "object" && typeof step.id === "string" ? step.id : null,
+      )
+      .filter((id): id is string => Boolean(id)),
+  );
   const seen = new Set<string>();
   for (const step of steps) {
     if (!step || typeof step !== "object") {
@@ -425,9 +445,15 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
             `Workflow step ${step.id} for_each sub-step ${sub.id} pipeline must be a string`,
           );
         }
-        if (sub.workflow || sub.parallel || sub.for_each) {
+        if (
+          sub.workflow ||
+          sub.parallel ||
+          sub.for_each ||
+          sub.flow ||
+          sub.max_iterations !== undefined
+        ) {
           throw new Error(
-            `Workflow step ${step.id} for_each sub-step ${sub.id} cannot define workflow, parallel, or for_each`,
+            `Workflow step ${step.id} for_each sub-step ${sub.id} cannot define workflow, parallel, for_each, flow, or max_iterations`,
           );
         }
         const subShell =
@@ -603,6 +629,50 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowFile> 
         throw new Error(`Workflow step ${step.id} retry.jitter must be a boolean`);
       }
     }
+    if (step.flow !== undefined) {
+      if (!Array.isArray(step.flow)) {
+        throw new Error(`Workflow step ${step.id} flow must be an array`);
+      }
+      for (let i = 0; i < step.flow.length; i++) {
+        const rule = step.flow[i];
+        if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+          throw new Error(`Workflow step ${step.id} flow rule must have {when, goto} or {default}`);
+        }
+        if ("default" in rule) {
+          if (i !== step.flow.length - 1) {
+            throw new Error(`Workflow step ${step.id} default rule must be the last flow rule`);
+          }
+          if (typeof rule.default !== "string" || !topLevelStepIds.has(rule.default)) {
+            throw new Error(
+              `Workflow step ${step.id} goto target "${String(
+                rule.default,
+              )}" does not match any step id`,
+            );
+          }
+          continue;
+        }
+        if (
+          "when" in rule &&
+          "goto" in rule &&
+          typeof rule.when === "string" &&
+          typeof rule.goto === "string"
+        ) {
+          if (!topLevelStepIds.has(rule.goto)) {
+            throw new Error(
+              `Workflow step ${step.id} goto target "${rule.goto}" does not match any step id`,
+            );
+          }
+          continue;
+        }
+        throw new Error(`Workflow step ${step.id} flow rule must have {when, goto} or {default}`);
+      }
+    }
+    if (
+      step.max_iterations !== undefined &&
+      (!Number.isInteger(step.max_iterations) || step.max_iterations < 1)
+    ) {
+      throw new Error(`Workflow step ${step.id} max_iterations must be a positive integer`);
+    }
     if (seen.has(step.id)) {
       throw new Error(`Duplicate workflow step id: ${step.id}`);
     }
@@ -638,6 +708,45 @@ export function resolveWorkflowArgs(
   return resolved;
 }
 
+function nextWorkflowStepIndex(
+  idx: number,
+  step: WorkflowStep,
+  results: Record<string, WorkflowStepResult>,
+  stepIndexMap: Map<string, number>,
+) {
+  const flowTarget = evaluateFlowRules(step.flow, results);
+  if (flowTarget === null) return idx + 1;
+  return stepIndexMap.get(flowTarget) ?? idx + 1;
+}
+
+function applyResumedStepResult(
+  results: Record<string, WorkflowStepResult>,
+  stepId: string,
+  values: {
+    approved?: boolean;
+    approvedBy?: string;
+    subject?: unknown;
+    response?: unknown;
+  },
+) {
+  const previous = results[stepId] ?? { id: stepId };
+  if (values.approved !== undefined) previous.approved = values.approved;
+  if (values.approvedBy) previous.approvedBy = values.approvedBy;
+  if (values.subject !== undefined) previous.subject = values.subject;
+  if (values.response !== undefined) previous.response = values.response;
+  delete previous.skipped;
+  results[stepId] = previous;
+}
+
+function createResumeToken(stateKey: string) {
+  return encodeToken({
+    protocolVersion: 1,
+    v: 1,
+    kind: "workflow-file",
+    stateKey,
+  } satisfies WorkflowResumePayload);
+}
+
 export async function runWorkflowFile({
   filePath,
   args,
@@ -664,6 +773,14 @@ export async function runWorkflowFile({
     : (resume ?? null);
   if (resumeState?.approvalStepId && resumeState?.inputStepId) {
     throw new Error("Invalid workflow resume state");
+  }
+  if (resumeState?.childStateKey && cancel === true) {
+    if (consumedResumeStateKey) {
+      await deleteWorkflowResumeStateTree(ctx.env, consumedResumeStateKey);
+    } else {
+      await deleteWorkflowResumeStateTree(ctx.env, resumeState.childStateKey);
+    }
+    return { status: "cancelled", output: [] };
   }
 
   if (resumeState?.approvalStepId) {
@@ -710,9 +827,9 @@ export async function runWorkflowFile({
       ? cloneResults(resumeState.steps)
       : {};
     const startIndex = resumeState?.resumeAtIndex ?? 0;
+    const visitCounts = new Map<string, number>(Object.entries(resumeState?.visitCounts ?? {}));
 
     if (resumeState?.approvalStepId && typeof approved === "boolean") {
-      const previous = results[resumeState.approvalStepId] ?? { id: resumeState.approvalStepId };
       const approvedBy = String(ctx.env.LOBSTER_APPROVAL_APPROVED_BY ?? "").trim() || undefined;
       if (approved === true) {
         enforceApprovalIdentity({
@@ -721,9 +838,7 @@ export async function runWorkflowFile({
           approvedBy,
         });
       }
-      previous.approved = approved;
-      if (approvedBy) previous.approvedBy = approvedBy;
-      results[resumeState.approvalStepId] = previous;
+      applyResumedStepResult(results, resumeState.approvalStepId, { approved, approvedBy });
     }
 
     if (resumeState?.inputStepId) {
@@ -750,11 +865,10 @@ export async function runWorkflowFile({
       } catch (err: any) {
         throw new WorkflowResumeArgumentError(err?.message ?? String(err));
       }
-      const previous = results[resumeState.inputStepId] ?? { id: resumeState.inputStepId };
-      previous.subject = resumeState.inputSubject ?? null;
-      previous.response = response;
-      delete previous.skipped;
-      results[resumeState.inputStepId] = previous;
+      applyResumedStepResult(results, resumeState.inputStepId, {
+        subject: resumeState.inputSubject ?? null,
+        response,
+      });
     }
 
     if (ctx.dryRun) {
@@ -765,12 +879,32 @@ export async function runWorkflowFile({
     let lastStepId: string | null =
       resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
 
-    for (let idx = startIndex; idx < steps.length; idx++) {
+    let idx = startIndex;
+    while (idx >= 0 && idx < steps.length) {
       const step = steps[idx];
+      const hasFlow = Boolean(step.flow?.length);
+      const resumingChild = Boolean(resumeState?.childStateKey && idx === startIndex);
 
-      if (!evaluateCondition(step.when ?? step.condition, results)) {
-        results[step.id] = { id: step.id, skipped: true };
+      if (resumeState?.flowPending && idx === startIndex && !resumingChild) {
+        lastStepId = step.id;
+        idx = nextWorkflowStepIndex(idx, step, results, stepIndexById);
+        resumeState.flowPending = false;
         continue;
+      }
+
+      if (!resumingChild && !evaluateCondition(step.when ?? step.condition, results)) {
+        results[step.id] = { id: step.id, skipped: true };
+        idx += 1;
+        continue;
+      }
+
+      if (!resumingChild) {
+        const visits = (visitCounts.get(step.id) ?? 0) + 1;
+        const maxIterations = step.max_iterations ?? 10;
+        if (visits > maxIterations) {
+          throw new Error(`Workflow step ${step.id} max_iterations (${maxIterations}) exceeded`);
+        }
+        visitCounts.set(step.id, visits);
       }
 
       if (isInputStep(step.input)) {
@@ -792,7 +926,7 @@ export async function runWorkflowFile({
           });
           const stateKey = await saveWorkflowResumeState(ctx.env, {
             filePath: resolvedFilePath,
-            resumeAtIndex: idx + 1,
+            resumeAtIndex: hasFlow ? idx : idx + 1,
             steps: results,
             args: resolvedArgs,
             inputStepId: step.id,
@@ -800,6 +934,8 @@ export async function runWorkflowFile({
             // Preserve the full resolved subject for resume semantics; the tool
             // envelope may contain a truncated preview to stay within size limits.
             inputSubject: subject,
+            visitCounts: Object.fromEntries(visitCounts),
+            flowPending: hasFlow ? true : undefined,
             createdAt: new Date().toISOString(),
           });
 
@@ -807,12 +943,7 @@ export async function runWorkflowFile({
             await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
           }
 
-          const resumeToken = encodeToken({
-            protocolVersion: 1,
-            v: 1,
-            kind: "workflow-file",
-            stateKey,
-          } satisfies WorkflowResumePayload);
+          const resumeToken = createResumeToken(stateKey);
 
           return {
             status: "needs_input",
@@ -841,6 +972,7 @@ export async function runWorkflowFile({
           response: parsed,
         };
         lastStepId = step.id;
+        idx = nextWorkflowStepIndex(idx, step, results, stepIndexById);
         continue;
       }
 
@@ -957,6 +1089,7 @@ export async function runWorkflowFile({
         if (workflow.cost_limit) {
           costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
         }
+        idx = nextWorkflowStepIndex(idx, step, results, stepIndexById);
         continue;
       }
 
@@ -964,10 +1097,86 @@ export async function runWorkflowFile({
       const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs) ?? ctx.cwd;
       const execution = getStepExecution(step);
       const retryConfig = resolveRetryConfig(step.retry);
+      const wrapChildWorkflowHalt = async (
+        childResult: WorkflowRunResult,
+        childFilePath: string,
+      ): Promise<WorkflowRunResult | null> => {
+        if (childResult.status === "cancelled") {
+          if (consumedResumeStateKey) {
+            await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+          }
+          return { status: "cancelled", output: [] };
+        }
+        if (childResult.status !== "needs_approval" && childResult.status !== "needs_input") {
+          return null;
+        }
+
+        const childResumeToken =
+          childResult.requiresApproval?.resumeToken ?? childResult.requiresInput?.resumeToken;
+        const childStateKey = childResumeToken
+          ? decodeWorkflowResumeStateKeyFromToken(childResumeToken)
+          : null;
+        if (!childStateKey) {
+          throw new Error(`Workflow step ${step.id} sub-workflow did not return a resume token`);
+        }
+        if (childResult.status === "needs_approval") {
+          await cleanupApprovalIndexByStateKey({ env: ctx.env, stateKey: childStateKey });
+        }
+
+        const stateKey = await saveWorkflowResumeState(ctx.env, {
+          filePath: resolvedFilePath,
+          resumeAtIndex: idx,
+          steps: results,
+          args: resolvedArgs,
+          visitCounts: Object.fromEntries(visitCounts),
+          childStateKey,
+          childFilePath,
+          flowPending: hasFlow ? true : undefined,
+          createdAt: new Date().toISOString(),
+        });
+
+        let approvalId: string | undefined;
+        if (childResult.status === "needs_approval") {
+          try {
+            approvalId = await createApprovalIndex({ env: ctx.env, stateKey });
+          } catch (err) {
+            await deleteStateJson({ env: ctx.env, key: stateKey }).catch(() => {});
+            throw err;
+          }
+        }
+
+        if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
+          await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+        }
+
+        const resumeToken = createResumeToken(stateKey);
+        return {
+          status: childResult.status,
+          output: [],
+          ...(childResult.requiresApproval
+            ? {
+                requiresApproval: {
+                  ...childResult.requiresApproval,
+                  resumeToken,
+                  ...(approvalId ? { approvalId } : null),
+                },
+              }
+            : null),
+          ...(childResult.requiresInput
+            ? {
+                requiresInput: {
+                  ...childResult.requiresInput,
+                  resumeToken,
+                },
+              }
+            : null),
+        };
+      };
 
       const executeStepAttempt = async (): Promise<{
-        result: WorkflowStepResult;
+        result?: WorkflowStepResult;
         parallelBranchResults: Record<string, WorkflowStepResult> | null;
+        halt?: WorkflowRunResult;
       }> => {
         // Combine external cancellation and optional per-step timeout into one signal.
         let stepSignal: AbortSignal | undefined = ctx.signal;
@@ -1000,7 +1209,7 @@ export async function runWorkflowFile({
             const runBranch = async (
               branch: ParallelBranch,
             ): Promise<{ branchId: string; result: WorkflowStepResult }> => {
-              const mergedBranchEnv = { ...(step.env ?? {}), ...(branch.env ?? {}) };
+              const mergedBranchEnv = { ...step.env, ...branch.env };
               const branchEnv = mergeEnv(
                 ctx.env,
                 workflow.env,
@@ -1118,66 +1327,61 @@ export async function runWorkflowFile({
                   : JSON.stringify(merged),
             };
           } else if (execution.kind === "workflow") {
-            const workflowPath = resolveTemplate(execution.value, resolvedArgs, results);
-            const resolvedWorkflowPath = path.isAbsolute(workflowPath)
-              ? workflowPath
-              : path.resolve(path.dirname(resolvedFilePath), workflowPath);
-            const activeWorkflows = ctx._activeWorkflows ?? new Set<string>();
-            let canonicalWorkflowPath: string;
-            try {
-              canonicalWorkflowPath = await fsp.realpath(resolvedWorkflowPath);
-            } catch {
-              throw new Error(
-                `Workflow step ${step.id} workflow file not found: ${resolvedWorkflowPath}`,
-              );
-            }
-            if (activeWorkflows.has(canonicalWorkflowPath)) {
-              throw new Error(
-                `Workflow step ${step.id} creates a cycle: ${canonicalWorkflowPath} is already being executed`,
-              );
-            }
-            const childActive = new Set(activeWorkflows);
-            childActive.add(canonicalWorkflowPath);
-            const subArgs = resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results);
-            const subResult = await runWorkflowFile({
-              filePath: resolvedWorkflowPath,
-              args: subArgs,
-              ctx: { ...ctx, env, cwd, _activeWorkflows: childActive },
+            const workflowPath =
+              resumingChild && resumeState?.childFilePath
+                ? resumeState.childFilePath
+                : resolveTemplate(execution.value, resolvedArgs, results);
+            const subResult = await runChildWorkflow({
+              stepId: step.id,
+              parentFilePath: resolvedFilePath,
+              invocation: { file: workflowPath },
+              args: resumingChild
+                ? undefined
+                : resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results),
+              ctx: { ...ctx, env, cwd },
+              resumeState,
+              approved,
+              response,
+              cancel,
             });
-            if (subResult.status === "needs_approval" || subResult.status === "needs_input") {
-              const resumeToken =
-                subResult.requiresApproval?.resumeToken ?? subResult.requiresInput?.resumeToken;
-              if (resumeToken) {
-                try {
-                  const decoded = decodeToken(resumeToken) as { stateKey?: string } | null;
-                  if (decoded?.stateKey) {
-                    await deleteStateJson({ env: ctx.env, key: decoded.stateKey }).catch(() => {});
-                  }
-                } catch {
-                  // best-effort cleanup
-                }
-              }
-              throw new Error(
-                `Workflow step ${step.id} sub-workflow halted for ${
-                  subResult.status === "needs_approval" ? "approval" : "input"
-                }. Sub-workflow approval/input gates are not supported in composition.`,
-              );
-            }
-            const json = subResult.output.length === 1 ? subResult.output[0] : subResult.output;
-            const stdout = subResult.output.length ? serializeValueForStdout(json) : "";
-            result = { id: step.id, stdout, json };
+            const halt = await wrapChildWorkflowHalt(subResult.result, subResult.filePath);
+            if (halt) return { halt, parallelBranchResults: null };
+            result = childWorkflowOutputToStepResult(step.id, subResult.result);
           } else if (execution.kind === "shell") {
             const command = resolveTemplate(execution.value, resolvedArgs, results);
-            const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
-            const { stdout } = await runShellCommand({
-              command,
-              stdin: stdinValue,
-              env,
-              cwd,
-              signal: stepSignal,
-              ...(step.timeout_ms ? { killSignal: "SIGKILL" as NodeJS.Signals } : {}),
-            });
-            result = { id: step.id, stdout, json: parseJson(stdout) };
+            const lobsterRun = parseLobsterRunCommand(command);
+            if (lobsterRun || (resumingChild && resumeState?.childFilePath)) {
+              const subResult = await runChildWorkflow({
+                stepId: step.id,
+                parentFilePath: resolvedFilePath,
+                invocation: resumingChild
+                  ? { file: resumeState?.childFilePath }
+                  : {
+                      name: lobsterRun?.name,
+                      file: lobsterRun?.file,
+                    },
+                args: resumingChild ? undefined : parseLobsterRunArgs(lobsterRun?.argsJson),
+                ctx: { ...ctx, env, cwd },
+                resumeState,
+                approved,
+                response,
+                cancel,
+              });
+              const halt = await wrapChildWorkflowHalt(subResult.result, subResult.filePath);
+              if (halt) return { halt, parallelBranchResults: null };
+              result = childWorkflowOutputToStepResult(step.id, subResult.result);
+            } else {
+              const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
+              const { stdout } = await runShellCommand({
+                command,
+                stdin: stdinValue,
+                env,
+                cwd,
+                signal: stepSignal,
+                ...(step.timeout_ms ? { killSignal: "SIGKILL" as NodeJS.Signals } : {}),
+              });
+              result = { id: step.id, stdout, json: parseJson(stdout) };
+            }
           } else if (execution.kind === "pipeline") {
             if (!ctx.registry) {
               throw new Error(
@@ -1225,6 +1429,12 @@ export async function runWorkflowFile({
                 },
               })
             : await executeStepAttempt();
+        if (attemptResult.halt) {
+          return attemptResult.halt;
+        }
+        if (!attemptResult.result) {
+          throw new Error(`Workflow step ${step.id} did not produce a result`);
+        }
         result = attemptResult.result;
         parallelBranchResults = attemptResult.parallelBranchResults;
       } catch (err: any) {
@@ -1258,6 +1468,7 @@ export async function runWorkflowFile({
         if (policy === "skip_rest") {
           break;
         }
+        idx += 1;
         continue;
       }
 
@@ -1285,11 +1496,13 @@ export async function runWorkflowFile({
         if (ctx.mode === "tool" || !isInteractive(ctx.stdin)) {
           const stateKey = await saveWorkflowResumeState(ctx.env, {
             filePath: resolvedFilePath,
-            resumeAtIndex: idx + 1,
+            resumeAtIndex: hasFlow ? idx : idx + 1,
             steps: results,
             args: resolvedArgs,
             approvalStepId: step.id,
             approvalIdentity,
+            visitCounts: Object.fromEntries(visitCounts),
+            flowPending: hasFlow ? true : undefined,
             createdAt: new Date().toISOString(),
           });
 
@@ -1305,12 +1518,7 @@ export async function runWorkflowFile({
             await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
           }
 
-          const resumeToken = encodeToken({
-            protocolVersion: 1,
-            v: 1,
-            kind: "workflow-file",
-            stateKey,
-          } satisfies WorkflowResumePayload);
+          const resumeToken = createResumeToken(stateKey);
 
           return {
             status: "needs_approval",
@@ -1339,6 +1547,7 @@ export async function runWorkflowFile({
         results[step.id].approved = true;
         if (approvedBy) results[step.id].approvedBy = approvedBy;
       }
+      idx = nextWorkflowStepIndex(idx, step, results, stepIndexById);
     }
 
     const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
@@ -1353,6 +1562,207 @@ export async function runWorkflowFile({
   } finally {
     ctx._activeWorkflows?.delete(canonicalFilePath);
   }
+}
+
+async function runChildWorkflow({
+  stepId,
+  parentFilePath,
+  invocation,
+  args,
+  ctx,
+  resumeState,
+  approved,
+  response,
+  cancel,
+}: {
+  stepId: string;
+  parentFilePath: string;
+  invocation: { name?: string; file?: string };
+  args?: Record<string, unknown>;
+  ctx: RunContext;
+  resumeState: WorkflowResumeState | WorkflowResumePayload | null;
+  approved?: boolean;
+  response?: unknown;
+  cancel?: boolean;
+}): Promise<{ filePath: string; result: WorkflowRunResult }> {
+  const parentDir = path.dirname(parentFilePath);
+  const childFilePath = resumeState?.childStateKey
+    ? resumeState.childFilePath
+    : await resolveChildWorkflowPath(invocation, parentDir, ctx);
+  if (!childFilePath) {
+    throw new Error(`Workflow step ${stepId} child workflow file path required`);
+  }
+
+  const activeWorkflows = ctx._activeWorkflows ?? new Set<string>();
+  let canonicalWorkflowPath: string;
+  try {
+    canonicalWorkflowPath = await fsp.realpath(childFilePath);
+  } catch {
+    throw new Error(`Workflow step ${stepId} workflow file not found: ${childFilePath}`);
+  }
+  if (!resumeState?.childStateKey && activeWorkflows.has(canonicalWorkflowPath)) {
+    throw new Error(
+      `Workflow step ${stepId} creates a cycle: ${canonicalWorkflowPath} is already being executed`,
+    );
+  }
+
+  const childActive = new Set(activeWorkflows);
+  childActive.add(canonicalWorkflowPath);
+  const childResume = resumeState?.childStateKey
+    ? ({
+        protocolVersion: 1,
+        v: 1,
+        kind: "workflow-file",
+        stateKey: resumeState.childStateKey,
+      } satisfies WorkflowResumePayload)
+    : undefined;
+
+  const result = await runWorkflowFile({
+    filePath: childFilePath,
+    args,
+    ctx: { ...ctx, _activeWorkflows: childActive },
+    resume: childResume,
+    approved,
+    response,
+    cancel,
+  });
+
+  return { filePath: childFilePath, result };
+}
+
+async function resolveChildWorkflowPath(
+  invocation: { name?: string; file?: string },
+  parentDir: string,
+  ctx: RunContext,
+) {
+  if (invocation.file) {
+    return path.isAbsolute(invocation.file)
+      ? invocation.file
+      : path.resolve(parentDir, invocation.file);
+  }
+  if (invocation.name) {
+    const resolved = await resolveWorkflowByName(invocation.name, parentDir, ctx.env, ctx.cwd);
+    if (!resolved) {
+      throw new Error(`Sub-workflow "${invocation.name}" not found`);
+    }
+    return resolved;
+  }
+  return null;
+}
+
+function childWorkflowOutputToStepResult(stepId: string, childResult: WorkflowRunResult) {
+  const json = childResult.output.length === 1 ? childResult.output[0] : childResult.output;
+  const stdout = childResult.output.length ? serializeValueForStdout(json) : "";
+  return { id: stepId, stdout, json } satisfies WorkflowStepResult;
+}
+
+function decodeWorkflowResumeStateKeyFromToken(token: string) {
+  try {
+    const decoded = decodeToken(token) as { kind?: string; stateKey?: string } | null;
+    if (decoded?.kind === "workflow-file" && typeof decoded.stateKey === "string") {
+      return decoded.stateKey;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function parseLobsterRunArgs(argsJson: string | undefined): Record<string, unknown> | undefined {
+  if (!argsJson) return undefined;
+  const parsed = JSON.parse(argsJson);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("lobster.run --args-json must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+export function parseLobsterRunCommand(command: string): {
+  name?: string;
+  file?: string;
+  argsJson?: string;
+} | null {
+  const tokens = tokenizeCommand(command.trim());
+  if (tokens.length === 0 || tokens[0] !== "lobster.run") {
+    return null;
+  }
+
+  let name: string | undefined;
+  let file: string | undefined;
+  let argsJson: string | undefined;
+
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i];
+    const readValue = (flag: string) => {
+      if (token === flag) {
+        const value = tokens[i + 1];
+        if (!value || value.startsWith("--")) {
+          throw new Error(`lobster.run: ${flag} requires a value`);
+        }
+        i += 1;
+        return value;
+      }
+      const prefix = `${flag}=`;
+      if (token.startsWith(prefix)) {
+        return token.slice(prefix.length);
+      }
+      return null;
+    };
+
+    const parsedName = readValue("--name");
+    if (parsedName !== null) {
+      name = parsedName;
+      continue;
+    }
+    const parsedFile = readValue("--file");
+    if (parsedFile !== null) {
+      file = parsedFile;
+      continue;
+    }
+    const parsedArgsJson = readValue("--args-json");
+    if (parsedArgsJson !== null) {
+      argsJson = parsedArgsJson;
+      continue;
+    }
+    throw new Error(`lobster.run: unsupported argument ${token}`);
+  }
+
+  if (name && file) {
+    throw new Error("lobster.run: --name and --file are mutually exclusive");
+  }
+  if (!name && !file) {
+    throw new Error("lobster.run requires --name or --file");
+  }
+
+  return { name, file, argsJson };
+}
+
+export async function resolveWorkflowByName(
+  name: string,
+  parentDir: string,
+  env?: Record<string, string | undefined>,
+  cwd?: string,
+) {
+  const extensions = [".lobster", ".yaml", ".yml", ".json"];
+  const searchDirs = [
+    parentDir,
+    ...(env?.LOBSTER_WORKFLOW_PATH ? env.LOBSTER_WORKFLOW_PATH.split(path.delimiter) : []),
+    ...(cwd ? [cwd] : []),
+    process.cwd(),
+  ].filter(Boolean);
+
+  for (const dir of searchDirs) {
+    for (const ext of extensions) {
+      const candidate = path.join(dir, `${name}${ext}`);
+      try {
+        await fsp.access(candidate);
+        return candidate;
+      } catch {
+        // try next candidate
+      }
+    }
+  }
+  return null;
 }
 
 // Returns a human-readable note if a step.stdin value references a prior step's
@@ -1582,6 +1992,10 @@ function dryRunWorkflow({
       const commandNote = dryRunTemplateNote(command);
       lines.push(`  ${num}. ${step.id}  [shell]`);
       lines.push(`     run: ${command}${commandNote ? `  ${commandNote}` : ""}`);
+      const lobsterRun = parseLobsterRunCommand(command);
+      if (lobsterRun) {
+        lines.push(`     sub-workflow: ${lobsterRun.name ?? lobsterRun.file}`);
+      }
     } else if (execution.kind === "pipeline") {
       const pipelineText = resolveDryRunTemplate(execution.value, resolvedArgs, results);
       const pipelineNote = dryRunTemplateNote(pipelineText);
@@ -1626,6 +2040,18 @@ function dryRunWorkflow({
     if (isApprovalStep(step.approval)) {
       lines.push(`     [approval required]`);
     }
+    if (step.max_iterations) {
+      lines.push(`     max_iterations: ${step.max_iterations}`);
+    }
+    if (step.flow) {
+      for (const rule of step.flow) {
+        if ("default" in rule) {
+          lines.push(`     flow: default -> ${rule.default}`);
+        } else {
+          lines.push(`     flow: when ${rule.when} -> goto ${rule.goto}`);
+        }
+      }
+    }
 
     // Record a placeholder result so later steps can reference this step in conditions.
     // For approval steps, model approval as granted so downstream conditions like
@@ -1664,6 +2090,22 @@ async function saveWorkflowResumeState(
   const stateKey = `workflow_resume_${randomUUID()}`;
   await writeStateJson({ env, key: stateKey, value: state });
   return stateKey;
+}
+
+export async function deleteWorkflowResumeStateTree(
+  env: Record<string, string | undefined>,
+  stateKey: string,
+) {
+  const resolvedStateKey = await resolveWorkflowResumeStateKey(env, stateKey);
+  const stored = await readStateJson({ env, key: resolvedStateKey });
+  if (stored && typeof stored === "object") {
+    const childStateKey = (stored as Partial<WorkflowResumeState>).childStateKey;
+    if (typeof childStateKey === "string") {
+      await deleteWorkflowResumeStateTree(env, childStateKey);
+    }
+  }
+  await cleanupApprovalIndexByStateKey({ env, stateKey: resolvedStateKey }).catch(() => {});
+  await deleteStateJson({ env, key: resolvedStateKey });
 }
 
 function alternateWorkflowResumeStateKey(stateKey: string): string | null {
@@ -1865,6 +2307,18 @@ function evaluateCondition(condition: unknown, results: Record<string, WorkflowS
   if (trimmed === "true") return true;
   if (trimmed === "false") return false;
   return evaluateConditionExpression(trimmed, results);
+}
+
+function evaluateFlowRules(
+  flow: FlowRule[] | undefined,
+  results: Record<string, WorkflowStepResult>,
+) {
+  if (!flow) return null;
+  for (const rule of flow) {
+    if ("default" in rule) return rule.default;
+    if (evaluateCondition(rule.when, results)) return rule.goto;
+  }
+  return null;
 }
 
 function isApprovalStep(approval: WorkflowStep["approval"]) {
@@ -2340,7 +2794,7 @@ function evaluateConditionExpression(
 
   function parseUnary(allowBareIdentifier: boolean): unknown {
     if (match("not")) {
-      return !Boolean(parseUnary(allowBareIdentifier));
+      return !parseUnary(allowBareIdentifier);
     }
     return parsePrimary(allowBareIdentifier);
   }

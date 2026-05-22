@@ -46,7 +46,7 @@ function splitPipes(input) {
   return parts;
 }
 
-function tokenizeCommand(input) {
+export function tokenizeCommand(input) {
   const tokens = [];
   let current = "";
   let quote = null;

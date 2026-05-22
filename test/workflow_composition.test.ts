@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 
+import { decodeResumeToken } from "../src/resume.js";
 import { loadWorkflowFile, runWorkflowFile } from "../src/workflows/file.js";
+import type { WorkflowResumePayload } from "../src/workflows/file.js";
 
 async function setupWorkflows(files: Record<string, unknown>) {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-compose-"));
@@ -33,6 +35,11 @@ async function runWorkflow(filePath: string, stateDir: string, args?: Record<str
       mode: "tool",
     },
   });
+}
+
+function asWorkflowResume(payload: unknown): WorkflowResumePayload {
+  assert.equal((payload as { kind?: string })?.kind, "workflow-file");
+  return payload as WorkflowResumePayload;
 }
 
 test("workflow step calls sub-workflow and receives output", async () => {
@@ -276,7 +283,7 @@ test("nested workflow composition works", async () => {
   assert.deepEqual(result.output, [{ middle: true, leaf: true }]);
 });
 
-test("sub-workflow approval gates are rejected in composition", async () => {
+test("sub-workflow approval gates resume through composition", async () => {
   const { stateDir, paths } = await setupWorkflows({
     "child.lobster": {
       steps: [
@@ -292,8 +299,23 @@ test("sub-workflow approval gates are rejected in composition", async () => {
     },
   });
 
-  await assert.rejects(
-    () => runWorkflow(paths["parent.lobster"], stateDir),
-    /Sub-workflow approval\/input gates are not supported in composition/,
-  );
+  const first = await runWorkflow(paths["parent.lobster"], stateDir);
+  assert.equal(first.status, "needs_approval");
+  assert.ok(first.requiresApproval?.resumeToken);
+
+  const resumed = await runWorkflowFile({
+    filePath: paths["parent.lobster"],
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env: { ...process.env, LOBSTER_STATE_DIR: stateDir },
+      mode: "tool",
+    },
+    resume: asWorkflowResume(decodeResumeToken(first.requiresApproval.resumeToken)),
+    approved: true,
+  });
+
+  assert.equal(resumed.status, "ok");
+  assert.deepEqual(resumed.output, [{ v: 1 }]);
 });
