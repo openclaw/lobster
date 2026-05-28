@@ -69,8 +69,10 @@ test("withRetry throws after max exhausted", async () => {
   assert.equal(calls, 2);
 });
 
-test("withRetry never retries abort errors", async () => {
+test("withRetry never retries external abort errors", async () => {
   let calls = 0;
+  const controller = new AbortController();
+  controller.abort();
   const abortErr = new DOMException("aborted", "AbortError");
   await assert.rejects(
     withRetry(
@@ -79,10 +81,27 @@ test("withRetry never retries abort errors", async () => {
         throw abortErr;
       },
       resolveRetryConfig({ max: 3, delay_ms: 10 }),
+      { signal: controller.signal },
     ),
     (err: any) => err.name === "AbortError",
   );
   assert.equal(calls, 1);
+});
+
+test("withRetry retries per-attempt timeout AbortErrors when external signal is not aborted", async () => {
+  let calls = 0;
+  const timeoutAbortErr = new DOMException("step timed out", "AbortError");
+  // No external signal — per-attempt timeout abort should be retriable
+  const result = await withRetry(
+    async () => {
+      calls++;
+      if (calls < 3) throw timeoutAbortErr;
+      return "recovered";
+    },
+    resolveRetryConfig({ max: 3, delay_ms: 10 }),
+  );
+  assert.equal(result, "recovered");
+  assert.equal(calls, 3);
 });
 
 test("withRetry calls onRetry callback", async () => {
