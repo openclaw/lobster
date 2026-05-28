@@ -215,6 +215,34 @@ test('step retries and succeeds after transient failure', async () => {
   assert.ok(stderrOutput.includes('[RETRY]'), 'should log retry attempts');
 });
 
+test('step with timeout_ms + retry retries on per-attempt timeout (issue #105)', async () => {
+  // Behavior proof: a step that hangs past timeout_ms on its first two attempts
+  // must be retried (per-attempt timeout produces an AbortError that should NOT
+  // bypass retry) and succeed on the third. Pre-fix, withRetry short-circuited on
+  // any AbortError, so retry.max was inert for timed-out steps and this ran once.
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-retry-'));
+  const counterFile = path.join(tmpDir, 'counter');
+  await fsp.writeFile(counterFile, '0', 'utf8');
+
+  // The counter is incremented synchronously before the hang, so each timed-out
+  // (SIGKILLed) attempt is still recorded. Attempts 1-2 hang 6s (killed by the
+  // 1500ms timeout); attempt 3 returns immediately.
+  const workflow = {
+    name: 'retry-timeout',
+    steps: [{
+      id: 'slow',
+      command: `node -e "const fs=require('fs');const c=Number(fs.readFileSync('${counterFile}','utf8'))+1;fs.writeFileSync('${counterFile}',String(c));if(c<3){setTimeout(()=>{},6000);}else{process.stdout.write(JSON.stringify({attempt:c}));}"`,
+      timeout_ms: 1500,
+      retry: { max: 3, delay_ms: 50 },
+    }],
+  };
+  const { result, stderrOutput } = await runWorkflow(workflow);
+  assert.equal(result.status, 'ok');
+  const output = result.output as any[];
+  assert.equal(output[0].attempt, 3);
+  assert.ok(stderrOutput.includes('[RETRY]'), 'should log retry attempts on timeout');
+});
+
 test('step exhausts retries and throws', async () => {
   const workflow = {
     name: 'retry-exhaust',
