@@ -225,14 +225,15 @@ test('step with timeout_ms + retry retries on per-attempt timeout (issue #105)',
   await fsp.writeFile(counterFile, '0', 'utf8');
 
   // The counter is incremented synchronously before the hang, so each timed-out
-  // (SIGKILLed) attempt is still recorded. Attempts 1-2 hang 6s (killed by the
-  // 1500ms timeout); attempt 3 returns immediately.
+  // (SIGKILLed) attempt is still recorded. Attempts 1-2 hang 8s (killed by the
+  // 3000ms timeout); attempt 3 returns immediately. The timeout leaves enough
+  // room for slow CI machines to start Node and write the counter before kill.
   const workflow = {
     name: 'retry-timeout',
     steps: [{
       id: 'slow',
       command: `node -e "const fs=require('fs');const c=Number(fs.readFileSync('${counterFile}','utf8'))+1;fs.writeFileSync('${counterFile}',String(c));if(c<3){setTimeout(()=>{},6000);}else{process.stdout.write(JSON.stringify({attempt:c}));}"`,
-      timeout_ms: 1500,
+      timeout_ms: 3000,
       retry: { max: 3, delay_ms: 50 },
     }],
   };
