@@ -18,6 +18,36 @@
 import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
+
+/**
+ * Write a file atomically (stage to a sibling temp file, fsync, then rename).
+ * `rename(2)` is atomic on a single filesystem, so a concurrent reader or a
+ * crash never observes a truncated/partial file. Plain `fsp.writeFile`
+ * truncates the target up front, leaving a corruption window on SIGKILL/OOM/
+ * power loss. Kept local to keep the SDK self-contained (matches the local
+ * `keyToPath`/`getStateDir` helpers in this module).
+ * @param {string} filePath
+ * @param {string} data
+ */
+async function writeFileAtomic(filePath, data) {
+  const dir = path.dirname(filePath);
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${randomBytes(6).toString('hex')}.tmp`);
+  let handle;
+  try {
+    handle = await fsp.open(tmpPath, 'w');
+    await handle.writeFile(data, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle?.close();
+  }
+  try {
+    await fsp.rename(tmpPath, filePath);
+  } catch (err) {
+    await fsp.rm(tmpPath, { force: true }).catch(() => {});
+    throw err;
+  }
+}
 
 /**
  * Get the state directory
@@ -116,7 +146,7 @@ export function stateSet(key) {
       const filePath = keyToPath(stateDir, key);
 
       await fsp.mkdir(stateDir, { recursive: true });
-      await fsp.writeFile(filePath, JSON.stringify(value, null, 2) + '\n', 'utf8');
+      await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + '\n');
 
       // Pass through the value
       return {
@@ -174,5 +204,5 @@ export async function writeState(key, value, ctx = {}) {
   const filePath = keyToPath(stateDir, key);
 
   await fsp.mkdir(stateDir, { recursive: true });
-  await fsp.writeFile(filePath, JSON.stringify(value, null, 2) + '\n', 'utf8');
+  await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + '\n');
 }

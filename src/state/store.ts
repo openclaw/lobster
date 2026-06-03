@@ -29,6 +29,33 @@ export function stableStringify(value) {
   });
 }
 
+/**
+ * Write a file atomically: stage to a sibling temp file, fsync, then rename
+ * over the target. `rename(2)` is atomic on a single filesystem, so a reader
+ * (or a crash) never observes a truncated/partial file — it sees either the
+ * complete old content or the complete new content. Plain `fsp.writeFile`
+ * truncates the target up front, leaving a corruption window on SIGKILL/OOM/
+ * power loss. The temp file is removed if the rename fails.
+ */
+export async function writeFileAtomic(filePath, data) {
+  const dir = path.dirname(filePath);
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${randomBytes(6).toString('hex')}.tmp`);
+  let handle;
+  try {
+    handle = await fsp.open(tmpPath, 'w');
+    await handle.writeFile(data, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle?.close();
+  }
+  try {
+    await fsp.rename(tmpPath, filePath);
+  } catch (err) {
+    await fsp.rm(tmpPath, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
 export async function readStateJson({ env, key }) {
   const stateDir = defaultStateDir(env);
   const filePath = keyToPath(stateDir, key);
@@ -47,7 +74,7 @@ export async function writeStateJson({ env, key, value }) {
   const filePath = keyToPath(stateDir, key);
 
   await fsp.mkdir(stateDir, { recursive: true });
-  await fsp.writeFile(filePath, JSON.stringify(value, null, 2) + '\n', 'utf8');
+  await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + '\n');
 }
 
 export async function deleteStateJson({ env, key }) {
