@@ -4,19 +4,19 @@ function parsePredicate(expr) {
   const [, path, op, rawValue] = m;
 
   let value = rawValue;
-  if (rawValue === 'true') value = true;
-  else if (rawValue === 'false') value = false;
-  else if (rawValue === 'null') value = null;
-  else if (!Number.isNaN(Number(rawValue)) && rawValue.trim() !== '') value = Number(rawValue);
+  if (rawValue === "true") value = true;
+  else if (rawValue === "false") value = false;
+  else if (rawValue === "null") value = null;
+  else if (!Number.isNaN(Number(rawValue)) && rawValue.trim() !== "") value = Number(rawValue);
 
-  return { path, op: op === '=' ? '==' : op, value };
+  return { path, op: op === "=" ? "==" : op, value };
 }
 
 function getPath(obj, path) {
-  const parts = path.split('.');
+  const parts = path.split(".");
   let cur = obj;
   for (const p of parts) {
-    if (cur === null || typeof cur !== 'object') return undefined;
+    if (cur === null || typeof cur !== "object") return undefined;
     cur = cur[p];
   }
   return cur;
@@ -24,30 +24,37 @@ function getPath(obj, path) {
 
 function compare(left, op, right) {
   switch (op) {
-    case '==': return left == right; // intentional loose equality for convenience
-    case '!=': return left != right;
-    case '<': return left < right;
-    case '<=': return left <= right;
-    case '>': return left > right;
-    case '>=': return left >= right;
-    default: throw new Error(`Unsupported operator: ${op}`);
+    case "==":
+      return left == right; // intentional loose equality for convenience
+    case "!=":
+      return left != right;
+    case "<":
+      return left < right;
+    case "<=":
+      return left <= right;
+    case ">":
+      return left > right;
+    case ">=":
+      return left >= right;
+    default:
+      throw new Error(`Unsupported operator: ${op}`);
   }
 }
 
 export const whereCommand = {
-  name: 'where',
+  name: "where",
   meta: {
-    description: 'Filter objects by a simple predicate',
+    description: "Filter objects by a simple predicate",
     argsSchema: {
-      type: 'object',
+      type: "object",
       properties: {
         _: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'First positional arg is an expression like field=value or minutes>=30',
+          type: "array",
+          items: { type: "string" },
+          description: "First positional arg is an expression like field=value or minutes>=30",
         },
       },
-      required: ['_'],
+      required: ["_"],
     },
     sideEffects: [],
   },
@@ -56,7 +63,7 @@ export const whereCommand = {
   },
   async run({ input, args }) {
     const expr = args._[0];
-    if (!expr) throw new Error('where requires an expression (e.g. field=value)');
+    if (!expr) throw new Error("where requires an expression (e.g. field=value)");
     const pred = parsePredicate(expr);
 
     return {

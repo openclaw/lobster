@@ -1,6 +1,6 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { createDefaultRegistry } from '../src/commands/registry.js';
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createDefaultRegistry } from "../src/commands/registry.js";
 
 function streamOf(items) {
   return (async function* () {
@@ -8,9 +8,9 @@ function streamOf(items) {
   })();
 }
 
-test('exec --stdin jsonl feeds pipeline input to subprocess', async () => {
+test("exec --stdin jsonl feeds pipeline input to subprocess", async () => {
   const registry = createDefaultRegistry();
-  const cmd = registry.get('exec');
+  const cmd = registry.get("exec");
 
   const nodeScript = [
     "let d='';",
@@ -19,13 +19,13 @@ test('exec --stdin jsonl feeds pipeline input to subprocess', async () => {
     "  const lines=d.trim().split('\\n').filter(Boolean);",
     "  console.log(JSON.stringify(lines));",
     "});",
-  ].join('');
+  ].join("");
 
   const result = await cmd.run({
     input: streamOf([{ a: 1 }, { a: 2 }]),
     args: {
-      _: ['node', '-e', nodeScript],
-      stdin: 'jsonl',
+      _: ["node", "-e", nodeScript],
+      stdin: "jsonl",
       json: true,
     },
     ctx: {
@@ -34,7 +34,7 @@ test('exec --stdin jsonl feeds pipeline input to subprocess', async () => {
       stderr: process.stderr,
       env: process.env,
       registry,
-      mode: 'human',
+      mode: "human",
       render: { json() {}, lines() {} },
     },
   });

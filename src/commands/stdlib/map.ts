@@ -1,6 +1,6 @@
 function getByPath(obj: any, path: string): any {
-  if (path === '.' || path === 'this') return obj;
-  const parts = path.split('.').filter(Boolean);
+  if (path === "." || path === "this") return obj;
+  const parts = path.split(".").filter(Boolean);
   let cur: any = obj;
   for (const p of parts) {
     if (cur == null) return undefined;
@@ -11,10 +11,10 @@ function getByPath(obj: any, path: string): any {
 
 function renderTemplate(tpl: string, ctx: any): string {
   return tpl.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, expr) => {
-    const key = String(expr ?? '').trim();
+    const key = String(expr ?? "").trim();
     const val = getByPath(ctx, key);
-    if (val === undefined || val === null) return '';
-    if (typeof val === 'string') return val;
+    if (val === undefined || val === null) return "";
+    if (typeof val === "string") return val;
     return JSON.stringify(val);
   });
 }
@@ -23,7 +23,7 @@ function parseAssignments(tokens: any[]): Array<{ key: string; value: string }> 
   const out: Array<{ key: string; value: string }> = [];
   for (const tok of tokens ?? []) {
     const s = String(tok);
-    const idx = s.indexOf('=');
+    const idx = s.indexOf("=");
     if (idx === -1) continue;
     const key = s.slice(0, idx).trim();
     const value = s.slice(idx + 1);
@@ -34,15 +34,19 @@ function parseAssignments(tokens: any[]): Array<{ key: string; value: string }> 
 }
 
 export const mapCommand = {
-  name: 'map',
+  name: "map",
   meta: {
-    description: 'Transform items (wrap/unwrap/add fields)',
+    description: "Transform items (wrap/unwrap/add fields)",
     argsSchema: {
-      type: 'object',
+      type: "object",
       properties: {
-        wrap: { type: 'string', description: 'Wrap each item as {wrap: item}' },
-        unwrap: { type: 'string', description: 'Unwrap a field (yield item[unwrap])' },
-        _: { type: 'array', items: { type: 'string' }, description: 'Optional assignments like key=value (value supports {{path}})' },
+        wrap: { type: "string", description: "Wrap each item as {wrap: item}" },
+        unwrap: { type: "string", description: "Unwrap a field (yield item[unwrap])" },
+        _: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional assignments like key=value (value supports {{path}})",
+        },
       },
       required: [],
     },
@@ -61,11 +65,11 @@ export const mapCommand = {
     );
   },
   async run({ input, args }: any) {
-    const wrap = typeof args.wrap === 'string' ? args.wrap : undefined;
-    const unwrap = typeof args.unwrap === 'string' ? args.unwrap : undefined;
+    const wrap = typeof args.wrap === "string" ? args.wrap : undefined;
+    const unwrap = typeof args.unwrap === "string" ? args.unwrap : undefined;
     const assignments = parseAssignments(Array.isArray(args._) ? args._ : []);
 
-    if (wrap && unwrap) throw new Error('map cannot use both --wrap and --unwrap');
+    if (wrap && unwrap) throw new Error("map cannot use both --wrap and --unwrap");
 
     return {
       output: (async function* () {
@@ -73,7 +77,7 @@ export const mapCommand = {
           let cur: any = item;
 
           if (unwrap) {
-            if (cur && typeof cur === 'object') cur = cur[unwrap];
+            if (cur && typeof cur === "object") cur = cur[unwrap];
             else cur = undefined;
             yield cur;
             continue;
@@ -84,7 +88,7 @@ export const mapCommand = {
           }
 
           if (assignments.length > 0) {
-            if (cur === null || typeof cur !== 'object' || Array.isArray(cur)) {
+            if (cur === null || typeof cur !== "object" || Array.isArray(cur)) {
               // If current is not an object, turn it into one so we can attach fields.
               cur = { value: cur };
             }

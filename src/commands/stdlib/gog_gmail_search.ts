@@ -41,7 +41,7 @@ export const gogGmailSearchCommand = {
       },
       required: [],
     },
-    sideEffects: ['reads_email'],
+    sideEffects: ["reads_email"],
   },
   help() {
     return (

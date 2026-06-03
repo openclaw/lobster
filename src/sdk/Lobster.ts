@@ -1,6 +1,6 @@
-import { runPipelineInternal } from './runtime.js';
-import { encodeToken, decodeToken } from './token.js';
-import { sharedAjv } from '../validation.js';
+import { runPipelineInternal } from "./runtime.js";
+import { encodeToken, decodeToken } from "./token.js";
+import { compileCached } from "../validation.js";
 
 type SdkResumePayload = {
   protocolVersion: 1;
@@ -49,8 +49,8 @@ export class Lobster {
   }
 
   pipe(stage) {
-    if (typeof stage !== 'function' && typeof stage?.run !== 'function') {
-      throw new Error('Stage must be a function or have a run() method');
+    if (typeof stage !== "function" && typeof stage?.run !== "function") {
+      throw new Error("Stage must be a function or have a run() method");
     }
     this.#stages.push(stage);
     return this;
@@ -69,7 +69,7 @@ export class Lobster {
     const ctx = {
       env: this.#options.env,
       stateDir: this.#options.stateDir,
-      mode: 'sdk',
+      mode: "sdk",
     };
 
     try {
@@ -79,7 +79,11 @@ export class Lobster {
         input: initialInput,
       });
 
-      if (result.halted && result.items.length === 1 && result.items[0]?.type === 'approval_request') {
+      if (
+        result.halted &&
+        result.items.length === 1 &&
+        result.items[0]?.type === "approval_request"
+      ) {
         const approval = result.items[0];
         const resumeToken = encodeToken({
           protocolVersion: 1,
@@ -92,7 +96,7 @@ export class Lobster {
 
         return {
           ok: true,
-          status: 'needs_approval',
+          status: "needs_approval",
           output: [],
           requiresApproval: {
             prompt: approval.prompt,
@@ -103,7 +107,7 @@ export class Lobster {
         };
       }
 
-      if (result.halted && result.items.length === 1 && result.items[0]?.type === 'input_request') {
+      if (result.halted && result.items.length === 1 && result.items[0]?.type === "input_request") {
         const input = result.items[0];
         const resumeToken = encodeToken({
           protocolVersion: 1,
@@ -117,7 +121,7 @@ export class Lobster {
 
         return {
           ok: true,
-          status: 'needs_input',
+          status: "needs_input",
           output: [],
           requiresApproval: null,
           requiresInput: {
@@ -132,7 +136,7 @@ export class Lobster {
 
       return {
         ok: true,
-        status: 'ok',
+        status: "ok",
         output: result.items,
         requiresApproval: null,
         requiresInput: null,
@@ -140,12 +144,12 @@ export class Lobster {
     } catch (err) {
       return {
         ok: false,
-        status: 'error',
+        status: "error",
         output: [],
         requiresApproval: null,
         requiresInput: null,
         error: {
-          type: 'runtime_error',
+          type: "runtime_error",
           message: err?.message ?? String(err),
         },
       };
@@ -157,12 +161,15 @@ export class Lobster {
     options: { approved?: boolean; response?: unknown; cancel?: boolean } = {},
   ) {
     const { approved, response, cancel } = options;
-    const intentCount = Number(typeof approved === 'boolean') + Number(response !== undefined) + Number(cancel === true);
+    const intentCount =
+      Number(typeof approved === "boolean") +
+      Number(response !== undefined) +
+      Number(cancel === true);
     if (intentCount > 1) {
-      throw new Error('resume accepts only one of approved, response, or cancel');
+      throw new Error("resume accepts only one of approved, response, or cancel");
     }
     if (intentCount === 0) {
-      throw new Error('resume requires approved, response, or cancel');
+      throw new Error("resume requires approved, response, or cancel");
     }
 
     const payload = decodeSdkResumePayload(token);
@@ -170,7 +177,7 @@ export class Lobster {
     if (cancel === true) {
       return {
         ok: true,
-        status: 'cancelled',
+        status: "cancelled",
         output: [],
         requiresApproval: null,
         requiresInput: null,
@@ -180,22 +187,22 @@ export class Lobster {
     const expectsInput = payload.inputSchema !== undefined;
     if (expectsInput) {
       if (approved !== undefined) {
-        throw new Error('resume token expects an input response, not approved');
+        throw new Error("resume token expects an input response, not approved");
       }
       if (response === undefined) {
-        throw new Error('resume token expects response');
+        throw new Error("resume token expects response");
       }
     } else {
       if (response !== undefined) {
-        throw new Error('resume token expects approved=true|false, not response');
+        throw new Error("resume token expects approved=true|false, not response");
       }
-      if (typeof approved !== 'boolean') {
-        throw new Error('resume token expects approved=true|false');
+      if (typeof approved !== "boolean") {
+        throw new Error("resume token expects approved=true|false");
       }
       if (approved === false) {
         return {
           ok: true,
-          status: 'cancelled',
+          status: "cancelled",
           output: [],
           requiresApproval: null,
           requiresInput: null,
@@ -208,18 +215,20 @@ export class Lobster {
     if (response !== undefined) {
       const schema = payload.inputSchema;
       if (schema === undefined) {
-        throw new Error('resume token does not support input responses');
+        throw new Error("resume token does not support input responses");
       }
       let validator;
       try {
-        validator = sharedAjv.compile(schema as any);
+        validator = compileCached(schema as any);
       } catch {
-        throw new Error('resume token input schema is invalid');
+        throw new Error("resume token input schema is invalid");
       }
       const ok = validator(response);
       if (!ok) {
         const first = validator.errors?.[0];
-        throw new Error(`response does not match schema at ${first?.instancePath || '/'}: ${first?.message || 'invalid'}`);
+        throw new Error(
+          `response does not match schema at ${first?.instancePath || "/"}: ${first?.message || "invalid"}`,
+        );
       }
       resumeItems = [response];
     }
@@ -228,7 +237,7 @@ export class Lobster {
     const ctx = {
       env: this.#options.env,
       stateDir: this.#options.stateDir,
-      mode: 'sdk',
+      mode: "sdk",
     };
 
     try {
@@ -238,7 +247,11 @@ export class Lobster {
         input: resumeItems,
       });
 
-      if (result.halted && result.items.length === 1 && result.items[0]?.type === 'approval_request') {
+      if (
+        result.halted &&
+        result.items.length === 1 &&
+        result.items[0]?.type === "approval_request"
+      ) {
         const approval = result.items[0];
         const resumeToken = encodeToken({
           protocolVersion: 1,
@@ -251,7 +264,7 @@ export class Lobster {
 
         return {
           ok: true,
-          status: 'needs_approval',
+          status: "needs_approval",
           output: [],
           requiresApproval: {
             prompt: approval.prompt,
@@ -262,7 +275,7 @@ export class Lobster {
         };
       }
 
-      if (result.halted && result.items.length === 1 && result.items[0]?.type === 'input_request') {
+      if (result.halted && result.items.length === 1 && result.items[0]?.type === "input_request") {
         const input = result.items[0];
         const resumeToken = encodeToken({
           protocolVersion: 1,
@@ -276,7 +289,7 @@ export class Lobster {
 
         return {
           ok: true,
-          status: 'needs_input',
+          status: "needs_input",
           output: [],
           requiresApproval: null,
           requiresInput: {
@@ -291,7 +304,7 @@ export class Lobster {
 
       return {
         ok: true,
-        status: 'ok',
+        status: "ok",
         output: result.items,
         requiresApproval: null,
         requiresInput: null,
@@ -299,12 +312,12 @@ export class Lobster {
     } catch (err) {
       return {
         ok: false,
-        status: 'error',
+        status: "error",
         output: [],
         requiresApproval: null,
         requiresInput: null,
         error: {
-          type: 'runtime_error',
+          type: "runtime_error",
           message: err?.message ?? String(err),
         },
       };
@@ -321,18 +334,22 @@ export class Lobster {
 
 function decodeSdkResumePayload(token: string): SdkResumePayload {
   const payload = decodeToken(token);
-  if (!payload || typeof payload !== 'object') {
-    throw new Error('Invalid token');
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Invalid token");
   }
   const data = payload as Record<string, unknown>;
   if (data.protocolVersion !== 1 || data.v !== 1) {
-    throw new Error('Invalid token');
+    throw new Error("Invalid token");
   }
-  if (typeof data.resumeAtIndex !== 'number' || !Number.isInteger(data.resumeAtIndex) || data.resumeAtIndex < 0) {
-    throw new Error('Invalid token');
+  if (
+    typeof data.resumeAtIndex !== "number" ||
+    !Number.isInteger(data.resumeAtIndex) ||
+    data.resumeAtIndex < 0
+  ) {
+    throw new Error("Invalid token");
   }
   if (data.items !== undefined && !Array.isArray(data.items)) {
-    throw new Error('Invalid token');
+    throw new Error("Invalid token");
   }
   return data as unknown as SdkResumePayload;
 }

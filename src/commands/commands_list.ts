@@ -1,13 +1,15 @@
-import type { CommandMeta, LobsterCommand } from './types.js';
+import type { CommandMeta, LobsterCommand } from "./types.js";
 
 function parseDescriptionFromHelp(helpText: string): string {
-  const firstLine = helpText.split('\n').find((l) => l.trim().length > 0) ?? '';
+  const firstLine = helpText.split("\n").find((l) => l.trim().length > 0) ?? "";
   // Expected pattern: "name — description" but fall back to the line as-is.
-  return firstLine.includes('—') ? firstLine.split('—').slice(1).join('—').trim() : firstLine.trim();
+  return firstLine.includes("—")
+    ? firstLine.split("—").slice(1).join("—").trim()
+    : firstLine.trim();
 }
 
 export const commandsListCommand: LobsterCommand = {
-  name: 'commands.list',
+  name: "commands.list",
   help() {
     return (
       `commands.list — list available Lobster pipeline commands\n\n` +
@@ -19,8 +21,8 @@ export const commandsListCommand: LobsterCommand = {
     );
   },
   meta: {
-    description: 'List available Lobster pipeline commands',
-    argsSchema: { type: 'object', properties: {}, required: [] },
+    description: "List available Lobster pipeline commands",
+    argsSchema: { type: "object", properties: {}, required: [] },
     sideEffects: [],
   } satisfies CommandMeta,
   async run({ input, ctx }) {
@@ -32,7 +34,7 @@ export const commandsListCommand: LobsterCommand = {
     const names = ctx.registry.list();
     const output = names.map((name) => {
       const cmd = ctx.registry.get(name) as LobsterCommand | undefined;
-      const help = typeof cmd?.help === 'function' ? String(cmd.help()) : '';
+      const help = typeof cmd?.help === "function" ? String(cmd.help()) : "";
       const description = cmd?.meta?.description ?? parseDescriptionFromHelp(help);
 
       return {

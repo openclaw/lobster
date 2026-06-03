@@ -1,6 +1,6 @@
 function getByPath(obj: any, path: string): any {
   if (!path) return undefined;
-  const parts = path.split('.').filter(Boolean);
+  const parts = path.split(".").filter(Boolean);
   let cur: any = obj;
   for (const p of parts) {
     if (cur == null) return undefined;
@@ -18,7 +18,7 @@ function defaultCompare(a: any, b: any): number {
   if (bU) return -1;
 
   // number compare if both numbers
-  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  if (typeof a === "number" && typeof b === "number") return a - b;
 
   // Deterministic lexical compare independent of process locale.
   const aStr = String(a);
@@ -29,15 +29,15 @@ function defaultCompare(a: any, b: any): number {
 }
 
 export const sortCommand = {
-  name: 'sort',
+  name: "sort",
   meta: {
-    description: 'Sort items (stable) by a key or by stringified value',
+    description: "Sort items (stable) by a key or by stringified value",
     argsSchema: {
-      type: 'object',
+      type: "object",
       properties: {
-        key: { type: 'string', description: 'Dot-path key to sort by (e.g. updatedAt, pr.number)' },
-        desc: { type: 'boolean', description: 'Sort descending' },
-        _: { type: 'array', items: { type: 'string' } },
+        key: { type: "string", description: "Dot-path key to sort by (e.g. updatedAt, pr.number)" },
+        desc: { type: "boolean", description: "Sort descending" },
+        _: { type: "array", items: { type: "string" } },
       },
       required: [],
     },
@@ -56,7 +56,7 @@ export const sortCommand = {
     );
   },
   async run({ input, args }: any) {
-    const key = typeof args.key === 'string' ? args.key : undefined;
+    const key = typeof args.key === "string" ? args.key : undefined;
     const desc = Boolean(args.desc);
 
     const items: any[] = [];

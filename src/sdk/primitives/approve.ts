@@ -19,11 +19,11 @@
  * @returns {Object} Stage object with run method
  */
 export function approve(options: any = {}) {
-  const prompt = options.prompt ?? 'Approve?';
+  const prompt = options.prompt ?? "Approve?";
   const preview = options.preview !== false;
 
   return {
-    type: 'approve',
+    type: "approve",
     prompt,
 
     async run({ input, ctx: _ctx }) {
@@ -38,7 +38,7 @@ export function approve(options: any = {}) {
         halt: true,
         output: (async function* () {
           yield {
-            type: 'approval_request',
+            type: "approval_request",
             prompt,
             items: preview ? items : [],
             itemCount: items.length,

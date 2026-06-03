@@ -1,19 +1,16 @@
-export function readLineFromStream(
-  stream: NodeJS.ReadableStream,
-  opts?: { timeoutMs?: number },
-) {
+export function readLineFromStream(stream: NodeJS.ReadableStream, opts?: { timeoutMs?: number }) {
   const timeoutMs = Number(opts?.timeoutMs ?? 0);
 
   return new Promise<string>((resolve, reject) => {
     let settled = false;
-    let buf = '';
+    let buf = "";
     let timer: NodeJS.Timeout | null = null;
 
     const cleanup = () => {
-      stream.off('data', onData);
-      stream.off('end', onEnd);
-      stream.off('close', onClose);
-      stream.off('error', onError);
+      stream.off("data", onData);
+      stream.off("end", onEnd);
+      stream.off("close", onClose);
+      stream.off("error", onError);
       if (timer) clearTimeout(timer);
     };
 
@@ -32,8 +29,8 @@ export function readLineFromStream(
     };
 
     const onData = (chunk: Buffer | string) => {
-      buf += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-      const idx = buf.indexOf('\n');
+      buf += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      const idx = buf.indexOf("\n");
       if (idx !== -1) {
         finish(buf.slice(0, idx));
       }
@@ -49,9 +46,9 @@ export function readLineFromStream(
       }, timeoutMs);
     }
 
-    stream.on('data', onData);
-    stream.on('end', onEnd);
-    stream.on('close', onClose);
-    stream.on('error', onError);
+    stream.on("data", onData);
+    stream.on("end", onEnd);
+    stream.on("close", onClose);
+    stream.on("error", onError);
   });
 }

@@ -1,27 +1,29 @@
-import { workflowRegistry } from '../../workflows/registry.js';
-import { runGithubPrMonitorWorkflow, runGithubPrMonitorNotifyWorkflow } from '../../workflows/github_pr_monitor.js';
+import { workflowRegistry } from "../../workflows/registry.js";
+import {
+  runGithubPrMonitorWorkflow,
+  runGithubPrMonitorNotifyWorkflow,
+} from "../../workflows/github_pr_monitor.js";
 
 const runners = {
-  'github.pr.monitor': runGithubPrMonitorWorkflow,
-  'github.pr.monitor.notify': runGithubPrMonitorNotifyWorkflow,
+  "github.pr.monitor": runGithubPrMonitorWorkflow,
+  "github.pr.monitor.notify": runGithubPrMonitorNotifyWorkflow,
 };
 
 // Recipe runners - adapt SDK recipes to workflow runner interface
 const recipeRunners = {};
 
-
 export const workflowsRunCommand = {
-  name: 'workflows.run',
+  name: "workflows.run",
   meta: {
-    description: 'Run a named Lobster workflow',
+    description: "Run a named Lobster workflow",
     argsSchema: {
-      type: 'object',
+      type: "object",
       properties: {
-        name: { type: 'string', description: 'Workflow name' },
-        'args-json': { type: 'string', description: 'JSON string of workflow args' },
-        _: { type: 'array', items: { type: 'string' } },
+        name: { type: "string", description: "Workflow name" },
+        "args-json": { type: "string", description: "JSON string of workflow args" },
+        _: { type: "array", items: { type: "string" } },
       },
-      required: ['name'],
+      required: ["name"],
     },
     sideEffects: [],
   },
@@ -35,17 +37,17 @@ export const workflowsRunCommand = {
     }
 
     const name = args.name ?? args._[0];
-    if (!name) throw new Error('workflows.run requires --name');
+    if (!name) throw new Error("workflows.run requires --name");
 
     // Check for recipe-based workflow first
     const recipeRunner = recipeRunners[name];
     if (recipeRunner) {
       let workflowArgs = {};
-      if (args['args-json']) {
+      if (args["args-json"]) {
         try {
-          workflowArgs = JSON.parse(String(args['args-json']));
+          workflowArgs = JSON.parse(String(args["args-json"]));
         } catch {
-          throw new Error('workflows.run --args-json must be valid JSON');
+          throw new Error("workflows.run --args-json must be valid JSON");
         }
       }
       const result = await recipeRunner({ args: workflowArgs, ctx });
@@ -60,11 +62,11 @@ export const workflowsRunCommand = {
     if (!runner) throw new Error(`Workflow runner not implemented: ${name}`);
 
     let workflowArgs = {};
-    if (args['args-json']) {
+    if (args["args-json"]) {
       try {
-        workflowArgs = JSON.parse(String(args['args-json']));
+        workflowArgs = JSON.parse(String(args["args-json"]));
       } catch {
-        throw new Error('workflows.run --args-json must be valid JSON');
+        throw new Error("workflows.run --args-json must be valid JSON");
       }
     }
 

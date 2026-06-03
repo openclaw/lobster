@@ -1,17 +1,17 @@
 function isWhitespace(ch) {
-  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
 }
 
 function splitPipes(input) {
   const parts = [];
-  let current = '';
+  let current = "";
   let quote = null;
 
   for (let i = 0; i < input.length; i++) {
     const ch = input[i];
 
     if (quote) {
-      if (ch === '\\') {
+      if (ch === "\\") {
         const next = input[i + 1];
         if (next) {
           current += ch + next;
@@ -32,28 +32,28 @@ function splitPipes(input) {
       continue;
     }
 
-    if (ch === '|') {
+    if (ch === "|") {
       parts.push(current.trim());
-      current = '';
+      current = "";
       continue;
     }
 
     current += ch;
   }
 
-  if (quote) throw new Error('Unclosed quote');
+  if (quote) throw new Error("Unclosed quote");
   if (current.trim().length > 0) parts.push(current.trim());
   return parts;
 }
 
 function tokenizeCommand(input) {
   const tokens = [];
-  let current = '';
+  let current = "";
   let quote = null;
 
   const push = () => {
     if (current.length > 0) tokens.push(current);
-    current = '';
+    current = "";
   };
 
   for (let i = 0; i < input.length; i++) {
@@ -61,7 +61,7 @@ function tokenizeCommand(input) {
 
     if (quote) {
       if (quote === "'") {
-        if (ch === '\\' && input[i + 1] === quote) {
+        if (ch === "\\" && input[i + 1] === quote) {
           current += quote;
           i++;
           continue;
@@ -76,14 +76,14 @@ function tokenizeCommand(input) {
 
       // Double-quoted mode: preserve unknown escapes (\n, \t, etc) while
       // unescaping only shell-like quote/backslash escapes.
-      if (ch === '\\') {
+      if (ch === "\\") {
         const next = input[i + 1];
-        if (next === '"' || next === '\\' || next === '$' || next === '`') {
+        if (next === '"' || next === "\\" || next === "$" || next === "`") {
           current += next;
           i++;
           continue;
         }
-        if (next === '\n') {
+        if (next === "\n") {
           i++;
           continue;
         }
@@ -113,7 +113,7 @@ function tokenizeCommand(input) {
     current += ch;
   }
 
-  if (quote) throw new Error('Unclosed quote');
+  if (quote) throw new Error("Unclosed quote");
   push();
   return tokens;
 }
@@ -124,8 +124,8 @@ function parseArgs(tokens) {
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
 
-    if (tok.startsWith('--')) {
-      const eq = tok.indexOf('=');
+    if (tok.startsWith("--")) {
+      const eq = tok.indexOf("=");
       if (eq !== -1) {
         const key = tok.slice(2, eq);
         const value = tok.slice(eq + 1);
@@ -135,7 +135,7 @@ function parseArgs(tokens) {
 
       const key = tok.slice(2);
       const next = tokens[i + 1];
-      if (!next || next.startsWith('--')) {
+      if (!next || next.startsWith("--")) {
         args[key] = true;
         continue;
       }
@@ -152,11 +152,11 @@ function parseArgs(tokens) {
 
 export function parsePipeline(input) {
   const stages = splitPipes(input);
-  if (stages.length === 0) throw new Error('Empty pipeline');
+  if (stages.length === 0) throw new Error("Empty pipeline");
 
   return stages.map((stage) => {
     const tokens = tokenizeCommand(stage);
-    if (tokens.length === 0) throw new Error('Empty command stage');
+    if (tokens.length === 0) throw new Error("Empty command stage");
     const name = tokens[0];
     const args = parseArgs(tokens.slice(1));
     return { name, args, raw: stage };

@@ -178,7 +178,9 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
     })();
 
     const res1 = await runPipeline({
-      pipeline: [{ name: "email.triage", args: { llm: true, model: "claude-test", limit: 20 }, raw: "" }],
+      pipeline: [
+        { name: "email.triage", args: { llm: true, model: "claude-test", limit: 20 }, raw: "" },
+      ],
       registry,
       input: input1,
       stdin: process.stdin,

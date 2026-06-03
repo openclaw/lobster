@@ -10,7 +10,7 @@
  *   .pipe(pr => console.log(pr.state));
  */
 
-import { spawn } from 'node:child_process';
+import { spawn } from "node:child_process";
 
 /**
  * Run gh command
@@ -20,30 +20,34 @@ import { spawn } from 'node:child_process';
  */
 function runGh(argv, { env, cwd }) {
   return new Promise<any>((resolve, reject) => {
-    const child = spawn('gh', argv, {
+    const child = spawn("gh", argv, {
       env,
       cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ["ignore", "pipe", "pipe"],
     });
 
-    let stdout = '';
-    let stderr = '';
+    let stdout = "";
+    let stderr = "";
 
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
 
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
+    child.stdout.on("data", (d) => {
+      stdout += d;
+    });
+    child.stderr.on("data", (d) => {
+      stderr += d;
+    });
 
-    child.on('error', (err: any) => {
-      if (err?.code === 'ENOENT') {
-        reject(new Error('gh not found on PATH (install GitHub CLI)'));
+    child.on("error", (err: any) => {
+      if (err?.code === "ENOENT") {
+        reject(new Error("gh not found on PATH (install GitHub CLI)"));
         return;
       }
       reject(err);
     });
 
-    child.on('close', (code) => {
+    child.on("close", (code) => {
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
@@ -65,16 +69,24 @@ function runGh(argv, { env, cwd }) {
 export function ghPrView(options) {
   const { repo, pr } = options;
   const fields = options.fields ?? [
-    'number', 'title', 'url', 'state', 'isDraft',
-    'mergeable', 'reviewDecision', 'author',
-    'baseRefName', 'headRefName', 'updatedAt',
+    "number",
+    "title",
+    "url",
+    "state",
+    "isDraft",
+    "mergeable",
+    "reviewDecision",
+    "author",
+    "baseRefName",
+    "headRefName",
+    "updatedAt",
   ];
 
-  if (!repo) throw new Error('ghPrView requires repo');
-  if (!pr) throw new Error('ghPrView requires pr');
+  if (!repo) throw new Error("ghPrView requires repo");
+  if (!pr) throw new Error("ghPrView requires pr");
 
   return {
-    type: 'github.pr.view',
+    type: "github.pr.view",
     repo,
     pr,
 
@@ -84,12 +96,7 @@ export function ghPrView(options) {
         // no-op
       }
 
-      const argv = [
-        'pr', 'view',
-        String(pr),
-        '--repo', String(repo),
-        '--json', fields.join(','),
-      ];
+      const argv = ["pr", "view", String(pr), "--repo", String(repo), "--json", fields.join(",")];
 
       const { stdout } = (await runGh(argv, { env: ctx.env, cwd: process.cwd() })) as any;
 
@@ -97,7 +104,7 @@ export function ghPrView(options) {
       try {
         parsed = JSON.parse(stdout.trim());
       } catch {
-        throw new Error('gh returned non-JSON output');
+        throw new Error("gh returned non-JSON output");
       }
 
       return {

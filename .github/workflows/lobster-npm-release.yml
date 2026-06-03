@@ -359,17 +359,21 @@ jobs:
           NODE
 
       - name: Ensure version is not already published
+        id: published_version
         run: |
           set -euo pipefail
           PACKAGE_NAME="$(node -p "require('./package.json').name")"
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
 
           if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
-            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is already published on npm."
-            exit 1
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is already published on npm; skipping publish."
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "already_published=false" >> "$GITHUB_OUTPUT"
 
       - name: Verify prepared tarball provenance
+        if: ${{ steps.published_version.outputs.already_published != 'true' }}
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_NPM_DIST_TAG: ${{ inputs.npm_dist_tag }}
@@ -415,6 +419,7 @@ jobs:
           fi
 
       - name: Resolve publish tarball
+        if: ${{ steps.published_version.outputs.already_published != 'true' }}
         id: publish_tarball
         run: |
           set -euo pipefail
@@ -427,6 +432,7 @@ jobs:
           echo "path=$TARBALL_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Publish
+        if: ${{ steps.published_version.outputs.already_published != 'true' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RELEASE_NPM_DIST_TAG: ${{ inputs.npm_dist_tag }}

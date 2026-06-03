@@ -1,12 +1,29 @@
 {
   "name": "@clawdbot/lobster",
-  "version": "2026.4.6",
+  "version": "2026.5.22",
   "description": "Workflow runtime for AI agents - deterministic pipelines with approval gates",
-  "type": "module",
+  "keywords": [
+    "ai-agent",
+    "approval",
+    "automation",
+    "lobster",
+    "openclaw",
+    "pipeline",
+    "workflow"
+  ],
+  "homepage": "https://github.com/openclaw/lobster#readme",
+  "bugs": {
+    "url": "https://github.com/openclaw/lobster/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openclaw/lobster.git"
+  },
   "bin": {
+    "clawd.invoke": "bin/clawd.invoke.js",
     "lobster": "bin/lobster.js",
-    "openclaw.invoke": "bin/openclaw.invoke.js",
-    "clawd.invoke": "bin/clawd.invoke.js"
+    "openclaw.invoke": "bin/openclaw.invoke.js"
   },
   "files": [
     "bin",
@@ -15,50 +32,44 @@
     "LICENSE",
     "VISION.md"
   ],
+  "type": "module",
+  "main": "./dist/src/sdk/index.js",
   "exports": {
     ".": "./dist/src/sdk/index.js",
     "./sdk": "./dist/src/sdk/index.js",
     "./core": "./dist/src/core/index.js",
     "./recipes/github": "./dist/src/recipes/github/index.js"
   },
-  "main": "./dist/src/sdk/index.js",
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "pnpm clean && pnpm exec tsc -p tsconfig.json",
+    "build": "pnpm clean && tsgo -p tsconfig.json",
     "prepack": "pnpm build",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "oxlint --tsconfig tsconfig.json src test",
-    "fmt": "oxlint --tsconfig tsconfig.json --fix src test",
-    "test": "pnpm build && node --test dist/test/*.test.js"
+    "typecheck": "tsgo -p tsconfig.json --noEmit",
+    "format": "oxfmt --write package.json tsconfig.json src test",
+    "format:check": "oxfmt --check package.json tsconfig.json src test",
+    "lint": "pnpm format:check && oxlint --tsconfig tsconfig.json src test",
+    "fmt": "pnpm format",
+    "test": "pnpm build && node --test dist/test/*.test.js",
+    "check:changed": "pnpm run test",
+    "test:changed": "pnpm run test",
+    "crabbox:hydrate": "crabbox actions hydrate",
+    "crabbox:run": "crabbox run",
+    "crabbox:stop": "crabbox stop",
+    "crabbox:warmup": "crabbox warmup"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "yaml": "^2.8.4"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "oxlint": "^0.15.0",
-    "typescript": "^5.7.0"
+    "@types/node": "^25.6.0",
+    "@typescript/native-preview": "7.0.0-dev.20260503.1",
+    "oxfmt": "^0.47.0",
+    "oxlint": "^1.62.0",
+    "oxlint-tsgolint": "^0.22.1",
+    "typescript": "^6.0.3"
   },
   "engines": {
     "node": ">=20"
-  },
-  "keywords": [
-    "workflow",
-    "automation",
-    "ai-agent",
-    "approval",
-    "pipeline",
-    "lobster",
-    "openclaw"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/openclaw/lobster.git"
-  },
-  "bugs": {
-    "url": "https://github.com/openclaw/lobster/issues"
-  },
-  "homepage": "https://github.com/openclaw/lobster#readme",
-  "license": "MIT",
-  "dependencies": {
-    "ajv": "^8.20.0",
-    "yaml": "^2.8.3"
   }
 }

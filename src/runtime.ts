@@ -1,4 +1,4 @@
-import { createJsonRenderer } from './renderers/json.js';
+import { createJsonRenderer } from "./renderers/json.js";
 
 export async function runPipeline({
   pipeline,
@@ -7,7 +7,7 @@ export async function runPipeline({
   stdout,
   stderr,
   env,
-  mode = 'human',
+  mode = "human",
   input,
   cwd = undefined,
   llmAdapters = undefined,
@@ -88,7 +88,7 @@ function dryRunPipeline({
   stderr: any;
 }) {
   const lines: string[] = [];
-  lines.push(`[DRY RUN] Pipeline (${pipeline.length} stage${pipeline.length !== 1 ? 's' : ''}):`);
+  lines.push(`[DRY RUN] Pipeline (${pipeline.length} stage${pipeline.length !== 1 ? "s" : ""}):`);
 
   for (let idx = 0; idx < pipeline.length; idx++) {
     const stage = pipeline[idx];
@@ -96,13 +96,13 @@ function dryRunPipeline({
     if (!command) {
       throw new Error(`Unknown command: ${stage.name}`);
     }
-    const formattedArgs = stage.args ? formatStageArgs(stage.args) : '';
-    const argsStr = formattedArgs ? `  args: ${formattedArgs}` : '';
+    const formattedArgs = stage.args ? formatStageArgs(stage.args) : "";
+    const argsStr = formattedArgs ? `  args: ${formattedArgs}` : "";
     lines.push(`  ${idx + 1}. ${stage.name}${argsStr}`);
   }
 
-  lines.push('');
-  stderr.write(lines.join('\n'));
+  lines.push("");
+  stderr.write(lines.join("\n"));
   // Return rendered:true so the CLI does not print an empty JSON array to stdout.
   return { items: [], rendered: true, halted: false, haltedAt: null };
 }
@@ -110,16 +110,16 @@ function dryRunPipeline({
 function formatStageArgs(args: Record<string, unknown>) {
   const parts: string[] = [];
   for (const [key, value] of Object.entries(args)) {
-    if (key === '_') {
+    if (key === "_") {
       const positional = Array.isArray(value) ? value : [value];
       for (const v of positional) {
         if (v !== undefined && v !== null) parts.push(String(v));
       }
     } else {
-      parts.push(`${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`);
+      parts.push(`${key}=${typeof value === "string" ? value : JSON.stringify(value)}`);
     }
   }
-  return parts.join(', ');
+  return parts.join(", ");
 }
 
 async function* emptyStream() {}

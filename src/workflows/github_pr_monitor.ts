@@ -1,37 +1,41 @@
-import { spawn } from 'node:child_process';
+import { spawn } from "node:child_process";
 
 function runProcess(command, argv, { env, cwd }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, argv, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, argv, { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
 
-    let stdout = '';
-    let stderr = '';
+    let stdout = "";
+    let stderr = "";
 
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
 
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
+    child.stdout.on("data", (d) => {
+      stdout += d;
+    });
+    child.stderr.on("data", (d) => {
+      stderr += d;
+    });
 
-    child.on('error', (err: any) => {
-      if (err?.code === 'ENOENT') {
-        reject(new Error('gh not found on PATH (install GitHub CLI)'));
+    child.on("error", (err: any) => {
+      if (err?.code === "ENOENT") {
+        reject(new Error("gh not found on PATH (install GitHub CLI)"));
         return;
       }
       reject(err);
     });
 
-    child.on('close', (code) => {
+    child.on("close", (code) => {
       if (code === 0) return resolve({ stdout, stderr });
       reject(new Error(`gh failed (${code}): ${stderr.trim() || stdout.trim()}`));
     });
   });
 }
 
-import { diffAndStore } from '../state/store.js';
+import { diffAndStore } from "../state/store.js";
 
 function pickSubset(snapshot) {
-  if (!snapshot || typeof snapshot !== 'object') return null;
+  if (!snapshot || typeof snapshot !== "object") return null;
   return {
     number: snapshot.number,
     title: snapshot.title,
@@ -72,45 +76,45 @@ export function buildPrChangeSummary(before, after) {
 }
 
 function formatPrChangeMessage({ repo, pr, changedFields, prInfo }) {
-  const fields = changedFields.length ? ` (${changedFields.join(', ')})` : '';
-  const title = prInfo?.title ? `: ${prInfo.title}` : '';
-  const url = prInfo?.url ? ` ${prInfo.url}` : '';
-  return `PR updated: ${repo}#${pr}${title}${fields}.${url}`.replace(/\s+/g, ' ').trim();
+  const fields = changedFields.length ? ` (${changedFields.join(", ")})` : "";
+  const title = prInfo?.title ? `: ${prInfo.title}` : "";
+  const url = prInfo?.url ? ` ${prInfo.url}` : "";
+  return `PR updated: ${repo}#${pr}${title}${fields}.${url}`.replace(/\s+/g, " ").trim();
 }
 
 export async function runGithubPrMonitorWorkflow({ args, ctx }) {
   const repo = args.repo;
   const pr = args.pr;
-  if (!repo || !pr) throw new Error('github.pr.monitor requires args.repo and args.pr');
+  if (!repo || !pr) throw new Error("github.pr.monitor requires args.repo and args.pr");
 
   const key = args.key ?? `github.pr:${repo}#${pr}`;
   const changesOnly = Boolean(args.changesOnly);
   const summaryOnly = Boolean(args.summaryOnly);
 
   const argv = [
-    'pr',
-    'view',
+    "pr",
+    "view",
     String(pr),
-    '--repo',
+    "--repo",
     String(repo),
-    '--json',
-    'number,title,url,state,isDraft,mergeable,reviewDecision,author,baseRefName,headRefName,updatedAt',
+    "--json",
+    "number,title,url,state,isDraft,mergeable,reviewDecision,author,baseRefName,headRefName,updatedAt",
   ];
 
-  const { stdout } = (await runProcess('gh', argv, { env: ctx.env, cwd: process.cwd() })) as any;
+  const { stdout } = (await runProcess("gh", argv, { env: ctx.env, cwd: process.cwd() })) as any;
 
   let current;
   try {
     current = JSON.parse(stdout.trim());
   } catch {
-    throw new Error('gh returned non-JSON output');
+    throw new Error("gh returned non-JSON output");
   }
 
   const { changed, before } = await diffAndStore({ env: ctx.env, key, value: current });
 
   if (changesOnly && !changed) {
     return {
-      kind: 'github.pr.monitor',
+      kind: "github.pr.monitor",
       repo,
       prNumber: Number(pr),
       key,
@@ -123,7 +127,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 
   if (summaryOnly) {
     return {
-      kind: 'github.pr.monitor',
+      kind: "github.pr.monitor",
       repo,
       prNumber: Number(pr),
       key,
@@ -140,7 +144,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
   }
 
   return {
-    kind: 'github.pr.monitor',
+    kind: "github.pr.monitor",
     repo,
     prNumber: Number(pr),
     key,
@@ -161,14 +165,14 @@ export async function runGithubPrMonitorNotifyWorkflow({ args, ctx }) {
   });
 
   if (base.suppressed) {
-    return { kind: 'github.pr.monitor.notify', suppressed: true };
+    return { kind: "github.pr.monitor.notify", suppressed: true };
   }
 
   const changedFields = base.summary?.changedFields ?? [];
   const prInfo = base.pr ?? {};
 
   return {
-    kind: 'github.pr.monitor.notify',
+    kind: "github.pr.monitor.notify",
     changed: Boolean(base.changed),
     repo: args.repo,
     prNumber: Number(args.pr),

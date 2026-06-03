@@ -14,9 +14,9 @@
  *   });
  */
 
-import { promises as fsp } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { promises as fsp } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 /**
  * Get the state directory
@@ -27,7 +27,7 @@ function getStateDir(ctx) {
   return (
     ctx?.stateDir ||
     (ctx?.env?.LOBSTER_STATE_DIR && String(ctx.env.LOBSTER_STATE_DIR).trim()) ||
-    path.join(os.homedir(), '.lobster', 'state')
+    path.join(os.homedir(), ".lobster", "state")
   );
 }
 
@@ -40,10 +40,10 @@ function getStateDir(ctx) {
 function keyToPath(stateDir, key) {
   const safe = String(key)
     .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  if (!safe) throw new Error('state key is empty/invalid');
+    .replace(/[^a-z0-9._-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (!safe) throw new Error("state key is empty/invalid");
   return path.join(stateDir, `${safe}.json`);
 }
 
@@ -54,8 +54,12 @@ function keyToPath(stateDir, key) {
  */
 function stableStringify(value) {
   return JSON.stringify(value, (_k, v) => {
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
-      return Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]));
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      return Object.fromEntries(
+        Object.keys(v)
+          .sort()
+          .map((k) => [k, v[k]]),
+      );
     }
     return v;
   });
@@ -73,12 +77,12 @@ function stableStringify(value) {
  * @returns {Object} Stage object with run method
  */
 export function diffLast(key, options: any = {}) {
-  if (!key) throw new Error('diffLast requires a key');
+  if (!key) throw new Error("diffLast requires a key");
 
   const changesOnly = options.changesOnly === true;
 
   return {
-    type: 'diff.last',
+    type: "diff.last",
     key,
 
     async run({ input, ctx }) {
@@ -96,10 +100,10 @@ export function diffLast(key, options: any = {}) {
       // Read previous value
       let before = null;
       try {
-        const text = await fsp.readFile(filePath, 'utf8');
+        const text = await fsp.readFile(filePath, "utf8");
         before = JSON.parse(text);
       } catch (err) {
-        if (err?.code !== 'ENOENT') {
+        if (err?.code !== "ENOENT") {
           throw err;
         }
       }
@@ -109,11 +113,11 @@ export function diffLast(key, options: any = {}) {
 
       // Store new value
       await fsp.mkdir(stateDir, { recursive: true });
-      await fsp.writeFile(filePath, JSON.stringify(value, null, 2) + '\n', 'utf8');
+      await fsp.writeFile(filePath, JSON.stringify(value, null, 2) + "\n", "utf8");
 
       // Build result
       const result = {
-        kind: 'diff.last',
+        kind: "diff.last",
         key,
         changed,
         before,
@@ -124,7 +128,7 @@ export function diffLast(key, options: any = {}) {
       if (changesOnly && !changed) {
         return {
           output: (async function* () {
-            yield { kind: 'diff.last', key, changed: false, suppressed: true };
+            yield { kind: "diff.last", key, changed: false, suppressed: true };
           })(),
         };
       }
@@ -152,10 +156,10 @@ export async function diffAndStoreValue(key, value, ctx = {}) {
   // Read previous value
   let before = null;
   try {
-    const text = await fsp.readFile(filePath, 'utf8');
+    const text = await fsp.readFile(filePath, "utf8");
     before = JSON.parse(text);
   } catch (err) {
-    if (err?.code !== 'ENOENT') {
+    if (err?.code !== "ENOENT") {
       throw err;
     }
   }
@@ -165,7 +169,7 @@ export async function diffAndStoreValue(key, value, ctx = {}) {
 
   // Store new value
   await fsp.mkdir(stateDir, { recursive: true });
-  await fsp.writeFile(filePath, JSON.stringify(value, null, 2) + '\n', 'utf8');
+  await fsp.writeFile(filePath, JSON.stringify(value, null, 2) + "\n", "utf8");
 
   return { before, after: value, changed };
 }

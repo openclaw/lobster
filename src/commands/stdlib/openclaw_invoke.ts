@@ -2,30 +2,33 @@ function createInvokeCommand(commandName: string) {
   return {
     name: commandName,
     meta: {
-      description: 'Call a local OpenClaw tool endpoint',
+      description: "Call a local OpenClaw tool endpoint",
       argsSchema: {
-        type: 'object',
+        type: "object",
         properties: {
           url: {
-            type: 'string',
-            description: 'OpenClaw control URL (or OPENCLAW_URL / CLAWD_URL)',
+            type: "string",
+            description: "OpenClaw control URL (or OPENCLAW_URL / CLAWD_URL)",
           },
-          token: { type: 'string', description: 'Bearer token (or OPENCLAW_TOKEN / CLAWD_TOKEN)' },
-          tool: { type: 'string', description: 'Tool name (e.g. message, cron, github, etc.)' },
-          action: { type: 'string', description: 'Tool action' },
-          'args-json': { type: 'string', description: 'JSON string of tool args' },
-          sessionKey: { type: 'string', description: 'Optional session key attribution' },
-          'session-key': { type: 'string', description: 'Alias for sessionKey' },
-          dryRun: { type: 'boolean', description: 'Dry run' },
-          'dry-run': { type: 'boolean', description: 'Alias for dryRun' },
-          each: { type: 'boolean', description: 'Map each pipeline item into tool args' },
-          itemKey: { type: 'string', description: 'Key to set from the pipeline item (default: item)' },
-          'item-key': { type: 'string', description: 'Alias for itemKey' },
-          _: { type: 'array', items: { type: 'string' } },
+          token: { type: "string", description: "Bearer token (or OPENCLAW_TOKEN / CLAWD_TOKEN)" },
+          tool: { type: "string", description: "Tool name (e.g. message, cron, github, etc.)" },
+          action: { type: "string", description: "Tool action" },
+          "args-json": { type: "string", description: "JSON string of tool args" },
+          sessionKey: { type: "string", description: "Optional session key attribution" },
+          "session-key": { type: "string", description: "Alias for sessionKey" },
+          dryRun: { type: "boolean", description: "Dry run" },
+          "dry-run": { type: "boolean", description: "Alias for dryRun" },
+          each: { type: "boolean", description: "Map each pipeline item into tool args" },
+          itemKey: {
+            type: "string",
+            description: "Key to set from the pipeline item (default: item)",
+          },
+          "item-key": { type: "string", description: "Alias for itemKey" },
+          _: { type: "array", items: { type: "string" } },
         },
-        required: ['tool', 'action'],
+        required: ["tool", "action"],
       },
-      sideEffects: ['calls_clawd_tool'],
+      sideEffects: ["calls_clawd_tool"],
     },
     help() {
       return (
@@ -46,39 +49,41 @@ function createInvokeCommand(commandName: string) {
     },
     async run({ input, args, ctx }) {
       const each = Boolean(args.each);
-      const itemKey = String(args.itemKey ?? args['item-key'] ?? 'item');
+      const itemKey = String(args.itemKey ?? args["item-key"] ?? "item");
 
-      const url = String(args.url ?? ctx.env.OPENCLAW_URL ?? ctx.env.CLAWD_URL ?? '').trim();
+      const url = String(args.url ?? ctx.env.OPENCLAW_URL ?? ctx.env.CLAWD_URL ?? "").trim();
       if (!url) throw new Error(`${commandName} requires --url or OPENCLAW_URL`);
 
       const tool = args.tool;
       const action = args.action;
       if (!tool || !action) throw new Error(`${commandName} requires --tool and --action`);
 
-      const token = String(args.token ?? ctx.env.OPENCLAW_TOKEN ?? ctx.env.CLAWD_TOKEN ?? '').trim();
+      const token = String(
+        args.token ?? ctx.env.OPENCLAW_TOKEN ?? ctx.env.CLAWD_TOKEN ?? "",
+      ).trim();
 
       let toolArgs: any = {};
-      if (args['args-json']) {
+      if (args["args-json"]) {
         try {
-          toolArgs = JSON.parse(String(args['args-json']));
+          toolArgs = JSON.parse(String(args["args-json"]));
         } catch (_err) {
           throw new Error(`${commandName} --args-json must be valid JSON`);
         }
       }
 
-      if (each && (toolArgs === null || typeof toolArgs !== 'object' || Array.isArray(toolArgs))) {
+      if (each && (toolArgs === null || typeof toolArgs !== "object" || Array.isArray(toolArgs))) {
         throw new Error(`${commandName} --each requires --args-json to be an object`);
       }
 
-      const endpoint = new URL('/tools/invoke', url);
-      const sessionKey = args.sessionKey ?? args['session-key'] ?? null;
-      const dryRun = args.dryRun ?? args['dry-run'] ?? null;
+      const endpoint = new URL("/tools/invoke", url);
+      const sessionKey = args.sessionKey ?? args["session-key"] ?? null;
+      const dryRun = args.dryRun ?? args["dry-run"] ?? null;
 
       const invokeOnce = async (argsValue: unknown) => {
         const res = await fetch(endpoint, {
-          method: 'POST',
+          method: "POST",
           headers: {
-            'content-type': 'application/json',
+            "content-type": "application/json",
             ...(token ? { authorization: `Bearer ${token}` } : null),
           },
           body: JSON.stringify({
@@ -103,9 +108,9 @@ function createInvokeCommand(commandName: string) {
         }
 
         // Preferred: { ok: true, result: ... }
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'ok' in parsed) {
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "ok" in parsed) {
           if (parsed.ok !== true) {
-            const msg = parsed?.error?.message ?? 'Unknown error';
+            const msg = parsed?.error?.message ?? "Unknown error";
             throw new Error(`${commandName} tool error: ${msg}`);
           }
           const result = parsed.result;
@@ -141,5 +146,5 @@ async function* asStream(items: any[]) {
   for (const item of items) yield item;
 }
 
-export const openclawInvokeCommand = createInvokeCommand('openclaw.invoke');
-export const clawdInvokeCommand = createInvokeCommand('clawd.invoke');
+export const openclawInvokeCommand = createInvokeCommand("openclaw.invoke");
+export const clawdInvokeCommand = createInvokeCommand("clawd.invoke");

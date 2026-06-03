@@ -1,9 +1,9 @@
-import fs from 'node:fs/promises';
-import { applyFilters } from '../../core/filters.js';
+import fs from "node:fs/promises";
+import { applyFilters } from "../../core/filters.js";
 
 function getByPath(obj: any, path: string): any {
-  if (path === '.' || path === 'this') return obj;
-  const parts = path.split('.').filter(Boolean);
+  if (path === "." || path === "this") return obj;
+  const parts = path.split(".").filter(Boolean);
   let cur: any = obj;
   for (const p of parts) {
     if (cur == null) return undefined;
@@ -14,7 +14,7 @@ function getByPath(obj: any, path: string): any {
 
 function splitFilterChain(expr: string): string[] {
   const parts: string[] = [];
-  let current = '';
+  let current = "";
   let i = 0;
   while (i < expr.length) {
     const ch = expr[i];
@@ -23,7 +23,7 @@ function splitFilterChain(expr: string): string[] {
       current += ch;
       i += 1;
       while (i < expr.length && expr[i] !== quote) {
-        if (expr[i] === '\\' && i + 1 < expr.length) {
+        if (expr[i] === "\\" && i + 1 < expr.length) {
           current += expr[i] + expr[i + 1];
           i += 2;
         } else {
@@ -35,9 +35,9 @@ function splitFilterChain(expr: string): string[] {
         current += expr[i];
         i += 1;
       }
-    } else if (ch === '|') {
+    } else if (ch === "|") {
       parts.push(current.trim());
-      current = '';
+      current = "";
       i += 1;
     } else {
       current += ch;
@@ -50,30 +50,34 @@ function splitFilterChain(expr: string): string[] {
 
 function renderTemplate(tpl: string, ctx: any): string {
   return tpl.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, expr) => {
-    const rawExpr = String(expr ?? '').trim();
+    const rawExpr = String(expr ?? "").trim();
     const parts = splitFilterChain(rawExpr);
     const key = parts[0];
     let val: unknown = getByPath(ctx, key);
     if (parts.length > 1) {
       val = applyFilters(val, parts.slice(1));
     }
-    if (val === undefined || val === null) return '';
-    if (typeof val === 'string') return val;
-    if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+    if (val === undefined || val === null) return "";
+    if (typeof val === "string") return val;
+    if (typeof val === "number" || typeof val === "boolean") return String(val);
     return JSON.stringify(val);
   });
 }
 
 export const templateCommand = {
-  name: 'template',
+  name: "template",
   meta: {
-    description: 'Render a simple {{path}} template against each input item',
+    description: "Render a simple {{path}} template against each input item",
     argsSchema: {
-      type: 'object',
+      type: "object",
       properties: {
-        text: { type: 'string', description: 'Template text (supports {{path}}, {{path | filter}}, {{.}} for the whole item)' },
-        file: { type: 'string', description: 'Template file path' },
-        _: { type: 'array', items: { type: 'string' } },
+        text: {
+          type: "string",
+          description:
+            "Template text (supports {{path}}, {{path | filter}}, {{.}} for the whole item)",
+        },
+        file: { type: "string", description: "Template file path" },
+        _: { type: "array", items: { type: "string" } },
       },
       required: [],
     },
@@ -97,19 +101,19 @@ export const templateCommand = {
     );
   },
   async run({ input, args }: any) {
-    let tpl = typeof args.text === 'string' ? args.text : undefined;
-    const file = typeof args.file === 'string' ? args.file : undefined;
+    let tpl = typeof args.text === "string" ? args.text : undefined;
+    const file = typeof args.file === "string" ? args.file : undefined;
 
     if (!tpl && file) {
-      tpl = await fs.readFile(file, 'utf8');
+      tpl = await fs.readFile(file, "utf8");
     }
 
     if (!tpl) {
       const positional = Array.isArray(args._) ? args._ : [];
-      if (positional.length) tpl = positional.join(' ');
+      if (positional.length) tpl = positional.join(" ");
     }
 
-    if (!tpl) throw new Error('template requires --text or --file (or positional text)');
+    if (!tpl) throw new Error("template requires --text or --file (or positional text)");
 
     return {
       output: (async function* () {

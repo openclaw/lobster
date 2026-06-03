@@ -1,17 +1,17 @@
 export const pickCommand = {
-  name: 'pick',
+  name: "pick",
   meta: {
-    description: 'Project fields from objects',
+    description: "Project fields from objects",
     argsSchema: {
-      type: 'object',
+      type: "object",
       properties: {
         _: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'First positional arg is a comma-separated list of fields',
+          type: "array",
+          items: { type: "string" },
+          description: "First positional arg is a comma-separated list of fields",
         },
       },
-      required: ['_'],
+      required: ["_"],
     },
     sideEffects: [],
   },
@@ -20,13 +20,16 @@ export const pickCommand = {
   },
   async run({ input, args }) {
     const spec = args._[0];
-    if (!spec) throw new Error('pick requires a comma-separated field list');
-    const fields = spec.split(',').map((s) => s.trim()).filter(Boolean);
+    if (!spec) throw new Error("pick requires a comma-separated field list");
+    const fields = spec
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
 
     return {
       output: (async function* () {
         for await (const item of input) {
-          if (item === null || typeof item !== 'object') {
+          if (item === null || typeof item !== "object") {
             yield item;
             continue;
           }

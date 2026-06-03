@@ -57,7 +57,7 @@ export const gogGmailSendCommand = {
       },
       required: [],
     },
-    sideEffects: ['sends_email'],
+    sideEffects: ["sends_email"],
   },
   help() {
     return (

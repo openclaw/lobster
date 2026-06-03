@@ -9,8 +9,8 @@
  *   .pipe(items => items.filter(e => e.unread))
  */
 
-import { spawn } from 'node:child_process';
-import { resolveInlineShellCommand } from '../../shell.js';
+import { spawn } from "node:child_process";
+import { resolveInlineShellCommand } from "../../shell.js";
 
 /**
  * Run a process and capture output
@@ -24,24 +24,28 @@ function runProcess(command, argv, { env, cwd }) {
     const child = spawn(command, argv, {
       env,
       cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ["ignore", "pipe", "pipe"],
       shell: false,
     });
 
-    let stdout = '';
-    let stderr = '';
+    let stdout = "";
+    let stderr = "";
 
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
 
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
+    child.stdout.on("data", (d) => {
+      stdout += d;
+    });
+    child.stderr.on("data", (d) => {
+      stderr += d;
+    });
 
-    child.on('error', (err) => {
+    child.on("error", (err) => {
       reject(new Error(`Failed to execute ${command}: ${err.message}`));
     });
 
-    child.on('close', (code) => {
+    child.on("close", (code) => {
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
@@ -59,14 +63,14 @@ function runProcess(command, argv, { env, cwd }) {
  */
 function parseCommand(cmdString) {
   const tokens = [];
-  let current = '';
+  let current = "";
   let quote = null;
 
   for (let i = 0; i < cmdString.length; i++) {
     const ch = cmdString[i];
 
     if (quote) {
-      if (ch === '\\' && cmdString[i + 1]) {
+      if (ch === "\\" && cmdString[i + 1]) {
         current += cmdString[i + 1];
         i++;
         continue;
@@ -84,10 +88,10 @@ function parseCommand(cmdString) {
       continue;
     }
 
-    if (ch === ' ' || ch === '\t') {
+    if (ch === " " || ch === "\t") {
       if (current.length > 0) {
         tokens.push(current);
-        current = '';
+        current = "";
       }
       continue;
     }
@@ -119,7 +123,7 @@ export function exec(cmdString, options: any = {}) {
   const cwd = options.cwd ?? process.cwd();
 
   return {
-    type: 'exec',
+    type: "exec",
     command: cmdString,
 
     async run({ input, ctx }) {
@@ -148,7 +152,7 @@ export function exec(cmdString, options: any = {}) {
       let output;
       if (parseJson) {
         try {
-          output = JSON.parse(stdout.trim() || '[]');
+          output = JSON.parse(stdout.trim() || "[]");
         } catch {
           throw new Error(`exec output is not valid JSON: ${stdout.slice(0, 100)}`);
         }

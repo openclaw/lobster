@@ -1,29 +1,33 @@
-import os from 'node:os';
-import path from 'node:path';
-import { promises as fsp } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import os from "node:os";
+import path from "node:path";
+import { promises as fsp } from "node:fs";
+import { randomBytes } from "node:crypto";
 
 export function defaultStateDir(env) {
   return (
     (env?.LOBSTER_STATE_DIR && String(env.LOBSTER_STATE_DIR).trim()) ||
-    path.join(os.homedir(), '.lobster', 'state')
+    path.join(os.homedir(), ".lobster", "state")
   );
 }
 
 export function keyToPath(stateDir, key) {
   const safe = String(key)
     .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  if (!safe) throw new Error('state key is empty/invalid');
+    .replace(/[^a-z0-9._-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (!safe) throw new Error("state key is empty/invalid");
   return path.join(stateDir, `${safe}.json`);
 }
 
 export function stableStringify(value) {
   return JSON.stringify(value, (_k, v) => {
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
-      return Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]));
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      return Object.fromEntries(
+        Object.keys(v)
+          .sort()
+          .map((k) => [k, v[k]]),
+      );
     }
     return v;
   });
@@ -35,24 +39,35 @@ export function stableStringify(value) {
  * (or a crash) never observes a truncated/partial file — it sees either the
  * complete old content or the complete new content. Plain `fsp.writeFile`
  * truncates the target up front, leaving a corruption window on SIGKILL/OOM/
- * power loss. The temp file is removed if the rename fails.
+ * power loss. New state files are private by default; existing file modes are
+ * preserved across replacement. The temp file is removed on any failed path.
  */
 export async function writeFileAtomic(filePath, data) {
   const dir = path.dirname(filePath);
-  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${randomBytes(6).toString('hex')}.tmp`);
+  const tmpPath = path.join(
+    dir,
+    `.${path.basename(filePath)}.${randomBytes(6).toString("hex")}.tmp`,
+  );
+  let mode = 0o600;
   let handle;
+  let cleanup = true;
   try {
-    handle = await fsp.open(tmpPath, 'w');
-    await handle.writeFile(data, 'utf8');
+    try {
+      mode = (await fsp.stat(filePath)).mode & 0o777;
+    } catch (err) {
+      if (err?.code !== "ENOENT") throw err;
+    }
+    handle = await fsp.open(tmpPath, "wx", mode);
+    await handle.writeFile(data, "utf8");
     await handle.sync();
-  } finally {
-    await handle?.close();
-  }
-  try {
+    await handle.close();
+    handle = undefined;
+    await fsp.chmod(tmpPath, mode);
     await fsp.rename(tmpPath, filePath);
-  } catch (err) {
-    await fsp.rm(tmpPath, { force: true }).catch(() => {});
-    throw err;
+    cleanup = false;
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+    if (cleanup) await fsp.rm(tmpPath, { force: true }).catch(() => {});
   }
 }
 
@@ -61,10 +76,10 @@ export async function readStateJson({ env, key }) {
   const filePath = keyToPath(stateDir, key);
 
   try {
-    const text = await fsp.readFile(filePath, 'utf8');
+    const text = await fsp.readFile(filePath, "utf8");
     return JSON.parse(text);
   } catch (err) {
-    if (err?.code === 'ENOENT') return null;
+    if (err?.code === "ENOENT") return null;
     throw err;
   }
 }
@@ -74,7 +89,7 @@ export async function writeStateJson({ env, key, value }) {
   const filePath = keyToPath(stateDir, key);
 
   await fsp.mkdir(stateDir, { recursive: true });
-  await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + '\n');
+  await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n");
 }
 
 export async function deleteStateJson({ env, key }) {
@@ -83,13 +98,13 @@ export async function deleteStateJson({ env, key }) {
   try {
     await fsp.unlink(filePath);
   } catch (err) {
-    if (err?.code === 'ENOENT') return;
+    if (err?.code === "ENOENT") return;
     throw err;
   }
 }
 
 function sanitizeApprovalId(approvalId: string): string {
-  return approvalId.replace(/[^a-f0-9]/g, '');
+  return approvalId.replace(/[^a-f0-9]/g, "");
 }
 
 /**
@@ -98,14 +113,18 @@ function sanitizeApprovalId(approvalId: string): string {
  * base64url resume tokens are unwieldy.
  */
 export function generateApprovalId(): string {
-  return randomBytes(4).toString('hex');
+  return randomBytes(4).toString("hex");
 }
 
 /**
  * Write a reverse-index file that maps approvalId → stateKey.
  * Call this after writeStateJson to enable short-ID resume.
  */
-export async function writeApprovalIndex({ env, stateKey, approvalId }: {
+export async function writeApprovalIndex({
+  env,
+  stateKey,
+  approvalId,
+}: {
   env: Record<string, string | undefined>;
   stateKey: string;
   approvalId: string;
@@ -117,15 +136,18 @@ export async function writeApprovalIndex({ env, stateKey, approvalId }: {
   const indexPath = path.join(stateDir, `approval_${safe}.json`);
   await fsp.writeFile(
     indexPath,
-    JSON.stringify({ stateKey, createdAt: new Date().toISOString() }) + '\n',
-    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+    JSON.stringify({ stateKey, createdAt: new Date().toISOString() }) + "\n",
+    { encoding: "utf8", flag: "wx", mode: 0o600 },
   );
 }
 
 /**
  * Create a unique approval ID index without ever overwriting an existing mapping.
  */
-export async function createApprovalIndex({ env, stateKey }: {
+export async function createApprovalIndex({
+  env,
+  stateKey,
+}: {
   env: Record<string, string | undefined>;
   stateKey: string;
 }) {
@@ -135,18 +157,21 @@ export async function createApprovalIndex({ env, stateKey }: {
       await writeApprovalIndex({ env, stateKey, approvalId });
       return approvalId;
     } catch (err: any) {
-      if (err?.code === 'EEXIST') continue;
+      if (err?.code === "EEXIST") continue;
       throw err;
     }
   }
-  throw new Error('Could not allocate a unique approval ID');
+  throw new Error("Could not allocate a unique approval ID");
 }
 
 /**
  * Look up a state key by short approval ID.
  * Returns the stateKey string or null if not found.
  */
-export async function findStateKeyByApprovalId({ env, approvalId }: {
+export async function findStateKeyByApprovalId({
+  env,
+  approvalId,
+}: {
   env: Record<string, string | undefined>;
   approvalId: string;
 }): Promise<string | null> {
@@ -155,11 +180,11 @@ export async function findStateKeyByApprovalId({ env, approvalId }: {
   if (!safe) return null;
   const indexPath = path.join(stateDir, `approval_${safe}.json`);
   try {
-    const text = await fsp.readFile(indexPath, 'utf8');
+    const text = await fsp.readFile(indexPath, "utf8");
     const data = JSON.parse(text);
-    return typeof data?.stateKey === 'string' ? data.stateKey : null;
+    return typeof data?.stateKey === "string" ? data.stateKey : null;
   } catch (err: any) {
-    if (err?.code === 'ENOENT') return null;
+    if (err?.code === "ENOENT") return null;
     throw err;
   }
 }
@@ -167,7 +192,10 @@ export async function findStateKeyByApprovalId({ env, approvalId }: {
 /**
  * Delete the approval ID index file (cleanup after resume or cancel).
  */
-export async function deleteApprovalId({ env, approvalId }: {
+export async function deleteApprovalId({
+  env,
+  approvalId,
+}: {
   env: Record<string, string | undefined>;
   approvalId: string;
 }) {
@@ -178,7 +206,7 @@ export async function deleteApprovalId({ env, approvalId }: {
   try {
     await fsp.unlink(indexPath);
   } catch (err: any) {
-    if (err?.code === 'ENOENT') return;
+    if (err?.code === "ENOENT") return;
     throw err;
   }
 }
@@ -188,7 +216,10 @@ export async function deleteApprovalId({ env, approvalId }: {
  * Used when resuming via --token (where we don't know the approvalId).
  * Scans index files in the state dir — O(n) but n is tiny in practice.
  */
-export async function cleanupApprovalIndexByStateKey({ env, stateKey }: {
+export async function cleanupApprovalIndexByStateKey({
+  env,
+  stateKey,
+}: {
   env: Record<string, string | undefined>;
   stateKey: string;
 }) {
@@ -197,19 +228,21 @@ export async function cleanupApprovalIndexByStateKey({ env, stateKey }: {
   try {
     files = await fsp.readdir(stateDir);
   } catch (err: any) {
-    if (err?.code === 'ENOENT') return;
+    if (err?.code === "ENOENT") return;
     throw err;
   }
   for (const file of files) {
-    if (!file.startsWith('approval_') || !file.endsWith('.json')) continue;
+    if (!file.startsWith("approval_") || !file.endsWith(".json")) continue;
     try {
-      const text = await fsp.readFile(path.join(stateDir, file), 'utf8');
+      const text = await fsp.readFile(path.join(stateDir, file), "utf8");
       const data = JSON.parse(text);
       if (data?.stateKey === stateKey) {
         await fsp.unlink(path.join(stateDir, file)).catch(() => {});
         return; // one index per stateKey
       }
-    } catch { /* skip corrupt files */ }
+    } catch {
+      /* skip corrupt files */
+    }
   }
 }
 

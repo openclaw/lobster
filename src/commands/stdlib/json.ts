@@ -1,8 +1,8 @@
 export const jsonCommand = {
-  name: 'json',
+  name: "json",
   meta: {
-    description: 'Render pipeline output as JSON',
-    argsSchema: { type: 'object', properties: {}, required: [] },
+    description: "Render pipeline output as JSON",
+    argsSchema: { type: "object", properties: {}, required: [] },
     sideEffects: [],
   },
   help() {

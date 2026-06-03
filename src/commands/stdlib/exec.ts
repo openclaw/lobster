@@ -1,23 +1,24 @@
-import { spawn } from 'node:child_process';
-import { resolveInlineShellCommand } from '../../shell.js';
+import { spawn } from "node:child_process";
+import { resolveInlineShellCommand } from "../../shell.js";
 
 export const execCommand = {
-  name: 'exec',
+  name: "exec",
   meta: {
-    description: 'Run an OS command',
+    description: "Run an OS command",
     argsSchema: {
-      type: 'object',
+      type: "object",
       properties: {
-        json: { type: 'boolean', description: 'Parse stdout as JSON (single value).' },
-        shell: { type: 'string', description: 'Run via the system shell with this command line.' },
-        _: { type: 'array', items: { type: 'string' }, description: 'Command + args.' },
+        json: { type: "boolean", description: "Parse stdout as JSON (single value)." },
+        shell: { type: "string", description: "Run via the system shell with this command line." },
+        _: { type: "array", items: { type: "string" }, description: "Command + args." },
       },
-      required: ['_'],
+      required: ["_"],
     },
-    sideEffects: ['local_exec'],
+    sideEffects: ["local_exec"],
   },
   help() {
-    return `exec — run an OS command\n\n` +
+    return (
+      `exec — run an OS command\n\n` +
       `Usage:\n` +
       `  exec <command...>\n` +
       `  exec --stdin raw|json|jsonl <command...>\n` +
@@ -26,17 +27,18 @@ export const execCommand = {
       `Notes:\n` +
       `  - With --json, parses stdout as JSON (single value).\n` +
       `  - With --stdin, writes pipeline input to stdin.\n` +
-      `  - With --shell (or a single arg containing spaces), runs via the system shell.\n`;
+      `  - With --shell (or a single arg containing spaces), runs via the system shell.\n`
+    );
   },
   async run({ input, args, ctx }) {
     const cmd = args._;
     const cwd = ctx?.cwd ?? process.cwd();
 
-    const shellLine = typeof args.shell === 'string' ? args.shell : null;
+    const shellLine = typeof args.shell === "string" ? args.shell : null;
     const useShell = Boolean(args.shell) || (cmd.length === 1 && /\s/.test(cmd[0]));
-    const stdinMode = typeof args.stdin === 'string' ? String(args.stdin).toLowerCase() : null;
+    const stdinMode = typeof args.stdin === "string" ? String(args.stdin).toLowerCase() : null;
 
-    if (!cmd.length && !shellLine) throw new Error('exec requires a command');
+    if (!cmd.length && !shellLine) throw new Error("exec requires a command");
 
     let stdinPayload = null;
     if (stdinMode) {
@@ -51,15 +53,27 @@ export const execCommand = {
     }
 
     const result = useShell
-      ? await runShellLine(shellLine ?? cmd[0] ?? '', { env: ctx.env, cwd, stdin: stdinPayload, signal: ctx.signal })
-      : await runProcess(cmd[0], cmd.slice(1), { env: ctx.env, cwd, stdin: stdinPayload, signal: ctx.signal });
+      ? await runShellLine(shellLine ?? cmd[0] ?? "", {
+          env: ctx.env,
+          cwd,
+          stdin: stdinPayload,
+          signal: ctx.signal,
+        })
+      : await runProcess(cmd[0], cmd.slice(1), {
+          env: ctx.env,
+          cwd,
+          stdin: stdinPayload,
+          signal: ctx.signal,
+        });
 
     if (args.json) {
       let parsed;
       try {
-        parsed = JSON.parse(result.stdout.trim() || 'null');
+        parsed = JSON.parse(result.stdout.trim() || "null");
       } catch (err) {
-        throw new Error(`exec --json could not parse stdout as JSON: ${err?.message ?? String(err)}`);
+        throw new Error(
+          `exec --json could not parse stdout as JSON: ${err?.message ?? String(err)}`,
+        );
       }
 
       return {
@@ -78,26 +92,30 @@ function runProcess(command, argv, { env, cwd, stdin, signal }) {
       env,
       cwd,
       signal,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
-    let stdout = '';
-    let stderr = '';
+    let stdout = "";
+    let stderr = "";
 
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
 
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
+    child.stdout.on("data", (d) => {
+      stdout += d;
+    });
+    child.stderr.on("data", (d) => {
+      stderr += d;
+    });
 
-    if (typeof stdin === 'string') {
-      child.stdin.setDefaultEncoding('utf8');
+    if (typeof stdin === "string") {
+      child.stdin.setDefaultEncoding("utf8");
       child.stdin.write(stdin);
     }
     child.stdin.end();
 
-    child.on('error', reject);
-    child.on('close', (code) => {
+    child.on("error", reject);
+    child.on("close", (code) => {
       if (code === 0) return resolve({ stdout, stderr });
       reject(new Error(`exec failed (${code}): ${stderr.trim() || stdout.trim() || command}`));
     });
@@ -110,12 +128,12 @@ function runShellLine(commandLine, { env, cwd, stdin, signal }) {
 }
 
 function encodeStdin(items, mode) {
-  if (mode === 'json') return JSON.stringify(items);
-  if (mode === 'jsonl') {
-    return items.map((item) => JSON.stringify(item)).join('\n') + (items.length ? '\n' : '');
+  if (mode === "json") return JSON.stringify(items);
+  if (mode === "jsonl") {
+    return items.map((item) => JSON.stringify(item)).join("\n") + (items.length ? "\n" : "");
   }
-  if (mode === 'raw') {
-    return items.map((item) => (typeof item === 'string' ? item : JSON.stringify(item))).join('\n');
+  if (mode === "raw") {
+    return items.map((item) => (typeof item === "string" ? item : JSON.stringify(item))).join("\n");
   }
   throw new Error(`exec --stdin must be raw, json, or jsonl (got ${mode})`);
 }

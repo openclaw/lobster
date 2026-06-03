@@ -11,9 +11,9 @@
  * const notify = await prMonitorNotify({ repo: 'owner/repo', pr: 123 }).run();
  */
 
-import { Lobster } from '../../sdk/index.js';
-import { diffLast } from '../../sdk/primitives/diff.js';
-import { ghPrView } from './stages/pr-view.js';
+import { Lobster } from "../../sdk/index.js";
+import { diffLast } from "../../sdk/primitives/diff.js";
+import { ghPrView } from "./stages/pr-view.js";
 
 /**
  * Pick a subset of PR fields for comparison
@@ -21,7 +21,7 @@ import { ghPrView } from './stages/pr-view.js';
  * @returns {Object|null}
  */
 function pickSubset(snapshot) {
-  if (!snapshot || typeof snapshot !== 'object') return null;
+  if (!snapshot || typeof snapshot !== "object") return null;
   return {
     number: snapshot.number,
     title: snapshot.title,
@@ -73,10 +73,10 @@ function buildChangeSummary(before, after) {
  * @returns {string}
  */
 function formatChangeMessage({ repo, pr, changedFields, prInfo }) {
-  const fields = changedFields.length ? ` (${changedFields.join(', ')})` : '';
-  const title = prInfo?.title ? `: ${prInfo.title}` : '';
-  const url = prInfo?.url ? ` ${prInfo.url}` : '';
-  return `PR updated: ${repo}#${pr}${title}${fields}.${url}`.replace(/\s+/g, ' ').trim();
+  const fields = changedFields.length ? ` (${changedFields.join(", ")})` : "";
+  const title = prInfo?.title ? `: ${prInfo.title}` : "";
+  const url = prInfo?.url ? ` ${prInfo.url}` : "";
+  return `PR updated: ${repo}#${pr}${title}${fields}.${url}`.replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -94,8 +94,8 @@ export function prMonitor(options) {
   const { repo, pr, changesOnly = false, summaryOnly = false } = options;
   const key = options.key ?? `github.pr:${repo}#${pr}`;
 
-  if (!repo) throw new Error('prMonitor requires repo');
-  if (!pr) throw new Error('prMonitor requires pr');
+  if (!repo) throw new Error("prMonitor requires repo");
+  if (!pr) throw new Error("prMonitor requires pr");
 
   const workflow = new Lobster()
     .pipe(ghPrView({ repo, pr }))
@@ -108,56 +108,62 @@ export function prMonitor(options) {
 
       // If changesOnly and no change, suppress output
       if (changesOnly && !changed) {
-        return [{
-          kind: 'github.pr.monitor',
-          repo,
-          pr: Number(pr),
-          key,
-          changed: false,
-          suppressed: true,
-        }];
+        return [
+          {
+            kind: "github.pr.monitor",
+            repo,
+            pr: Number(pr),
+            key,
+            changed: false,
+            suppressed: true,
+          },
+        ];
       }
 
       const summary = buildChangeSummary(before, current);
 
       if (summaryOnly) {
-        return [{
-          kind: 'github.pr.monitor',
+        return [
+          {
+            kind: "github.pr.monitor",
+            repo,
+            pr: Number(pr),
+            key,
+            changed,
+            summary,
+            prInfo: {
+              number: current.number,
+              title: current.title,
+              url: current.url,
+              state: current.state,
+              updatedAt: current.updatedAt,
+            },
+          },
+        ];
+      }
+
+      return [
+        {
+          kind: "github.pr.monitor",
           repo,
           pr: Number(pr),
           key,
           changed,
           summary,
-          prInfo: {
-            number: current.number,
-            title: current.title,
-            url: current.url,
-            state: current.state,
-            updatedAt: current.updatedAt,
-          },
-        }];
-      }
-
-      return [{
-        kind: 'github.pr.monitor',
-        repo,
-        pr: Number(pr),
-        key,
-        changed,
-        summary,
-        prSnapshot: current,
-      }];
+          prSnapshot: current,
+        },
+      ];
     })
     .meta({
-      name: 'github.pr.monitor',
-      description: 'Monitor PR state and detect changes',
-      requires: ['gh'],
+      name: "github.pr.monitor",
+      description: "Monitor PR state and detect changes",
+      requires: ["gh"],
       args: {
-        repo: { type: 'string', required: true, description: 'Repository (owner/repo)' },
-        pr: { type: 'number', required: true, description: 'PR number' },
-        key: { type: 'string', description: 'State key override' },
-        changesOnly: { type: 'boolean', default: false, description: 'Only output when changed' },
-        summaryOnly: { type: 'boolean', default: false, description: 'Return compact summary' },
+        repo: { type: "string", required: true, description: "Repository (owner/repo)" },
+        pr: { type: "number", required: true, description: "PR number" },
+        key: { type: "string", description: "State key override" },
+        changesOnly: { type: "boolean", default: false, description: "Only output when changed" },
+        summaryOnly: { type: "boolean", default: false, description: "Return compact summary" },
       },
     });
 
@@ -166,15 +172,15 @@ export function prMonitor(options) {
 
 // Attach metadata
 prMonitor.meta = {
-  name: 'github.pr.monitor',
-  description: 'Monitor PR state and detect changes',
-  requires: ['gh'],
+  name: "github.pr.monitor",
+  description: "Monitor PR state and detect changes",
+  requires: ["gh"],
   args: {
-    repo: { type: 'string', required: true },
-    pr: { type: 'number', required: true },
-    key: { type: 'string' },
-    changesOnly: { type: 'boolean', default: false },
-    summaryOnly: { type: 'boolean', default: false },
+    repo: { type: "string", required: true },
+    pr: { type: "number", required: true },
+    key: { type: "string" },
+    changesOnly: { type: "boolean", default: false },
+    summaryOnly: { type: "boolean", default: false },
   },
 };
 
@@ -192,8 +198,8 @@ export function prMonitorNotify(options) {
   const { repo, pr } = options;
   const key = options.key ?? `github.pr:${repo}#${pr}`;
 
-  if (!repo) throw new Error('prMonitorNotify requires repo');
-  if (!pr) throw new Error('prMonitorNotify requires pr');
+  if (!repo) throw new Error("prMonitorNotify requires repo");
+  if (!pr) throw new Error("prMonitorNotify requires pr");
 
   const workflow = new Lobster()
     .pipe(ghPrView({ repo, pr }))
@@ -202,7 +208,7 @@ export function prMonitorNotify(options) {
       const diffResult = results[0];
 
       if (diffResult.suppressed) {
-        return [{ kind: 'github.pr.monitor.notify', suppressed: true }];
+        return [{ kind: "github.pr.monitor.notify", suppressed: true }];
       }
 
       const current = diffResult.after;
@@ -216,29 +222,31 @@ export function prMonitorNotify(options) {
         prInfo: current,
       });
 
-      return [{
-        kind: 'github.pr.monitor.notify',
-        changed: true,
-        repo,
-        pr: Number(pr),
-        message,
-        prInfo: {
-          number: current.number,
-          title: current.title,
-          url: current.url,
-          state: current.state,
+      return [
+        {
+          kind: "github.pr.monitor.notify",
+          changed: true,
+          repo,
+          pr: Number(pr),
+          message,
+          prInfo: {
+            number: current.number,
+            title: current.title,
+            url: current.url,
+            state: current.state,
+          },
+          summary,
         },
-        summary,
-      }];
+      ];
     })
     .meta({
-      name: 'github.pr.monitor.notify',
-      description: 'Emit a notification message when PR changes',
-      requires: ['gh'],
+      name: "github.pr.monitor.notify",
+      description: "Emit a notification message when PR changes",
+      requires: ["gh"],
       args: {
-        repo: { type: 'string', required: true },
-        pr: { type: 'number', required: true },
-        key: { type: 'string' },
+        repo: { type: "string", required: true },
+        pr: { type: "number", required: true },
+        key: { type: "string" },
       },
     });
 
@@ -247,12 +255,12 @@ export function prMonitorNotify(options) {
 
 // Attach metadata
 prMonitorNotify.meta = {
-  name: 'github.pr.monitor.notify',
-  description: 'Emit a notification message when PR changes',
-  requires: ['gh'],
+  name: "github.pr.monitor.notify",
+  description: "Emit a notification message when PR changes",
+  requires: ["gh"],
   args: {
-    repo: { type: 'string', required: true },
-    pr: { type: 'number', required: true },
-    key: { type: 'string' },
+    repo: { type: "string", required: true },
+    pr: { type: "number", required: true },
+    key: { type: "string" },
   },
 };

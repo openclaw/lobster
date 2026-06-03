@@ -35,12 +35,12 @@ async function* toAsyncIterable(input) {
     return;
   }
 
-  if (typeof input[Symbol.asyncIterator] === 'function') {
+  if (typeof input[Symbol.asyncIterator] === "function") {
     yield* input;
     return;
   }
 
-  if (typeof input[Symbol.iterator] === 'function') {
+  if (typeof input[Symbol.iterator] === "function") {
     for (const item of input) {
       yield item;
     }
@@ -83,10 +83,11 @@ export async function runPipelineInternal({ stages, ctx, input = [] }) {
 
     let result;
 
-    if (typeof stage === 'function') {
+    if (typeof stage === "function") {
       // Check if it's a generator function
-      const isGenerator = stage.constructor?.name === 'AsyncGeneratorFunction' ||
-                          stage.constructor?.name === 'GeneratorFunction';
+      const isGenerator =
+        stage.constructor?.name === "AsyncGeneratorFunction" ||
+        stage.constructor?.name === "GeneratorFunction";
 
       if (isGenerator) {
         // Generator function - pass the stream directly
@@ -97,7 +98,7 @@ export async function runPipelineInternal({ stages, ctx, input = [] }) {
         const output = await stage(items, ctx);
         result = { output: toAsyncIterable(output) };
       }
-    } else if (typeof stage?.run === 'function') {
+    } else if (typeof stage?.run === "function") {
       // Stage object with run method (primitives)
       result = await stage.run({ input: stream, ctx });
     } else {
@@ -124,7 +125,16 @@ export async function runPipelineInternal({ stages, ctx, input = [] }) {
 /**
  * Re-export for compatibility with CLI runtime
  */
-export async function runPipeline({ pipeline, registry, stdin, stdout, stderr, env, mode = 'human', input }) {
+export async function runPipeline({
+  pipeline,
+  registry,
+  stdin,
+  stdout,
+  stderr,
+  env,
+  mode = "human",
+  input,
+}) {
   // This wraps the CLI-style pipeline execution
   // Convert pipeline stages to functions using registry
 

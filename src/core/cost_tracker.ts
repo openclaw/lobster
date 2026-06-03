@@ -15,19 +15,19 @@ export type CostSummary = {
 
 export type CostLimit = {
   max_usd: number;
-  action?: 'warn' | 'stop';
+  action?: "warn" | "stop";
 };
 
 const DEFAULT_PRICING: Record<string, { input: number; output: number }> = {
-  'gpt-4o': { input: 2.50, output: 10.00 },
-  'gpt-4o-mini': { input: 0.15, output: 0.60 },
-  'gpt-4-turbo': { input: 10.00, output: 30.00 },
-  'gpt-3.5-turbo': { input: 0.50, output: 1.50 },
-  'claude-opus-4-20250514': { input: 15.00, output: 75.00 },
-  'claude-sonnet-4-5-20250514': { input: 3.00, output: 15.00 },
-  'claude-haiku-3-5': { input: 0.80, output: 4.00 },
-  'gemini-1.5-pro': { input: 1.25, output: 5.00 },
-  'gemini-1.5-flash': { input: 0.075, output: 0.30 },
+  "gpt-4o": { input: 2.5, output: 10.0 },
+  "gpt-4o-mini": { input: 0.15, output: 0.6 },
+  "gpt-4-turbo": { input: 10.0, output: 30.0 },
+  "gpt-3.5-turbo": { input: 0.5, output: 1.5 },
+  "claude-opus-4-20250514": { input: 15.0, output: 75.0 },
+  "claude-sonnet-4-5-20250514": { input: 3.0, output: 15.0 },
+  "claude-haiku-3-5": { input: 0.8, output: 4.0 },
+  "gemini-1.5-pro": { input: 1.25, output: 5.0 },
+  "gemini-1.5-flash": { input: 0.075, output: 0.3 },
 };
 
 function toTokenCount(value: unknown): number {
@@ -46,9 +46,13 @@ export class CostTracker {
   }
 
   recordUsage(stepId: string, model: string | null, usage: Record<string, unknown>) {
-    const inputTokens = toTokenCount(usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens);
-    const outputTokens = toTokenCount(usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens);
-    const pricing = this.pricing[model ?? ''] ?? { input: 0, output: 0 };
+    const inputTokens = toTokenCount(
+      usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens,
+    );
+    const outputTokens = toTokenCount(
+      usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens,
+    );
+    const pricing = this.pricing[model ?? ""] ?? { input: 0, output: 0 };
     const costUsd = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
     this.steps.push({ stepId, model, inputTokens, outputTokens, costUsd });
   }
@@ -80,16 +84,22 @@ export class CostTracker {
     const summary = this.getSummary();
     if (summary.estimatedCostUsd <= limit.max_usd) return;
 
-    if (limit.action === 'stop') {
-      throw new Error(`Cost limit exceeded: $${summary.estimatedCostUsd.toFixed(4)} > $${limit.max_usd.toFixed(2)} limit`);
+    if (limit.action === "stop") {
+      throw new Error(
+        `Cost limit exceeded: $${summary.estimatedCostUsd.toFixed(4)} > $${limit.max_usd.toFixed(2)} limit`,
+      );
     }
 
     if (stderr) {
-      stderr.write(`[WARN] Cost $${summary.estimatedCostUsd.toFixed(4)} exceeds limit $${limit.max_usd.toFixed(2)}\n`);
+      stderr.write(
+        `[WARN] Cost $${summary.estimatedCostUsd.toFixed(4)} exceeds limit $${limit.max_usd.toFixed(2)}\n`,
+      );
     }
   }
 
-  static parsePricingFromEnv(env: Record<string, string | undefined>): Record<string, { input: number; output: number }> | undefined {
+  static parsePricingFromEnv(
+    env: Record<string, string | undefined>,
+  ): Record<string, { input: number; output: number }> | undefined {
     const raw = env.LOBSTER_LLM_PRICING_JSON;
     if (!raw) return undefined;
     try {

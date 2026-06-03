@@ -1,28 +1,28 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { promises as fsp } from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
+import test from "node:test";
+import assert from "node:assert/strict";
+import { promises as fsp } from "node:fs";
+import path from "node:path";
+import os from "node:os";
 
-import { resumeToolRequest, runToolRequest } from '../src/core/index.js';
+import { resumeToolRequest, runToolRequest } from "../src/core/index.js";
 
 function createDirectAdapter(resultText: string) {
   const calls: Array<Record<string, unknown>> = [];
   return {
     calls,
     adapter: {
-      source: 'test',
+      source: "test",
       async invoke({ payload }: { payload: Record<string, unknown> }) {
         calls.push(payload);
         return {
           ok: true,
           result: {
-            runId: 'adapter_1',
-            model: 'test/model',
+            runId: "adapter_1",
+            model: "test/model",
             prompt: payload.prompt,
-            status: 'completed',
+            status: "completed",
             output: {
-              format: 'json',
+              format: "json",
               text: resultText,
               data: JSON.parse(resultText),
             },
@@ -33,7 +33,7 @@ function createDirectAdapter(resultText: string) {
   };
 }
 
-test('runToolRequest executes pipeline with injected llm adapter', async () => {
+test("runToolRequest executes pipeline with injected llm adapter", async () => {
   const { adapter, calls } = createDirectAdapter('{"recommendation":"no jacket"}');
   const envelope = await runToolRequest({
     pipeline:
@@ -41,8 +41,8 @@ test('runToolRequest executes pipeline with injected llm adapter', async () => {
     ctx: {
       env: {
         ...process.env,
-        LOBSTER_LLM_PROVIDER: 'pi',
-        LOBSTER_LLM_MODEL: 'test/model',
+        LOBSTER_LLM_PROVIDER: "pi",
+        LOBSTER_LLM_MODEL: "test/model",
       },
       llmAdapters: {
         pi: adapter,
@@ -51,17 +51,17 @@ test('runToolRequest executes pipeline with injected llm adapter', async () => {
   });
 
   assert.equal(envelope.ok, true);
-  assert.equal(envelope.status, 'ok');
+  assert.equal(envelope.status, "ok");
   assert.equal(envelope.output?.length, 1);
-  assert.equal((envelope.output![0] as any).output.data.recommendation, 'no jacket');
+  assert.equal((envelope.output![0] as any).output.data.recommendation, "no jacket");
   assert.equal(calls.length, 1);
-  assert.equal((calls[0] as any).model, 'test/model');
+  assert.equal((calls[0] as any).model, "test/model");
 });
 
-test('resumeToolRequest completes approval-gated workflow with injected llm adapter', async () => {
+test("resumeToolRequest completes approval-gated workflow with injected llm adapter", async () => {
   const { adapter, calls } = createDirectAdapter('{"recommendation":"no","reason":"warm"}');
-  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-core-tool-runtime-'));
-  const filePath = path.join(tmpDir, 'workflow.lobster');
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-core-tool-runtime-"));
+  const filePath = path.join(tmpDir, "workflow.lobster");
 
   await fsp.writeFile(
     filePath,
@@ -69,33 +69,33 @@ test('resumeToolRequest completes approval-gated workflow with injected llm adap
       {
         steps: [
           {
-            id: 'fetch',
-            run: 'node -e "process.stdout.write(JSON.stringify({location:\'Phoenix\',temp_f:73.8}))"',
+            id: "fetch",
+            run: "node -e \"process.stdout.write(JSON.stringify({location:'Phoenix',temp_f:73.8}))\"",
           },
           {
-            id: 'confirm',
-            approval: 'Want jacket advice?',
-            stdin: '$fetch.json',
+            id: "confirm",
+            approval: "Want jacket advice?",
+            stdin: "$fetch.json",
           },
           {
-            id: 'advice',
+            id: "advice",
             pipeline: 'llm.invoke --provider pi --prompt "Return JSON." --disable-cache',
-            stdin: '$fetch.json',
-            when: '$confirm.approved',
+            stdin: "$fetch.json",
+            when: "$confirm.approved",
           },
         ],
       },
       null,
       2,
     ),
-    'utf8',
+    "utf8",
   );
 
   const env = {
     ...process.env,
-    LOBSTER_STATE_DIR: path.join(tmpDir, 'state'),
-    LOBSTER_LLM_PROVIDER: 'pi',
-    LOBSTER_LLM_MODEL: 'test/model',
+    LOBSTER_STATE_DIR: path.join(tmpDir, "state"),
+    LOBSTER_LLM_PROVIDER: "pi",
+    LOBSTER_LLM_MODEL: "test/model",
   };
 
   const first = await runToolRequest({
@@ -108,11 +108,11 @@ test('resumeToolRequest completes approval-gated workflow with injected llm adap
   });
 
   assert.equal(first.ok, true);
-  assert.equal(first.status, 'needs_approval');
+  assert.equal(first.status, "needs_approval");
   assert.ok(first.requiresApproval?.resumeToken);
 
   const resumed = await resumeToolRequest({
-    token: first.requiresApproval?.resumeToken ?? '',
+    token: first.requiresApproval?.resumeToken ?? "",
     approved: true,
     ctx: {
       cwd: tmpDir,
@@ -122,14 +122,14 @@ test('resumeToolRequest completes approval-gated workflow with injected llm adap
   });
 
   assert.equal(resumed.ok, true);
-  assert.equal(resumed.status, 'ok');
-  assert.equal((resumed.output![0] as any).output.data.reason, 'warm');
+  assert.equal(resumed.status, "ok");
+  assert.equal((resumed.output![0] as any).output.data.reason, "warm");
   assert.equal(calls.length, 1);
 });
 
-test('runToolRequest/resumeToolRequest handles needs_input workflow pauses', async () => {
-  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lobster-core-tool-input-'));
-  const filePath = path.join(tmpDir, 'workflow.lobster');
+test("runToolRequest/resumeToolRequest handles needs_input workflow pauses", async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-core-tool-input-"));
+  const filePath = path.join(tmpDir, "workflow.lobster");
 
   await fsp.writeFile(
     filePath,
@@ -137,26 +137,26 @@ test('runToolRequest/resumeToolRequest handles needs_input workflow pauses', asy
       {
         steps: [
           {
-            id: 'draft',
-            run: 'node -e "process.stdout.write(JSON.stringify({text:\'hello\'}))"',
+            id: "draft",
+            run: "node -e \"process.stdout.write(JSON.stringify({text:'hello'}))\"",
           },
           {
-            id: 'review',
+            id: "review",
             input: {
-              prompt: 'Review draft?',
+              prompt: "Review draft?",
               responseSchema: {
-                type: 'object',
-                properties: { decision: { type: 'string' } },
-                required: ['decision'],
+                type: "object",
+                properties: { decision: { type: "string" } },
+                required: ["decision"],
               },
             },
           },
           {
-            id: 'finish',
+            id: "finish",
             run: 'node -e "process.stdout.write(JSON.stringify({decision:process.env.DECISION,subject:process.env.SUBJECT}))"',
             env: {
-              DECISION: '$review.response.decision',
-              SUBJECT: '$review.subject.text',
+              DECISION: "$review.response.decision",
+              SUBJECT: "$review.subject.text",
             },
           },
         ],
@@ -164,12 +164,12 @@ test('runToolRequest/resumeToolRequest handles needs_input workflow pauses', asy
       null,
       2,
     ),
-    'utf8',
+    "utf8",
   );
 
   const env = {
     ...process.env,
-    LOBSTER_STATE_DIR: path.join(tmpDir, 'state'),
+    LOBSTER_STATE_DIR: path.join(tmpDir, "state"),
   };
 
   const first = await runToolRequest({
@@ -178,17 +178,17 @@ test('runToolRequest/resumeToolRequest handles needs_input workflow pauses', asy
   });
 
   assert.equal(first.ok, true);
-  assert.equal(first.status, 'needs_input');
-  assert.deepEqual(first.requiresInput?.subject, { text: 'hello' });
+  assert.equal(first.status, "needs_input");
+  assert.deepEqual(first.requiresInput?.subject, { text: "hello" });
   assert.ok(first.requiresInput?.resumeToken);
 
   const resumed = await resumeToolRequest({
-    token: first.requiresInput?.resumeToken ?? '',
-    response: { decision: 'approve' },
+    token: first.requiresInput?.resumeToken ?? "",
+    response: { decision: "approve" },
     ctx: { cwd: tmpDir, env },
   });
 
   assert.equal(resumed.ok, true);
-  assert.equal(resumed.status, 'ok');
-  assert.deepEqual(resumed.output, [{ decision: 'approve', subject: 'hello' }]);
+  assert.equal(resumed.status, "ok");
+  assert.deepEqual(resumed.output, [{ decision: "approve", subject: "hello" }]);
 });

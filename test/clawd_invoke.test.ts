@@ -1,7 +1,7 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import http from 'node:http';
-import { createDefaultRegistry } from '../src/commands/registry.js';
+import test from "node:test";
+import assert from "node:assert/strict";
+import http from "node:http";
+import { createDefaultRegistry } from "../src/commands/registry.js";
 
 function streamOf(items) {
   return (async function* () {
@@ -9,22 +9,22 @@ function streamOf(items) {
   })();
 }
 
-test('openclaw.invoke posts to /tools/invoke and returns JSON', async () => {
+test("openclaw.invoke posts to /tools/invoke and returns JSON", async () => {
   const server = http.createServer((req, res) => {
-    if (req.method !== 'POST' || req.url !== '/tools/invoke') {
+    if (req.method !== "POST" || req.url !== "/tools/invoke") {
       res.writeHead(404);
-      res.end('not found');
+      res.end("not found");
       return;
     }
 
-    let body = '';
-    req.setEncoding('utf8');
-    req.on('data', (d) => (body += d));
-    req.on('end', () => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
       const parsed = JSON.parse(body);
-      assert.equal(parsed.tool, 'demo');
-      assert.equal(parsed.action, 'ping');
-      res.writeHead(200, { 'content-type': 'application/json' });
+      assert.equal(parsed.tool, "demo");
+      assert.equal(parsed.action, "ping");
+      res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, result: [{ ok: true, echo: parsed.args }] }));
     });
   });
@@ -35,16 +35,16 @@ test('openclaw.invoke posts to /tools/invoke and returns JSON', async () => {
 
   try {
     const registry = createDefaultRegistry();
-    const cmd = registry.get('openclaw.invoke');
+    const cmd = registry.get("openclaw.invoke");
 
     const result = await cmd.run({
       input: streamOf([]),
       args: {
         _: [],
         url: `http://127.0.0.1:${port}`,
-        tool: 'demo',
-        action: 'ping',
-        'args-json': '{"hello":"world"}',
+        tool: "demo",
+        action: "ping",
+        "args-json": '{"hello":"world"}',
       },
       ctx: {
         stdin: process.stdin,
@@ -52,35 +52,35 @@ test('openclaw.invoke posts to /tools/invoke and returns JSON', async () => {
         stderr: process.stderr,
         env: process.env,
         registry,
-        mode: 'tool',
+        mode: "tool",
         render: { json() {}, lines() {} },
       },
     });
 
     const items = [];
     for await (const it of result.output) items.push(it);
-    assert.deepEqual(items, [{ ok: true, echo: { hello: 'world' } }]);
+    assert.deepEqual(items, [{ ok: true, echo: { hello: "world" } }]);
   } finally {
     server.close();
   }
 });
 
-test('openclaw.invoke --each maps input items into tool args', async () => {
+test("openclaw.invoke --each maps input items into tool args", async () => {
   const seen: Array<{ call: number; args: unknown }> = [];
   const server = http.createServer((req, res) => {
-    if (req.method !== 'POST' || req.url !== '/tools/invoke') {
+    if (req.method !== "POST" || req.url !== "/tools/invoke") {
       res.writeHead(404);
-      res.end('not found');
+      res.end("not found");
       return;
     }
 
-    let body = '';
-    req.setEncoding('utf8');
-    req.on('data', (d) => (body += d));
-    req.on('end', () => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
       const parsed = JSON.parse(body);
       seen.push({ call: seen.length + 1, args: parsed.args });
-      res.writeHead(200, { 'content-type': 'application/json' });
+      res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, result: [{ ok: true, call: seen.length }] }));
     });
   });
@@ -91,18 +91,18 @@ test('openclaw.invoke --each maps input items into tool args', async () => {
 
   try {
     const registry = createDefaultRegistry();
-    const cmd = registry.get('openclaw.invoke');
+    const cmd = registry.get("openclaw.invoke");
 
     const result = await cmd.run({
-      input: streamOf(['a', 'b']),
+      input: streamOf(["a", "b"]),
       args: {
         _: [],
         url: `http://127.0.0.1:${port}`,
-        tool: 'demo',
-        action: 'ping',
+        tool: "demo",
+        action: "ping",
         each: true,
-        'item-key': 'message',
-        'args-json': '{"channel":"test"}',
+        "item-key": "message",
+        "args-json": '{"channel":"test"}',
       },
       ctx: {
         stdin: process.stdin,
@@ -110,17 +110,20 @@ test('openclaw.invoke --each maps input items into tool args', async () => {
         stderr: process.stderr,
         env: process.env,
         registry,
-        mode: 'tool',
+        mode: "tool",
         render: { json() {}, lines() {} },
       },
     });
 
     const items = [];
     for await (const it of result.output) items.push(it);
-    assert.deepEqual(items, [{ ok: true, call: 1 }, { ok: true, call: 2 }]);
+    assert.deepEqual(items, [
+      { ok: true, call: 1 },
+      { ok: true, call: 2 },
+    ]);
     assert.deepEqual(seen, [
-      { call: 1, args: { channel: 'test', message: 'a' } },
-      { call: 2, args: { channel: 'test', message: 'b' } },
+      { call: 1, args: { channel: "test", message: "a" } },
+      { call: 2, args: { channel: "test", message: "b" } },
     ]);
   } finally {
     server.close();

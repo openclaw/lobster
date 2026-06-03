@@ -1,93 +1,95 @@
-import path from 'node:path';
-import { promises as fsp } from 'node:fs';
-import { createHash } from 'node:crypto';
-import { Ajv } from 'ajv';
-import type { ErrorObject } from 'ajv';
+import path from "node:path";
+import { promises as fsp } from "node:fs";
+import { createHash } from "node:crypto";
+import { Ajv } from "ajv";
+import type { ErrorObject } from "ajv";
 
-import { readStateJson, writeStateJson, stableStringify } from '../../state/store.js';
-import type { LobsterCommand } from '../types.js';
+import { readStateJson, writeStateJson, stableStringify } from "../../state/store.js";
+import { createCompileCached } from "../../validation.js";
+import type { LobsterCommand } from "../types.js";
 
 const ajv = new Ajv({ allErrors: true, strict: false });
+const compileCachedLocal = createCompileCached(ajv);
 
 const artifactSchema = {
-  type: 'object',
+  type: "object",
   properties: {
-    kind: { type: 'string' },
-    role: { type: 'string' },
-    name: { type: 'string' },
-    mimeType: { type: 'string' },
-    text: { type: 'string' },
+    kind: { type: "string" },
+    role: { type: "string" },
+    name: { type: "string" },
+    mimeType: { type: "string" },
+    text: { type: "string" },
     data: {},
-    uri: { type: 'string' },
+    uri: { type: "string" },
   },
   additionalProperties: true,
 };
 
 const payloadSchema = {
-  type: 'object',
+  type: "object",
   properties: {
-    prompt: { type: 'string', minLength: 1 },
-    model: { type: 'string', minLength: 1 },
-    artifacts: { type: 'array', items: artifactSchema },
-    artifactHashes: { type: 'array', items: { type: 'string', minLength: 10 } },
-    schemaVersion: { type: 'string' },
-    metadata: { type: 'object', additionalProperties: true },
-    outputSchema: { type: 'object', additionalProperties: true },
-    temperature: { type: 'number' },
-    maxOutputTokens: { type: 'number' },
+    prompt: { type: "string", minLength: 1 },
+    model: { type: "string", minLength: 1 },
+    artifacts: { type: "array", items: artifactSchema },
+    artifactHashes: { type: "array", items: { type: "string", minLength: 10 } },
+    schemaVersion: { type: "string" },
+    metadata: { type: "object", additionalProperties: true },
+    outputSchema: { type: "object", additionalProperties: true },
+    temperature: { type: "number" },
+    maxOutputTokens: { type: "number" },
     retryContext: {
-      type: 'object',
+      type: "object",
       properties: {
-        attempt: { type: 'number' },
-        validationErrors: { type: 'array', items: { type: 'string' } },
+        attempt: { type: "number" },
+        validationErrors: { type: "array", items: { type: "string" } },
       },
       additionalProperties: false,
     },
   },
-  required: ['prompt', 'artifacts', 'artifactHashes'],
+  required: ["prompt", "artifacts", "artifactHashes"],
   additionalProperties: false,
 };
 
 const responseSchema = {
-  type: 'object',
+  type: "object",
   properties: {
-    ok: { type: 'boolean' },
+    ok: { type: "boolean" },
     result: {
-      type: 'object',
+      type: "object",
       properties: {
-        runId: { type: 'string' },
-        model: { type: 'string' },
-        prompt: { type: 'string' },
-        status: { type: 'string' },
+        runId: { type: "string" },
+        model: { type: "string" },
+        prompt: { type: "string" },
+        status: { type: "string" },
         output: {
-          type: 'object',
+          type: "object",
           properties: {
-            text: { type: 'string' },
+            text: { type: "string" },
             data: {},
-            format: { type: 'string' },
+            format: { type: "string" },
           },
           required: [],
           additionalProperties: true,
         },
         usage: {
-          type: 'object',
+          type: "object",
           properties: {
-            inputTokens: { type: 'number' },
-            outputTokens: { type: 'number' },
-            totalTokens: { type: 'number' },
+            inputTokens: { type: "number" },
+            outputTokens: { type: "number" },
+            totalTokens: { type: "number" },
           },
           additionalProperties: true,
         },
-        warnings: { type: 'array', items: { type: 'string' } },
-        metadata: { type: 'object', additionalProperties: true },
-        diagnostics: { type: 'object', additionalProperties: true },
+        warnings: { type: "array", items: { type: "string" } },
+        metadata: { type: "object", additionalProperties: true },
+        diagnostics: { type: "object", additionalProperties: true },
       },
-      required: ['output'],
+      required: ["output"],
       additionalProperties: true,
     },
-    error: { type: 'object', additionalProperties: true },
+    error: { type: "object", additionalProperties: true },
   },
-  required: ['ok'],
+  required: ["ok"],
   additionalProperties: true,
 };
 
@@ -97,7 +99,7 @@ const validateResponseEnvelope = ajv.compile(responseSchema);
 const DEFAULT_MAX_VALIDATION_RETRIES = 1;
 const STATE_VERSION = 1;
 
-type BuiltInProvider = 'openclaw' | 'pi' | 'http';
+type BuiltInProvider = "openclaw" | "pi" | "http";
 type SupportedProvider = BuiltInProvider | string;
 
 type LlmResponseEnvelope = {
@@ -165,30 +167,44 @@ type CommandConfig = {
 type Adapter = {
   provider: SupportedProvider;
   source: string;
-  invoke: (params: { env: any; args: any; payload: Record<string, any> }) => Promise<LlmResponseEnvelope>;
+  invoke: (params: {
+    env: any;
+    args: any;
+    payload: Record<string, any>;
+  }) => Promise<LlmResponseEnvelope>;
 };
 
 type DirectAdapter =
-  | ((params: { env: any; args: any; payload: Record<string, any>; ctx: any }) => Promise<LlmResponseEnvelope>)
+  | ((params: {
+      env: any;
+      args: any;
+      payload: Record<string, any>;
+      ctx: any;
+    }) => Promise<LlmResponseEnvelope>)
   | {
-    source?: string;
-    invoke: (params: { env: any; args: any; payload: Record<string, any>; ctx: any }) => Promise<LlmResponseEnvelope>;
-  };
+      source?: string;
+      invoke: (params: {
+        env: any;
+        args: any;
+        payload: Record<string, any>;
+        ctx: any;
+      }) => Promise<LlmResponseEnvelope>;
+    };
 
 export const llmInvokeCommand = createLlmInvokeCommand({
-  name: 'llm.invoke',
-  itemKind: 'llm.invoke',
-  stateType: 'llm.invoke',
-  cacheNamespace: 'llm.invoke',
+  name: "llm.invoke",
+  itemKind: "llm.invoke",
+  stateType: "llm.invoke",
+  cacheNamespace: "llm.invoke",
   defaultProvider: null,
-  description: 'Call a configured LLM adapter with typed payloads and caching',
-  helpTitle: 'llm.invoke — call a configured LLM adapter with caching and schema validation',
+  description: "Call a configured LLM adapter with typed payloads and caching",
+  helpTitle: "llm.invoke — call a configured LLM adapter with caching and schema validation",
   helpConfig: [
-    'Provider resolution order: --provider, LOBSTER_LLM_PROVIDER, then environment auto-detect.',
-    'Built-in providers: openclaw, pi, http.',
-    'OpenClaw provider uses OPENCLAW_URL (CLAWD_URL also supported) and OPENCLAW_TOKEN.',
-    'Pi provider uses LOBSTER_PI_LLM_ADAPTER_URL and is intended to be supplied by a Pi extension.',
-    'Generic http provider uses LOBSTER_LLM_ADAPTER_URL and optional LOBSTER_LLM_ADAPTER_TOKEN.',
+    "Provider resolution order: --provider, LOBSTER_LLM_PROVIDER, then environment auto-detect.",
+    "Built-in providers: openclaw, pi, http.",
+    "OpenClaw provider uses OPENCLAW_URL (CLAWD_URL also supported) and OPENCLAW_TOKEN.",
+    "Pi provider uses LOBSTER_PI_LLM_ADAPTER_URL and is intended to be supplied by a Pi extension.",
+    "Generic http provider uses LOBSTER_LLM_ADAPTER_URL and optional LOBSTER_LLM_ADAPTER_TOKEN.",
   ],
   helpExamples: [
     "llm.invoke --prompt 'Write summary'",
@@ -203,16 +219,16 @@ export const llmInvokeCommand = createLlmInvokeCommand({
 });
 
 export const llmTaskInvokeCommand = createLlmInvokeCommand({
-  name: 'llm_task.invoke',
-  itemKind: 'llm_task.invoke',
-  stateType: 'llm_task.invoke',
-  cacheNamespace: 'llm_task.invoke',
-  defaultProvider: 'openclaw',
-  description: 'Backward-compatible alias for llm.invoke using the OpenClaw adapter',
-  helpTitle: 'llm_task.invoke — backward-compatible alias for llm.invoke using OpenClaw',
+  name: "llm_task.invoke",
+  itemKind: "llm_task.invoke",
+  stateType: "llm_task.invoke",
+  cacheNamespace: "llm_task.invoke",
+  defaultProvider: "openclaw",
+  description: "Backward-compatible alias for llm.invoke using the OpenClaw adapter",
+  helpTitle: "llm_task.invoke — backward-compatible alias for llm.invoke using OpenClaw",
   helpConfig: [
-    'Requires OPENCLAW_URL (or CLAWD_URL) and optionally OPENCLAW_TOKEN.',
-    'Use llm.invoke for new workflows and non-OpenClaw adapters.',
+    "Requires OPENCLAW_URL (or CLAWD_URL) and optionally OPENCLAW_TOKEN.",
+    "Use llm.invoke for new workflows and non-OpenClaw adapters.",
   ],
   helpExamples: [
     "llm_task.invoke --prompt 'Write summary'",
@@ -220,7 +236,7 @@ export const llmTaskInvokeCommand = createLlmInvokeCommand({
     "cat artifacts.json | llm_task.invoke --prompt 'Score each item'",
   ],
   sourceForProvider() {
-    return 'clawd';
+    return "clawd";
   },
   legacyEnvCompat: true,
 });
@@ -231,53 +247,59 @@ export function createLlmInvokeCommand(config: CommandConfig): LobsterCommand {
     meta: {
       description: config.description,
       argsSchema: {
-        type: 'object',
+        type: "object",
         properties: {
           provider: {
-            type: 'string',
-            description: 'LLM adapter provider (openclaw, pi, http). Optional if auto-detected.',
+            type: "string",
+            description: "LLM adapter provider (openclaw, pi, http). Optional if auto-detected.",
           },
           token: {
-            type: 'string',
-            description: 'Optional bearer token for providers that support it.',
+            type: "string",
+            description: "Optional bearer token for providers that support it.",
           },
-          prompt: { type: 'string', description: 'Primary prompt / instructions' },
+          prompt: { type: "string", description: "Primary prompt / instructions" },
           model: {
-            type: 'string',
-            description: 'Model identifier. Optional; adapter defaults may apply if omitted.',
+            type: "string",
+            description: "Model identifier. Optional; adapter defaults may apply if omitted.",
           },
-          'artifacts-json': { type: 'string', description: 'JSON array of artifacts to send' },
-          'metadata-json': { type: 'string', description: 'JSON object of metadata to include' },
-          'output-schema': { type: 'string', description: 'JSON schema LLM output must satisfy' },
-          'schema-version': { type: 'string', description: 'Logical schema version for caching' },
-          'max-validation-retries': { type: 'number', description: 'Retries when schema validation fails' },
-          temperature: { type: 'number', description: 'Sampling temperature' },
-          'max-output-tokens': { type: 'number', description: 'Max completion tokens' },
-          'state-key': { type: 'string', description: 'Run-state key override (else LOBSTER_RUN_STATE_KEY)' },
-          refresh: { type: 'boolean', description: 'Bypass run-state + cache' },
-          'disable-cache': { type: 'boolean', description: 'Skip persistent cache' },
-          _: { type: 'array', items: { type: 'string' } },
+          "artifacts-json": { type: "string", description: "JSON array of artifacts to send" },
+          "metadata-json": { type: "string", description: "JSON object of metadata to include" },
+          "output-schema": { type: "string", description: "JSON schema LLM output must satisfy" },
+          "schema-version": { type: "string", description: "Logical schema version for caching" },
+          "max-validation-retries": {
+            type: "number",
+            description: "Retries when schema validation fails",
+          },
+          temperature: { type: "number", description: "Sampling temperature" },
+          "max-output-tokens": { type: "number", description: "Max completion tokens" },
+          "state-key": {
+            type: "string",
+            description: "Run-state key override (else LOBSTER_RUN_STATE_KEY)",
+          },
+          refresh: { type: "boolean", description: "Bypass run-state + cache" },
+          "disable-cache": { type: "boolean", description: "Skip persistent cache" },
+          _: { type: "array", items: { type: "string" } },
         },
         required: [],
       },
-      sideEffects: ['calls_llm'],
+      sideEffects: ["calls_llm"],
     },
     help() {
       const lines = [
         config.helpTitle,
-        '',
-        'Usage:',
+        "",
+        "Usage:",
         ...config.helpExamples.map((example) => `  ${example}`),
-        '',
-        'Features:',
-        '  - Typed payload validation before invoking the adapter.',
-        '  - Run-state + file cache so resumes do not re-call the LLM.',
-        '  - Optional JSON-schema enforcement with bounded retries.',
-        '',
-        'Config:',
+        "",
+        "Features:",
+        "  - Typed payload validation before invoking the adapter.",
+        "  - Run-state + file cache so resumes do not re-call the LLM.",
+        "  - Optional JSON-schema enforcement with bounded retries.",
+        "",
+        "Config:",
         ...config.helpConfig.map((line) => `  - ${line}`),
       ];
-      return `${lines.join('\n')}\n`;
+      return `${lines.join("\n")}\n`;
     },
     async run({ input, args, ctx }) {
       return runLlmInvoke({ input, args, ctx, config });
@@ -285,7 +307,17 @@ export function createLlmInvokeCommand(config: CommandConfig): LobsterCommand {
   } satisfies LobsterCommand;
 }
 
-async function runLlmInvoke({ input, args, ctx, config }: { input: AsyncIterable<any>; args: any; ctx: any; config: CommandConfig }) {
+async function runLlmInvoke({
+  input,
+  args,
+  ctx,
+  config,
+}: {
+  input: AsyncIterable<any>;
+  args: any;
+  ctx: any;
+  config: CommandConfig;
+}) {
   const env = ctx.env ?? process.env;
   const provider = resolveProvider(args, env, config.defaultProvider, ctx);
   const adapter = resolveAdapter({ provider, env, args, config, ctx });
@@ -294,31 +326,42 @@ async function runLlmInvoke({ input, args, ctx, config }: { input: AsyncIterable
 
   const model = resolveModel(args, env, config.legacyEnvCompat);
   const schemaVersion = resolveEnvString(
-    args['schema-version'],
-    ['LOBSTER_LLM_SCHEMA_VERSION', ...(config.legacyEnvCompat ? ['LLM_TASK_SCHEMA_VERSION'] : [])],
+    args["schema-version"],
+    ["LOBSTER_LLM_SCHEMA_VERSION", ...(config.legacyEnvCompat ? ["LLM_TASK_SCHEMA_VERSION"] : [])],
     env,
-    'v1',
+    "v1",
   );
-  const maxOutputTokens = parseOptionalNumber(args['max-output-tokens']);
+  const maxOutputTokens = parseOptionalNumber(args["max-output-tokens"]);
   const temperature = parseOptionalNumber(args.temperature);
-  const providedArtifacts = parseJsonArray(args['artifacts-json'], `${config.name} --artifacts-json`);
-  const metadataObject = parseJsonObject(args['metadata-json'], `${config.name} --metadata-json`);
-  const userOutputSchema = parseJsonObject(args['output-schema'], `${config.name} --output-schema`);
+  const providedArtifacts = parseJsonArray(
+    args["artifacts-json"],
+    `${config.name} --artifacts-json`,
+  );
+  const metadataObject = parseJsonObject(args["metadata-json"], `${config.name} --metadata-json`);
+  const userOutputSchema = parseJsonObject(args["output-schema"], `${config.name} --output-schema`);
   const maxValidationRetriesRaw =
-    args['max-validation-retries'] ??
-    getFirstEnv(env, ['LOBSTER_LLM_VALIDATION_RETRIES', ...(config.legacyEnvCompat ? ['LLM_TASK_VALIDATION_RETRIES'] : [])]);
+    args["max-validation-retries"] ??
+    getFirstEnv(env, [
+      "LOBSTER_LLM_VALIDATION_RETRIES",
+      ...(config.legacyEnvCompat ? ["LLM_TASK_VALIDATION_RETRIES"] : []),
+    ]);
   const maxValidationRetries = userOutputSchema
     ? Math.max(
         0,
-        Number.isFinite(Number(maxValidationRetriesRaw)) ? Number(maxValidationRetriesRaw) : DEFAULT_MAX_VALIDATION_RETRIES,
+        Number.isFinite(Number(maxValidationRetriesRaw))
+          ? Number(maxValidationRetriesRaw)
+          : DEFAULT_MAX_VALIDATION_RETRIES,
       )
     : 0;
-  const disableCache = flag(args['disable-cache']);
+  const disableCache = flag(args["disable-cache"]);
   const forceRefresh = flag(
     args.refresh ??
-      getFirstEnv(env, ['LOBSTER_LLM_FORCE_REFRESH', ...(config.legacyEnvCompat ? ['LLM_TASK_FORCE_REFRESH'] : [])]),
+      getFirstEnv(env, [
+        "LOBSTER_LLM_FORCE_REFRESH",
+        ...(config.legacyEnvCompat ? ["LLM_TASK_FORCE_REFRESH"] : []),
+      ]),
   );
-  const stateKey = String(args['state-key'] ?? env.LOBSTER_RUN_STATE_KEY ?? '').trim() || null;
+  const stateKey = String(args["state-key"] ?? env.LOBSTER_RUN_STATE_KEY ?? "").trim() || null;
 
   const inputArtifacts: any[] = [];
   for await (const item of input) inputArtifacts.push(item);
@@ -339,7 +382,9 @@ async function runLlmInvoke({ input, args, ctx, config }: { input: AsyncIterable
     const reused = pickReusableState(stored, cacheKey, config.stateType);
     if (reused) {
       return {
-        output: streamOf(reused.items.map((item) => ({ ...item, source: 'run_state', cached: true }))),
+        output: streamOf(
+          reused.items.map((item) => ({ ...item, source: "run_state", cached: true })),
+        ),
       };
     }
   }
@@ -348,7 +393,7 @@ async function runLlmInvoke({ input, args, ctx, config }: { input: AsyncIterable
     const cache = await readCacheEntry(env, cacheKey, config.cacheNamespace);
     if (cache) {
       return {
-        output: streamOf(cache.items.map((item) => ({ ...item, source: 'cache', cached: true }))),
+        output: streamOf(cache.items.map((item) => ({ ...item, source: "cache", cached: true }))),
       };
     }
   }
@@ -369,7 +414,7 @@ async function runLlmInvoke({ input, args, ctx, config }: { input: AsyncIterable
     throw new Error(`${config.name} payload invalid: ${ajv.errorsText(validatePayload.errors)}`);
   }
 
-  const validator = userOutputSchema ? ajv.compile(userOutputSchema) : null;
+  const validator = userOutputSchema ? compileCachedLocal(userOutputSchema) : null;
   let attempt = 0;
   let lastValidationErrors: string[] = [];
 
@@ -396,7 +441,7 @@ async function runLlmInvoke({ input, args, ctx, config }: { input: AsyncIterable
     }
 
     if (responseEnvelope.ok !== true) {
-      const message = responseEnvelope.error?.message ?? 'llm adapter returned an error';
+      const message = responseEnvelope.error?.message ?? "llm adapter returned an error";
       throw new Error(`${config.name} remote error: ${message}`);
     }
 
@@ -411,29 +456,50 @@ async function runLlmInvoke({ input, args, ctx, config }: { input: AsyncIterable
     });
 
     if (!validator) {
-      await persistOutputs({ env, stateKey, cacheKey, items: normalized, stateType: config.stateType });
+      await persistOutputs({
+        env,
+        stateKey,
+        cacheKey,
+        items: normalized,
+        stateType: config.stateType,
+      });
       if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
       return { output: streamOf(normalized) };
     }
 
     const structured = normalized[0]?.output?.data ?? null;
     if (validator(structured)) {
-      await persistOutputs({ env, stateKey, cacheKey, items: normalized, stateType: config.stateType });
+      await persistOutputs({
+        env,
+        stateKey,
+        cacheKey,
+        items: normalized,
+        stateType: config.stateType,
+      });
       if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
       return { output: streamOf(normalized) };
     }
 
     lastValidationErrors = collectAjvErrors(validator.errors);
     if (attempt > maxValidationRetries + 1) {
-      throw new Error(`${config.name} output failed schema validation: ${lastValidationErrors.join('; ')}`);
+      throw new Error(
+        `${config.name} output failed schema validation: ${lastValidationErrors.join("; ")}`,
+      );
     }
   }
 }
 
-function resolveProvider(args: any, env: any, defaultProvider?: SupportedProvider | null, ctx?: any): SupportedProvider {
-  const explicit = String(args.provider ?? env.LOBSTER_LLM_PROVIDER ?? '').trim().toLowerCase();
+function resolveProvider(
+  args: any,
+  env: any,
+  defaultProvider?: SupportedProvider | null,
+  ctx?: any,
+): SupportedProvider {
+  const explicit = String(args.provider ?? env.LOBSTER_LLM_PROVIDER ?? "")
+    .trim()
+    .toLowerCase();
   if (explicit) {
-    if (explicit === 'openclaw' || explicit === 'pi' || explicit === 'http') {
+    if (explicit === "openclaw" || explicit === "pi" || explicit === "http") {
       return explicit;
     }
     if (getDirectAdapter(ctx, explicit)) {
@@ -442,14 +508,17 @@ function resolveProvider(args: any, env: any, defaultProvider?: SupportedProvide
     throw new Error(`Unsupported llm provider: ${explicit}`);
   }
   if (defaultProvider) return defaultProvider;
-  const directAdapters = ctx?.llmAdapters && typeof ctx.llmAdapters === 'object'
-    ? Object.keys(ctx.llmAdapters).filter((key) => getDirectAdapter(ctx, key))
-    : [];
+  const directAdapters =
+    ctx?.llmAdapters && typeof ctx.llmAdapters === "object"
+      ? Object.keys(ctx.llmAdapters).filter((key) => getDirectAdapter(ctx, key))
+      : [];
   if (directAdapters.length === 1) return directAdapters[0];
-  if (String(env.LOBSTER_PI_LLM_ADAPTER_URL ?? '').trim()) return 'pi';
-  if (String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? '').trim()) return 'openclaw';
-  if (String(env.LOBSTER_LLM_ADAPTER_URL ?? '').trim()) return 'http';
-  throw new Error('llm.invoke could not resolve a provider. Set --provider or LOBSTER_LLM_PROVIDER');
+  if (String(env.LOBSTER_PI_LLM_ADAPTER_URL ?? "").trim()) return "pi";
+  if (String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? "").trim()) return "openclaw";
+  if (String(env.LOBSTER_LLM_ADAPTER_URL ?? "").trim()) return "http";
+  throw new Error(
+    "llm.invoke could not resolve a provider. Set --provider or LOBSTER_LLM_PROVIDER",
+  );
 }
 
 function resolveAdapter({
@@ -467,55 +536,55 @@ function resolveAdapter({
 }): Adapter {
   const direct = getDirectAdapter(ctx, provider);
   if (direct) {
-    const invoke = typeof direct === 'function' ? direct : direct.invoke;
+    const invoke = typeof direct === "function" ? direct : direct.invoke;
     return {
       provider,
-      source: typeof direct === 'function' ? provider : direct.source ?? provider,
+      source: typeof direct === "function" ? provider : (direct.source ?? provider),
       async invoke({ payload }) {
         return invoke({ env, args, payload, ctx });
       },
     };
   }
 
-  if (provider === 'openclaw') {
-    const openclawUrl = String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? '').trim();
+  if (provider === "openclaw") {
+    const openclawUrl = String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? "").trim();
     if (!openclawUrl) {
       throw new Error(`${config.name} requires OPENCLAW_URL (or CLAWD_URL) for provider=openclaw`);
     }
-    const endpoint = new URL('/tools/invoke', openclawUrl);
-    const token = String(args.token ?? env.OPENCLAW_TOKEN ?? env.CLAWD_TOKEN ?? '').trim();
+    const endpoint = new URL("/tools/invoke", openclawUrl);
+    const token = String(args.token ?? env.OPENCLAW_TOKEN ?? env.CLAWD_TOKEN ?? "").trim();
     return {
       provider,
-      source: config.sourceForProvider?.(provider) ?? 'openclaw',
+      source: config.sourceForProvider?.(provider) ?? "openclaw",
       async invoke({ payload }) {
         return invokeOpenClawAdapter({ endpoint, token, payload });
       },
     };
   }
 
-  if (provider === 'pi') {
-    const adapterUrl = String(env.LOBSTER_PI_LLM_ADAPTER_URL ?? '').trim();
+  if (provider === "pi") {
+    const adapterUrl = String(env.LOBSTER_PI_LLM_ADAPTER_URL ?? "").trim();
     if (!adapterUrl) {
       throw new Error(`${config.name} requires LOBSTER_PI_LLM_ADAPTER_URL for provider=pi`);
     }
-    const token = String(args.token ?? env.LOBSTER_PI_LLM_ADAPTER_TOKEN ?? '').trim();
+    const token = String(args.token ?? env.LOBSTER_PI_LLM_ADAPTER_TOKEN ?? "").trim();
     return {
       provider,
-      source: config.sourceForProvider?.(provider) ?? 'pi',
+      source: config.sourceForProvider?.(provider) ?? "pi",
       async invoke({ payload }) {
         return invokeHttpAdapter({ endpoint: buildAdapterEndpoint(adapterUrl), token, payload });
       },
     };
   }
 
-  const adapterUrl = String(env.LOBSTER_LLM_ADAPTER_URL ?? '').trim();
+  const adapterUrl = String(env.LOBSTER_LLM_ADAPTER_URL ?? "").trim();
   if (!adapterUrl) {
     throw new Error(`${config.name} requires LOBSTER_LLM_ADAPTER_URL for provider=http`);
   }
-  const token = String(args.token ?? env.LOBSTER_LLM_ADAPTER_TOKEN ?? '').trim();
+  const token = String(args.token ?? env.LOBSTER_LLM_ADAPTER_TOKEN ?? "").trim();
   return {
     provider,
-    source: config.sourceForProvider?.(provider) ?? 'http',
+    source: config.sourceForProvider?.(provider) ?? "http",
     async invoke({ payload }) {
       return invokeHttpAdapter({ endpoint: buildAdapterEndpoint(adapterUrl), token, payload });
     },
@@ -524,10 +593,10 @@ function resolveAdapter({
 
 function getDirectAdapter(ctx: any, provider: string): DirectAdapter | null {
   const adapters = ctx?.llmAdapters;
-  if (!adapters || typeof adapters !== 'object') return null;
+  if (!adapters || typeof adapters !== "object") return null;
   const adapter = adapters[provider];
-  if (typeof adapter === 'function') return adapter as DirectAdapter;
-  if (adapter && typeof adapter === 'object' && typeof adapter.invoke === 'function') {
+  if (typeof adapter === "function") return adapter as DirectAdapter;
+  if (adapter && typeof adapter === "object" && typeof adapter.invoke === "function") {
     return adapter as DirectAdapter;
   }
   return null;
@@ -535,22 +604,30 @@ function getDirectAdapter(ctx: any, provider: string): DirectAdapter | null {
 
 function buildAdapterEndpoint(rawUrl: string) {
   const endpoint = new URL(rawUrl);
-  if (endpoint.pathname === '/' || endpoint.pathname === '') {
-    endpoint.pathname = '/invoke';
+  if (endpoint.pathname === "/" || endpoint.pathname === "") {
+    endpoint.pathname = "/invoke";
   }
   return endpoint;
 }
 
-async function invokeOpenClawAdapter({ endpoint, token, payload }: { endpoint: URL; token: string; payload: any }) {
+async function invokeOpenClawAdapter({
+  endpoint,
+  token,
+  payload,
+}: {
+  endpoint: URL;
+  token: string;
+  payload: any;
+}) {
   const res = await fetch(endpoint, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'content-type': 'application/json',
+      "content-type": "application/json",
       ...(token ? { authorization: `Bearer ${token}` } : null),
     },
     body: JSON.stringify({
-      tool: 'llm-task',
-      action: 'invoke',
+      tool: "llm-task",
+      action: "invoke",
       args: payload,
     }),
   });
@@ -564,16 +641,16 @@ async function invokeOpenClawAdapter({ endpoint, token, payload }: { endpoint: U
   try {
     parsed = text ? JSON.parse(text) : null;
   } catch {
-    throw new Error('Response was not JSON');
+    throw new Error("Response was not JSON");
   }
 
-  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'ok' in parsed) {
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "ok" in parsed) {
     if (parsed.ok !== true) {
-      const msg = parsed?.error?.message ?? 'Unknown error';
+      const msg = parsed?.error?.message ?? "Unknown error";
       throw new Error(`openclaw adapter error: ${msg}`);
     }
     const inner = parsed.result;
-    if (inner && typeof inner === 'object' && !Array.isArray(inner) && 'ok' in inner) {
+    if (inner && typeof inner === "object" && !Array.isArray(inner) && "ok" in inner) {
       return inner as LlmResponseEnvelope;
     }
     return { ok: true, result: inner } as LlmResponseEnvelope;
@@ -582,11 +659,19 @@ async function invokeOpenClawAdapter({ endpoint, token, payload }: { endpoint: U
   return { ok: true, result: parsed } as LlmResponseEnvelope;
 }
 
-async function invokeHttpAdapter({ endpoint, token, payload }: { endpoint: URL; token: string; payload: any }) {
+async function invokeHttpAdapter({
+  endpoint,
+  token,
+  payload,
+}: {
+  endpoint: URL;
+  token: string;
+  payload: any;
+}) {
   const res = await fetch(endpoint, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'content-type': 'application/json',
+      "content-type": "application/json",
       ...(token ? { authorization: `Bearer ${token}` } : null),
     },
     body: JSON.stringify(payload),
@@ -601,10 +686,10 @@ async function invokeHttpAdapter({ endpoint, token, payload }: { endpoint: URL; 
   try {
     parsed = text ? JSON.parse(text) : null;
   } catch {
-    throw new Error('Response was not JSON');
+    throw new Error("Response was not JSON");
   }
 
-  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'ok' in parsed) {
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "ok" in parsed) {
     return parsed as LlmResponseEnvelope;
   }
   return { ok: true, result: parsed } as LlmResponseEnvelope;
@@ -613,9 +698,9 @@ async function invokeHttpAdapter({ endpoint, token, payload }: { endpoint: URL; 
 function resolveModel(args: any, env: any, legacyEnvCompat: boolean | undefined) {
   return resolveEnvString(
     args.model,
-    ['LOBSTER_LLM_MODEL', ...(legacyEnvCompat ? ['LLM_TASK_MODEL'] : [])],
+    ["LOBSTER_LLM_MODEL", ...(legacyEnvCompat ? ["LLM_TASK_MODEL"] : [])],
     env,
-    '',
+    "",
   );
 }
 
@@ -638,16 +723,16 @@ function getFirstEnv(env: any, keys: string[]) {
 function extractPrompt(args: any) {
   if (args.prompt) return String(args.prompt);
   if (Array.isArray(args._) && args._.length) {
-    return args._.join(' ');
+    return args._.join(" ");
   }
-  return '';
+  return "";
 }
 
 function parseJsonArray(raw: any, label: string) {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(String(raw));
-    if (!Array.isArray(parsed)) throw new Error('must be array');
+    if (!Array.isArray(parsed)) throw new Error("must be array");
     return parsed;
   } catch {
     throw new Error(`${label} must be a JSON array`);
@@ -658,8 +743,8 @@ function parseJsonObject(raw: any, label: string) {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(String(raw));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('must be an object');
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("must be an object");
     }
     return parsed;
   } catch {
@@ -675,31 +760,31 @@ function parseOptionalNumber(value: any) {
 
 function flag(value: any) {
   if (value === undefined || value === null) return false;
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'string') {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
     const normalized = value.trim().toLowerCase();
-    if (['false', '0', 'no'].includes(normalized)) return false;
-    if (['true', '1', 'yes'].includes(normalized)) return true;
+    if (["false", "0", "no"].includes(normalized)) return false;
+    if (["true", "1", "yes"].includes(normalized)) return true;
   }
   return Boolean(value);
 }
 
 function normalizeArtifact(raw: any) {
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     return raw;
   }
-  if (typeof raw === 'string') {
-    return { kind: 'text', text: raw };
+  if (typeof raw === "string") {
+    return { kind: "text", text: raw };
   }
-  if (typeof raw === 'number' || typeof raw === 'boolean') {
-    return { kind: 'text', text: String(raw) };
+  if (typeof raw === "number" || typeof raw === "boolean") {
+    return { kind: "text", text: String(raw) };
   }
-  return { kind: 'json', data: raw };
+  return { kind: "json", data: raw };
 }
 
 function hashArtifact(artifact: any) {
   const stable = stableStringify(artifact);
-  return createHash('sha256').update(stable).digest('hex');
+  return createHash("sha256").update(stable).digest("hex");
 }
 
 function computeCacheKey({
@@ -725,7 +810,7 @@ function computeCacheKey({
     artifactHashes,
     outputSchema: outputSchema ?? null,
   };
-  return createHash('sha256').update(stableStringify(payload)).digest('hex');
+  return createHash("sha256").update(stableStringify(payload)).digest("hex");
 }
 
 function normalizeResult({
@@ -753,11 +838,11 @@ function normalizeResult({
     prompt: (result.prompt ?? null) as any,
     model: (result.model ?? null) as any,
     schemaVersion,
-    status: String(result.status ?? 'completed'),
+    status: String(result.status ?? "completed"),
     cacheKey,
     artifactHashes,
     output: {
-      format: (output.format ?? (output.data ? 'json' : 'text')) as any,
+      format: (output.format ?? (output.data ? "json" : "text")) as any,
       text: (output.text ?? null) as any,
       data: (output.data ?? null) as any,
     },
@@ -767,7 +852,12 @@ function normalizeResult({
     diagnostics: (result.diagnostics ?? null) as any,
     createdAt: new Date().toISOString(),
     source,
-    cached: source !== 'remote' && source !== 'openclaw' && source !== 'clawd' && source !== 'pi' && source !== 'http',
+    cached:
+      source !== "remote" &&
+      source !== "openclaw" &&
+      source !== "clawd" &&
+      source !== "pi" &&
+      source !== "http",
     attemptCount: attempt,
   };
   return [item];
@@ -798,7 +888,7 @@ async function persistOutputs({
 }
 
 function pickReusableState(stored: any, cacheKey: string, stateType: string) {
-  if (!stored || typeof stored !== 'object') return null;
+  if (!stored || typeof stored !== "object") return null;
   if (stored.type !== stateType) return null;
   if (stored.cacheKey !== cacheKey) return null;
   if (!Array.isArray(stored.items)) return null;
@@ -807,21 +897,30 @@ function pickReusableState(stored: any, cacheKey: string, stateType: string) {
 
 function collectAjvErrors(errors: ErrorObject[] | null | undefined) {
   if (!errors?.length) return [];
-  return errors.map((err) => `${err.instancePath || '/'} ${err.message ?? ''}`.trim());
+  return errors.map((err) => `${err.instancePath || "/"} ${err.message ?? ""}`.trim());
 }
 
-async function readCacheEntry(env: any, key: string, cacheNamespace: string): Promise<CacheEntry | null> {
+async function readCacheEntry(
+  env: any,
+  key: string,
+  cacheNamespace: string,
+): Promise<CacheEntry | null> {
   const filePath = path.join(getCacheDir(env), cacheNamespace, `${key}.json`);
   try {
-    const text = await fsp.readFile(filePath, 'utf8');
+    const text = await fsp.readFile(filePath, "utf8");
     return JSON.parse(text) as CacheEntry;
   } catch (err: any) {
-    if (err?.code === 'ENOENT') return null;
+    if (err?.code === "ENOENT") return null;
     throw err;
   }
 }
 
-async function writeCacheEntry(env: any, key: string, items: NormalizedInvocationItem[], cacheNamespace: string) {
+async function writeCacheEntry(
+  env: any,
+  key: string,
+  items: NormalizedInvocationItem[],
+  cacheNamespace: string,
+) {
   const dir = path.join(getCacheDir(env), cacheNamespace);
   await fsp.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, `${key}.json`);
@@ -833,7 +932,7 @@ async function writeCacheEntry(env: any, key: string, items: NormalizedInvocatio
 
 function getCacheDir(env: any) {
   if (env?.LOBSTER_CACHE_DIR) return String(env.LOBSTER_CACHE_DIR);
-  return path.join(process.cwd(), '.lobster-cache');
+  return path.join(process.cwd(), ".lobster-cache");
 }
 
 async function* streamOf(items: any[]) {

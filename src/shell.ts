@@ -7,8 +7,8 @@ export function resolveInlineShellCommand({
   env: Record<string, string | undefined>;
   platform?: string;
 }) {
-  const shellOverride = String(env?.LOBSTER_SHELL ?? '').trim();
-  const isWindows = platform === 'win32';
+  const shellOverride = String(env?.LOBSTER_SHELL ?? "").trim();
+  const isWindows = platform === "win32";
 
   if (shellOverride) {
     return {
@@ -18,18 +18,18 @@ export function resolveInlineShellCommand({
   }
 
   if (isWindows) {
-    const comspec = String(env?.ComSpec ?? env?.COMSPEC ?? 'cmd.exe').trim() || 'cmd.exe';
+    const comspec = String(env?.ComSpec ?? env?.COMSPEC ?? "cmd.exe").trim() || "cmd.exe";
     return {
       command: comspec,
-      argv: ['/d', '/s', '/c', command],
+      argv: ["/d", "/s", "/c", command],
     };
   }
 
   // Keep default behavior deterministic and POSIX-compatible across environments.
-  const shell = '/bin/sh';
+  const shell = "/bin/sh";
   return {
     command: shell,
-    argv: ['-lc', command],
+    argv: ["-lc", command],
   };
 }
 
@@ -43,18 +43,18 @@ function buildShellArgs({
   isWindows: boolean;
 }) {
   const lowered = shellCommand.toLowerCase();
-  const looksLikeCmd = lowered.endsWith('cmd') || lowered.endsWith('cmd.exe');
+  const looksLikeCmd = lowered.endsWith("cmd") || lowered.endsWith("cmd.exe");
   const looksLikePowerShell =
-    lowered.endsWith('powershell') ||
-    lowered.endsWith('powershell.exe') ||
-    lowered.endsWith('pwsh') ||
-    lowered.endsWith('pwsh.exe');
+    lowered.endsWith("powershell") ||
+    lowered.endsWith("powershell.exe") ||
+    lowered.endsWith("pwsh") ||
+    lowered.endsWith("pwsh.exe");
 
   if (looksLikePowerShell) {
-    return ['-NoProfile', '-Command', command];
+    return ["-NoProfile", "-Command", command];
   }
   if (looksLikeCmd || isWindows) {
-    return ['/d', '/s', '/c', command];
+    return ["/d", "/s", "/c", command];
   }
-  return ['-lc', command];
+  return ["-lc", command];
 }

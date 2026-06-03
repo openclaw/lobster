@@ -1,6 +1,6 @@
 export type RetryConfig = {
   max?: number;
-  backoff?: 'fixed' | 'exponential';
+  backoff?: "fixed" | "exponential";
   delay_ms?: number;
   max_delay_ms?: number;
   jitter?: boolean;
@@ -8,7 +8,7 @@ export type RetryConfig = {
 
 const DEFAULTS = {
   max: 1,
-  backoff: 'fixed' as const,
+  backoff: "fixed" as const,
   delay_ms: 1000,
   max_delay_ms: 30000,
   jitter: false,
@@ -27,7 +27,7 @@ export function resolveRetryConfig(raw: RetryConfig | undefined): Required<Retry
 
 function computeDelay(config: Required<RetryConfig>, attempt: number): number {
   let delay: number;
-  if (config.backoff === 'exponential') {
+  if (config.backoff === "exponential") {
     delay = Math.min(config.delay_ms * Math.pow(2, attempt), config.max_delay_ms);
   } else {
     delay = config.delay_ms;
@@ -45,25 +45,27 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (!signal) return new Promise((r) => setTimeout(r, ms));
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
-      reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+      reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
       return;
     }
     let timer: ReturnType<typeof setTimeout>;
     const onAbort = () => {
       clearTimeout(timer);
-      reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+      reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
     };
     timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
+      signal.removeEventListener("abort", onAbort);
       resolve();
     }, ms);
-    signal.addEventListener('abort', onAbort, { once: true });
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
 /**
  * Execute `fn` with retries according to the given config.
- * Abort errors always propagate immediately (no retry).
+ * External cancellation (options.signal aborted) always propagates immediately.
+ * Per-attempt timeout AbortErrors flow through shouldRetry like any other error,
+ * so timeout_ms + retry.max combinations work as documented.
  * Returns the result of the first successful call, or throws
  * the last error after all retries are exhausted.
  */
@@ -81,8 +83,10 @@ export async function withRetry<T>(
     try {
       return await fn();
     } catch (err: any) {
-      // Never retry abort/cancellation errors
-      if (err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
+      // Only propagate AbortError immediately for external workflow cancellation.
+      // Per-attempt timeout AbortErrors (options.signal not aborted) flow through
+      // shouldRetry so timeout_ms + retry.max combinations work as documented.
+      if ((err?.name === "AbortError" || err?.code === "ABORT_ERR") && options?.signal?.aborted) {
         throw err;
       }
       lastError = err;

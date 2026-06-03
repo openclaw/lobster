@@ -1,10 +1,10 @@
-import { listWorkflows } from '../../workflows/registry.js';
+import { listWorkflows } from "../../workflows/registry.js";
 
 export const workflowsListCommand = {
-  name: 'workflows.list',
+  name: "workflows.list",
   meta: {
-    description: 'List available Lobster workflows',
-    argsSchema: { type: 'object', properties: {}, required: [] },
+    description: "List available Lobster workflows",
+    argsSchema: { type: "object", properties: {}, required: [] },
     sideEffects: [],
   },
   help() {

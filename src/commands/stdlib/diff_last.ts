@@ -1,25 +1,25 @@
-import { diffAndStore } from '../../state/store.js';
+import { diffAndStore } from "../../state/store.js";
 
 export const diffLastCommand = {
-  name: 'diff.last',
+  name: "diff.last",
   meta: {
-    description: 'Compare current items to last stored snapshot',
+    description: "Compare current items to last stored snapshot",
     argsSchema: {
-      type: 'object',
+      type: "object",
       properties: {
-        key: { type: 'string', description: 'State key to diff against' },
-        _: { type: 'array', items: { type: 'string' } },
+        key: { type: "string", description: "State key to diff against" },
+        _: { type: "array", items: { type: "string" } },
       },
-      required: ['key'],
+      required: ["key"],
     },
-    sideEffects: ['writes_state'],
+    sideEffects: ["writes_state"],
   },
   help() {
     return `diff.last — compare current items to last stored snapshot\n\nUsage:\n  <items> | diff.last --key <stateKey>\n\nOutput:\n  { changed, key, before, after }\n`;
   },
   async run({ input, args, ctx }) {
     const key = args.key ?? args._[0];
-    if (!key) throw new Error('diff.last requires --key');
+    if (!key) throw new Error("diff.last requires --key");
 
     const afterItems = [];
     for await (const item of input) afterItems.push(item);
@@ -29,7 +29,7 @@ export const diffLastCommand = {
 
     return {
       output: (async function* () {
-        yield { kind: 'diff.last', key, changed, before, after };
+        yield { kind: "diff.last", key, changed, before, after };
       })(),
     };
   },

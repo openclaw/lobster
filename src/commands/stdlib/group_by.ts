@@ -1,5 +1,5 @@
 function getByPath(obj: any, path: string): any {
-  const parts = path.split('.').filter(Boolean);
+  const parts = path.split(".").filter(Boolean);
   let cur: any = obj;
   for (const p of parts) {
     if (cur == null) return undefined;
@@ -9,16 +9,16 @@ function getByPath(obj: any, path: string): any {
 }
 
 export const groupByCommand = {
-  name: 'groupBy',
+  name: "groupBy",
   meta: {
-    description: 'Group items by a key (stable group order)',
+    description: "Group items by a key (stable group order)",
     argsSchema: {
-      type: 'object',
+      type: "object",
       properties: {
-        key: { type: 'string', description: 'Dot-path key to group by (required)' },
-        _: { type: 'array', items: { type: 'string' } },
+        key: { type: "string", description: "Dot-path key to group by (required)" },
+        _: { type: "array", items: { type: "string" } },
       },
-      required: ['key'],
+      required: ["key"],
     },
     sideEffects: [],
   },
@@ -34,8 +34,8 @@ export const groupByCommand = {
     );
   },
   async run({ input, args }: any) {
-    const keyPath = String(args.key ?? '').trim();
-    if (!keyPath) throw new Error('groupBy requires --key');
+    const keyPath = String(args.key ?? "").trim();
+    if (!keyPath) throw new Error("groupBy requires --key");
 
     const groups = new Map<string, { key: any; items: any[] }>();
     const order: string[] = [];

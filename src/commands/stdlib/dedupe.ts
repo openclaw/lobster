@@ -1,6 +1,6 @@
 function getByPath(obj: any, path: string): any {
   if (!path) return obj;
-  const parts = path.split('.').filter(Boolean);
+  const parts = path.split(".").filter(Boolean);
   let cur: any = obj;
   for (const p of parts) {
     if (cur == null) return undefined;
@@ -10,14 +10,17 @@ function getByPath(obj: any, path: string): any {
 }
 
 export const dedupeCommand = {
-  name: 'dedupe',
+  name: "dedupe",
   meta: {
-    description: 'Remove duplicate items, keeping first occurrence (stable)',
+    description: "Remove duplicate items, keeping first occurrence (stable)",
     argsSchema: {
-      type: 'object',
+      type: "object",
       properties: {
-        key: { type: 'string', description: 'Dot-path key used for identity (defaults to whole item)' },
-        _: { type: 'array', items: { type: 'string' } },
+        key: {
+          type: "string",
+          description: "Dot-path key used for identity (defaults to whole item)",
+        },
+        _: { type: "array", items: { type: "string" } },
       },
       required: [],
     },
@@ -34,7 +37,7 @@ export const dedupeCommand = {
     );
   },
   async run({ input, args }: any) {
-    const key = typeof args.key === 'string' ? args.key : undefined;
+    const key = typeof args.key === "string" ? args.key : undefined;
     const seen = new Set<string>();
 
     return {

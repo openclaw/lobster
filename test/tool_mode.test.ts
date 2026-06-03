@@ -1,8 +1,8 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { parsePipeline } from '../src/parser.js';
-import { createDefaultRegistry } from '../src/commands/registry.js';
-import { runPipeline } from '../src/runtime.js';
+import test from "node:test";
+import assert from "node:assert/strict";
+import { parsePipeline } from "../src/parser.js";
+import { createDefaultRegistry } from "../src/commands/registry.js";
+import { runPipeline } from "../src/runtime.js";
 
 function streamOf(items) {
   return (async function* () {
@@ -10,10 +10,10 @@ function streamOf(items) {
   })();
 }
 
-test('approve halts pipeline in tool mode', async () => {
+test("approve halts pipeline in tool mode", async () => {
   const registry = createDefaultRegistry();
   const pipeline = parsePipeline(
-    "exec --json --shell \"node -e 'process.stdout.write(JSON.stringify([{a:1}]))'\" | approve --prompt 'send?' | exec --shell 'exit 1'"
+    "exec --json --shell \"node -e 'process.stdout.write(JSON.stringify([{a:1}]))'\" | approve --prompt 'send?' | exec --shell 'exit 1'",
   );
 
   const output = await runPipeline({
@@ -24,30 +24,30 @@ test('approve halts pipeline in tool mode', async () => {
     stdout: process.stdout,
     stderr: process.stderr,
     env: process.env,
-    mode: 'tool',
+    mode: "tool",
   });
 
   assert.equal(output.halted, true);
   assert.equal(output.items.length, 1);
-  assert.equal(output.items[0].type, 'approval_request');
+  assert.equal(output.items[0].type, "approval_request");
   assert.equal(output.items[0].items.length, 1);
   assert.deepEqual(output.items[0].items[0], { a: 1 });
 });
 
-test('approve passes through in human interactive mode only (emit required otherwise)', async () => {
+test("approve passes through in human interactive mode only (emit required otherwise)", async () => {
   const registry = createDefaultRegistry();
-  const cmd = registry.get('approve');
+  const cmd = registry.get("approve");
 
   const result = await cmd.run({
     input: streamOf([{ x: 1 }]),
-    args: { _: [], emit: true, prompt: 'ok?' },
+    args: { _: [], emit: true, prompt: "ok?" },
     ctx: {
       stdin: process.stdin,
       stdout: process.stdout,
       stderr: process.stderr,
       env: process.env,
       registry,
-      mode: 'human',
+      mode: "human",
       render: { json() {}, lines() {} },
     },
   });
@@ -55,20 +55,21 @@ test('approve passes through in human interactive mode only (emit required other
   const items = [];
   for await (const it of result.output) items.push(it);
   assert.equal(result.halt, true);
-  assert.equal(items[0].type, 'approval_request');
+  assert.equal(items[0].type, "approval_request");
 });
 
-test('ask halts pipeline in tool mode with needs_input payload', async () => {
+test("ask halts pipeline in tool mode with needs_input payload", async () => {
   const registry = createDefaultRegistry();
-  const cmd = registry.get('ask');
+  const cmd = registry.get("ask");
 
   const result = await cmd.run({
-    input: streamOf([{ text: 'draft v1' }]),
+    input: streamOf([{ text: "draft v1" }]),
     args: {
       _: [],
-      prompt: 'Review?',
-      'subject-from-stdin': true,
-      schema: '{"type":"object","properties":{"decision":{"type":"string"}},"required":["decision"]}',
+      prompt: "Review?",
+      "subject-from-stdin": true,
+      schema:
+        '{"type":"object","properties":{"decision":{"type":"string"}},"required":["decision"]}',
     },
     ctx: {
       stdin: process.stdin,
@@ -76,7 +77,7 @@ test('ask halts pipeline in tool mode with needs_input payload', async () => {
       stderr: process.stderr,
       env: process.env,
       registry,
-      mode: 'tool',
+      mode: "tool",
       render: { json() {}, lines() {} },
     },
   });
@@ -85,7 +86,7 @@ test('ask halts pipeline in tool mode with needs_input payload', async () => {
   for await (const it of result.output) items.push(it);
   assert.equal(result.halt, true);
   assert.equal(items.length, 1);
-  assert.equal(items[0].type, 'input_request');
-  assert.equal(items[0].prompt, 'Review?');
+  assert.equal(items[0].type, "input_request");
+  assert.equal(items[0].prompt, "Review?");
   assert.deepEqual(items[0].subject, { text: '{"text":"draft v1"}' });
 });

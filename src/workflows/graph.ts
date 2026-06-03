@@ -1,12 +1,12 @@
-import type { WorkflowFile, WorkflowStep } from './file.js';
+import type { WorkflowFile, WorkflowStep } from "./file.js";
 
-export type WorkflowGraphFormat = 'mermaid' | 'dot' | 'ascii';
+export type WorkflowGraphFormat = "mermaid" | "dot" | "ascii";
 
 type GraphNode = {
   id: string;
   type: string;
   label: string;
-  shape: 'box' | 'diamond';
+  shape: "box" | "diamond";
 };
 
 type GraphEdge = {
@@ -30,46 +30,47 @@ function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
 
 function isApprovalStep(step: WorkflowStep) {
   if (step.approval === true) return true;
-  if (typeof step.approval === 'string' && step.approval.trim().length > 0) return true;
-  if (step.approval && typeof step.approval === 'object' && !Array.isArray(step.approval)) return true;
+  if (typeof step.approval === "string" && step.approval.trim().length > 0) return true;
+  if (step.approval && typeof step.approval === "object" && !Array.isArray(step.approval))
+    return true;
   return false;
 }
 
 function isInputStep(step: WorkflowStep) {
-  return Boolean(step.input && typeof step.input === 'object' && !Array.isArray(step.input));
+  return Boolean(step.input && typeof step.input === "object" && !Array.isArray(step.input));
 }
 
 function stepType(step: WorkflowStep) {
-  if (step.parallel) return 'parallel';
-  if (typeof step.for_each === 'string') return 'for_each';
-  if (typeof step.workflow === 'string' && step.workflow.trim()) return 'workflow';
-  if (typeof step.pipeline === 'string' && step.pipeline.trim()) return 'pipeline';
-  if (typeof step.run === 'string' || typeof step.command === 'string') return 'run';
-  if (isApprovalStep(step)) return 'approval';
-  if (isInputStep(step)) return 'input';
-  return 'step';
+  if (step.parallel) return "parallel";
+  if (typeof step.for_each === "string") return "for_each";
+  if (typeof step.workflow === "string" && step.workflow.trim()) return "workflow";
+  if (typeof step.pipeline === "string" && step.pipeline.trim()) return "pipeline";
+  if (typeof step.run === "string" || typeof step.command === "string") return "run";
+  if (isApprovalStep(step)) return "approval";
+  if (isInputStep(step)) return "input";
+  return "step";
 }
 
 function stepDetails(step: WorkflowStep, args: Record<string, unknown>) {
   if (step.parallel) {
-    return `parallel (${step.parallel.wait ?? 'all'})`;
+    return `parallel (${step.parallel.wait ?? "all"})`;
   }
-  if (typeof step.for_each === 'string') {
+  if (typeof step.for_each === "string") {
     return `for_each: ${resolveArgsTemplate(step.for_each, args)}`;
   }
-  if (typeof step.workflow === 'string' && step.workflow.trim()) {
+  if (typeof step.workflow === "string" && step.workflow.trim()) {
     return `workflow: ${resolveArgsTemplate(step.workflow, args)}`;
   }
-  if (typeof step.pipeline === 'string' && step.pipeline.trim()) {
+  if (typeof step.pipeline === "string" && step.pipeline.trim()) {
     return `pipeline: ${resolveArgsTemplate(step.pipeline, args)}`;
   }
-  const shell = typeof step.run === 'string' ? step.run : step.command;
-  if (typeof shell === 'string' && shell.trim()) {
+  const shell = typeof step.run === "string" ? step.run : step.command;
+  if (typeof shell === "string" && shell.trim()) {
     return `run: ${resolveArgsTemplate(shell, args)}`;
   }
-  if (isApprovalStep(step)) return 'approval gate';
-  if (isInputStep(step)) return 'input request';
-  return '';
+  if (isApprovalStep(step)) return "approval gate";
+  if (isInputStep(step)) return "input request";
+  return "";
 }
 
 function extractStepRefsFromString(value: string): string[] {
@@ -82,7 +83,7 @@ function extractStepRefsFromString(value: string): string[] {
 }
 
 function extractStepRefs(value: unknown): string[] {
-  if (typeof value === 'string') return extractStepRefsFromString(value);
+  if (typeof value === "string") return extractStepRefsFromString(value);
   if (Array.isArray(value)) {
     const refs = new Set<string>();
     for (const item of value) {
@@ -90,7 +91,7 @@ function extractStepRefs(value: unknown): string[] {
     }
     return [...refs];
   }
-  if (value && typeof value === 'object') {
+  if (value && typeof value === "object") {
     const refs = new Set<string>();
     for (const v of Object.values(value as Record<string, unknown>)) {
       for (const ref of extractStepRefs(v)) refs.add(ref);
@@ -113,7 +114,7 @@ function collectGraph(workflow: WorkflowFile, args: Record<string, unknown>) {
 
   const seenEdgeKeys = new Set<string>();
   const addEdge = (edge: GraphEdge) => {
-    const key = `${edge.from}|${edge.to}|${edge.label ?? ''}`;
+    const key = `${edge.from}|${edge.to}|${edge.label ?? ""}`;
     if (seenEdgeKeys.has(key)) return;
     seenEdgeKeys.add(key);
     edges.push(edge);
@@ -127,26 +128,26 @@ function collectGraph(workflow: WorkflowFile, args: Record<string, unknown>) {
       id: step.id,
       type,
       label,
-      shape: isApprovalStep(step) ? 'diamond' : 'box',
+      shape: isApprovalStep(step) ? "diamond" : "box",
     });
 
     if (prevStepId) {
-      addEdge({ from: prevStepId, to: step.id, label: 'next' });
+      addEdge({ from: prevStepId, to: step.id, label: "next" });
     }
     prevStepId = step.id;
 
     for (const ref of extractStepRefs(step.stdin)) {
-      if (knownStepIds.has(ref)) addEdge({ from: ref, to: step.id, label: 'stdin' });
+      if (knownStepIds.has(ref)) addEdge({ from: ref, to: step.id, label: "stdin" });
     }
 
-    if (typeof step.for_each === 'string') {
+    if (typeof step.for_each === "string") {
       for (const ref of extractStepRefs(step.for_each)) {
-        if (knownStepIds.has(ref)) addEdge({ from: ref, to: step.id, label: 'for_each' });
+        if (knownStepIds.has(ref)) addEdge({ from: ref, to: step.id, label: "for_each" });
       }
     }
 
     const condition = step.when ?? step.condition;
-    if (typeof condition === 'string' && condition.trim()) {
+    if (typeof condition === "string" && condition.trim()) {
       const labelValue = truncate(`when: ${condition.trim()}`, 70);
       for (const ref of extractStepRefs(condition)) {
         if (knownStepIds.has(ref)) addEdge({ from: ref, to: step.id, label: labelValue });
@@ -158,7 +159,7 @@ function collectGraph(workflow: WorkflowFile, args: Record<string, unknown>) {
 }
 
 function sanitizeMermaidId(id: string) {
-  return id.replace(/[^A-Za-z0-9_]/g, '_');
+  return id.replace(/[^A-Za-z0-9_]/g, "_");
 }
 
 function escapeMermaidLabel(value: string) {
@@ -169,7 +170,7 @@ function renderMermaid(nodes: GraphNode[], edges: GraphEdge[]) {
   const idMap = new Map<string, string>();
   const used = new Set<string>();
   for (const node of nodes) {
-    let key = sanitizeMermaidId(node.id) || 'step';
+    let key = sanitizeMermaidId(node.id) || "step";
     if (/^\d/.test(key)) key = `s_${key}`;
     let i = 2;
     while (used.has(key)) {
@@ -180,17 +181,17 @@ function renderMermaid(nodes: GraphNode[], edges: GraphEdge[]) {
     idMap.set(node.id, key);
   }
 
-  const lines = ['flowchart TD'];
+  const lines = ["flowchart TD"];
   for (const node of nodes) {
     const key = idMap.get(node.id)!;
     const label = escapeMermaidLabel(node.label);
-    if (node.shape === 'diamond') {
+    if (node.shape === "diamond") {
       lines.push(`  ${key}{"${label}"}`);
     } else {
       lines.push(`  ${key}["${label}"]`);
     }
   }
-  if (nodes.length) lines.push('');
+  if (nodes.length) lines.push("");
 
   for (const edge of edges) {
     const from = idMap.get(edge.from);
@@ -202,20 +203,20 @@ function renderMermaid(nodes: GraphNode[], edges: GraphEdge[]) {
       lines.push(`  ${from} --> ${to}`);
     }
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function escapeDot(value: string) {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function renderDot(nodes: GraphNode[], edges: GraphEdge[]) {
-  const lines = ['digraph workflow {', '  rankdir=TB;'];
+  const lines = ["digraph workflow {", "  rankdir=TB;"];
   for (const node of nodes) {
-    const shape = node.shape === 'diamond' ? 'diamond' : 'box';
+    const shape = node.shape === "diamond" ? "diamond" : "box";
     lines.push(`  "${escapeDot(node.id)}" [shape=${shape},label="${escapeDot(node.label)}"];`);
   }
-  if (nodes.length) lines.push('');
+  if (nodes.length) lines.push("");
   for (const edge of edges) {
     if (edge.label) {
       lines.push(
@@ -225,26 +226,28 @@ function renderDot(nodes: GraphNode[], edges: GraphEdge[]) {
       lines.push(`  "${escapeDot(edge.from)}" -> "${escapeDot(edge.to)}";`);
     }
   }
-  lines.push('}');
-  return lines.join('\n');
+  lines.push("}");
+  return lines.join("\n");
 }
 
 function renderAscii(nodes: GraphNode[], edges: GraphEdge[]) {
-  const lines = ['Workflow Graph', '', 'Nodes:'];
+  const lines = ["Workflow Graph", "", "Nodes:"];
   for (const node of nodes) {
-    lines.push(`- ${node.id} [${node.type}] ${node.label.includes('\\n') ? `(${node.label.split('\\n')[1]})` : ''}`.trim());
+    lines.push(
+      `- ${node.id} [${node.type}] ${node.label.includes("\\n") ? `(${node.label.split("\\n")[1]})` : ""}`.trim(),
+    );
   }
-  lines.push('', 'Edges:');
+  lines.push("", "Edges:");
   for (const edge of edges) {
-    lines.push(`- ${edge.from} -> ${edge.to}${edge.label ? ` (${edge.label})` : ''}`);
+    lines.push(`- ${edge.from} -> ${edge.to}${edge.label ? ` (${edge.label})` : ""}`);
   }
-  if (edges.length === 0) lines.push('- (none)');
-  return lines.join('\n');
+  if (edges.length === 0) lines.push("- (none)");
+  return lines.join("\n");
 }
 
 export function renderWorkflowGraph({ workflow, format, args = {} }: RenderGraphParams) {
   const { nodes, edges } = collectGraph(workflow, args);
-  if (format === 'dot') return renderDot(nodes, edges);
-  if (format === 'ascii') return renderAscii(nodes, edges);
+  if (format === "dot") return renderDot(nodes, edges);
+  if (format === "ascii") return renderAscii(nodes, edges);
   return renderMermaid(nodes, edges);
 }
