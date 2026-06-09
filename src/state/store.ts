@@ -71,7 +71,34 @@ export async function writeFileAtomic(filePath, data) {
   }
 }
 
-export async function writeFileAtomicExclusive(filePath, data) {
+function isLinkUnsupportedError(err: any): boolean {
+  return ["ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EXDEV"].includes(err?.code);
+}
+
+async function writeFileExclusiveDirect(filePath: string, data: string) {
+  let handle;
+  let created = false;
+  let cleanup = true;
+  try {
+    handle = await fsp.open(filePath, "wx", 0o600);
+    created = true;
+    await handle.writeFile(data, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    cleanup = false;
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+    if (created && cleanup) await fsp.rm(filePath, { force: true }).catch(() => {});
+  }
+}
+
+export async function writeFileAtomicExclusive(
+  filePath,
+  data,
+  options: { linkFile?: typeof fsp.link } = {},
+) {
+  const linkFile = options.linkFile ?? fsp.link;
   const dir = path.dirname(filePath);
   const tmpPath = path.join(
     dir,
@@ -84,7 +111,12 @@ export async function writeFileAtomicExclusive(filePath, data) {
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await fsp.link(tmpPath, filePath);
+    try {
+      await linkFile(tmpPath, filePath);
+    } catch (err) {
+      if (!isLinkUnsupportedError(err)) throw err;
+      await writeFileExclusiveDirect(filePath, data);
+    }
   } finally {
     if (handle) await handle.close().catch(() => {});
     await fsp.rm(tmpPath, { force: true }).catch(() => {});

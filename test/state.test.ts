@@ -166,6 +166,30 @@ test("writeFileAtomicExclusive creates private files without replacing existing 
   assert.deepEqual(leftovers, []);
 });
 
+test("writeFileAtomicExclusive falls back when hard links are unsupported", async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-atomic-exclusive-fallback-"));
+  const target = path.join(tmp, "approval_deadbeef.json");
+  const unsupported = Object.assign(new Error("operation not supported"), { code: "ENOTSUP" });
+  const options = {
+    async linkFile() {
+      throw unsupported;
+    },
+  };
+
+  await writeFileAtomicExclusive(target, '{"stateKey":"original"}\n', options);
+  assert.equal((await fsp.stat(target)).mode & 0o777, 0o600);
+  assert.equal(await fsp.readFile(target, "utf8"), '{"stateKey":"original"}\n');
+
+  await assert.rejects(
+    () => writeFileAtomicExclusive(target, '{"stateKey":"replacement"}\n', options),
+    (err: NodeJS.ErrnoException) => err?.code === "EEXIST",
+  );
+  assert.equal(await fsp.readFile(target, "utf8"), '{"stateKey":"original"}\n');
+
+  const leftovers = (await fsp.readdir(tmp)).filter((f) => f.includes(".tmp"));
+  assert.deepEqual(leftovers, []);
+});
+
 test("diffAndStore treats corrupt previous state as a miss and rewrites atomically (#112)", async () => {
   const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-corrupt-"));
   const env = { LOBSTER_STATE_DIR: tmp };
