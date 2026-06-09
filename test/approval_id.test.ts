@@ -213,3 +213,19 @@ test("approval index writes never overwrite an existing approval ID mapping", as
   const resolved = await findStateKeyByApprovalId({ env, approvalId: "deadbeef" });
   assert.equal(resolved, "workflow_resume_original");
 });
+
+test("corrupt approval index is treated as expired instead of crashing (#113)", async () => {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-aid-corrupt-"));
+  const stateDir = path.join(tmpDir, "state");
+  const env = { LOBSTER_STATE_DIR: stateDir };
+  await fsp.mkdir(stateDir, { recursive: true });
+  await fsp.writeFile(path.join(stateDir, "approval_deadbeef.json"), '{"stateKey"', "utf8");
+
+  const resolved = await findStateKeyByApprovalId({ env, approvalId: "deadbeef" });
+  assert.equal(resolved, null);
+
+  const resumed = runCli(["resume", "--id", "deadbeef", "--approve", "yes"], env);
+  const json = JSON.parse(resumed.stdout);
+  assert.equal(json.ok, false);
+  assert.match(json.error?.message ?? "", /not found or expired/);
+});

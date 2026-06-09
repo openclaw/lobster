@@ -71,6 +71,30 @@ export async function writeFileAtomic(filePath, data) {
   }
 }
 
+export async function writeFileAtomicExclusive(filePath, data) {
+  const dir = path.dirname(filePath);
+  const tmpPath = path.join(
+    dir,
+    `.${path.basename(filePath)}.${randomBytes(6).toString("hex")}.tmp`,
+  );
+  let handle;
+  try {
+    handle = await fsp.open(tmpPath, "wx", 0o600);
+    await handle.writeFile(data, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await fsp.link(tmpPath, filePath);
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+    await fsp.rm(tmpPath, { force: true }).catch(() => {});
+  }
+}
+
+function isJsonSyntaxError(err) {
+  return err instanceof SyntaxError;
+}
+
 export async function readStateJson({ env, key }) {
   const stateDir = defaultStateDir(env);
   const filePath = keyToPath(stateDir, key);
@@ -134,10 +158,9 @@ export async function writeApprovalIndex({
   if (!safe) return;
   await fsp.mkdir(stateDir, { recursive: true });
   const indexPath = path.join(stateDir, `approval_${safe}.json`);
-  await fsp.writeFile(
+  await writeFileAtomicExclusive(
     indexPath,
     JSON.stringify({ stateKey, createdAt: new Date().toISOString() }) + "\n",
-    { encoding: "utf8", flag: "wx", mode: 0o600 },
   );
 }
 
@@ -185,6 +208,7 @@ export async function findStateKeyByApprovalId({
     return typeof data?.stateKey === "string" ? data.stateKey : null;
   } catch (err: any) {
     if (err?.code === "ENOENT") return null;
+    if (isJsonSyntaxError(err)) return null;
     throw err;
   }
 }
@@ -247,7 +271,10 @@ export async function cleanupApprovalIndexByStateKey({
 }
 
 export async function diffAndStore({ env, key, value }) {
-  const before = await readStateJson({ env, key });
+  const before = await readStateJson({ env, key }).catch((err) => {
+    if (isJsonSyntaxError(err)) return null;
+    throw err;
+  });
   const changed = stableStringify(before) !== stableStringify(value);
   await writeStateJson({ env, key, value });
   return { before, after: value, changed };
