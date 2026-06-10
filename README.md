@@ -265,6 +265,8 @@ Built-in providers today:
 - `pi` via `LOBSTER_PI_LLM_ADAPTER_URL` (typically supplied by the Pi extension)
 - `http` via `LOBSTER_LLM_ADAPTER_URL`
 
+Workflow `_meta.cost` and `cost_limit` use a static pricing table plus optional overrides from `LOBSTER_LLM_PRICING_JSON`, for example `{"my-model":{"input":1.0,"output":2.0}}` in USD per million tokens. Unknown or missing model IDs still record token counts with zero estimated cost, but Lobster warns on stderr so stale or missing pricing does not fail silently.
+
 `llm_task.invoke` remains available as a backward-compatible alias for the OpenClaw provider.
 
 ### `pipeline:` vs `run:` for LLM calls

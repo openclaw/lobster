@@ -30,6 +30,9 @@ const DEFAULT_PRICING: Record<string, { input: number; output: number }> = {
   "gemini-1.5-flash": { input: 0.075, output: 0.3 },
 };
 
+const INVALID_PRICING_JSON_WARNING =
+  "[WARN] Ignoring invalid LOBSTER_LLM_PRICING_JSON; custom LLM pricing must be a JSON object whose model entries have finite non-negative input and output rates.\n";
+
 function toTokenCount(value: unknown): number {
   const parsed = Number(value ?? 0);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
@@ -41,8 +44,16 @@ export class CostTracker {
 
   private pricing: Record<string, { input: number; output: number }>;
 
-  constructor(customPricing?: Record<string, { input: number; output: number }>) {
-    this.pricing = { ...DEFAULT_PRICING, ...(customPricing ?? {}) };
+  private stderr?: NodeJS.WritableStream;
+
+  private warnedUnknownModels = new Set<string>();
+
+  constructor(
+    customPricing?: Record<string, { input: number; output: number }>,
+    stderr?: NodeJS.WritableStream,
+  ) {
+    this.pricing = { ...DEFAULT_PRICING, ...customPricing };
+    this.stderr = stderr;
   }
 
   recordUsage(stepId: string, model: string | null, usage: Record<string, unknown>) {
@@ -52,8 +63,17 @@ export class CostTracker {
     const outputTokens = toTokenCount(
       usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens,
     );
-    const pricing = this.pricing[model ?? ""] ?? { input: 0, output: 0 };
-    const costUsd = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
+    const pricingKey = typeof model === "string" && model.trim() ? model : null;
+    const pricing =
+      pricingKey && Object.prototype.hasOwnProperty.call(this.pricing, pricingKey)
+        ? this.pricing[pricingKey]
+        : undefined;
+    if (!pricing) {
+      this.warnUnknownModel(pricingKey ?? "<missing>");
+    }
+    const effectivePricing = pricing ?? { input: 0, output: 0 };
+    const costUsd =
+      (inputTokens * effectivePricing.input + outputTokens * effectivePricing.output) / 1_000_000;
     this.steps.push({ stepId, model, inputTokens, outputTokens, costUsd });
   }
 
@@ -99,13 +119,50 @@ export class CostTracker {
 
   static parsePricingFromEnv(
     env: Record<string, string | undefined>,
+    stderr?: NodeJS.WritableStream,
   ): Record<string, { input: number; output: number }> | undefined {
     const raw = env.LOBSTER_LLM_PRICING_JSON;
     if (!raw) return undefined;
     try {
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      if (!isPricingMap(parsed)) {
+        stderr?.write(INVALID_PRICING_JSON_WARNING);
+        return undefined;
+      }
+      return parsed;
     } catch {
+      stderr?.write(INVALID_PRICING_JSON_WARNING);
       return undefined;
     }
   }
+
+  private warnUnknownModel(model: string) {
+    if (this.warnedUnknownModels.has(model)) return;
+    this.warnedUnknownModels.add(model);
+    const safeModel = safeJsonString(model);
+    this.stderr?.write(
+      `[WARN] No LLM pricing configured for model ${safeModel}; recording zero cost. Set LOBSTER_LLM_PRICING_JSON to enable cost_limit enforcement for this model.\n`,
+    );
+  }
+}
+
+function isPricingMap(value: unknown): value is Record<string, { input: number; output: number }> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  for (const [model, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!model.trim()) return false;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const rates = entry as Record<string, unknown>;
+    if (!isValidRate(rates.input) || !isValidRate(rates.output)) return false;
+  }
+  return true;
+}
+
+function isValidRate(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function safeJsonString(value: string) {
+  return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029]/g, (char) => {
+    return `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`;
+  });
 }

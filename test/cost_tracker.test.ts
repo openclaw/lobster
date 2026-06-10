@@ -27,11 +27,83 @@ test("CostTracker handles OpenAI token field names", () => {
   assert.equal(summary.totalOutputTokens, 500);
 });
 
-test("CostTracker uses zero cost for unknown models", () => {
-  const tracker = new CostTracker();
+function captureWritable() {
+  const stream = new PassThrough();
+  let output = "";
+  stream.on("data", (d: Buffer | string) => {
+    output += String(d);
+  });
+  return { stream, output: () => output };
+}
+
+test("CostTracker uses zero cost for unknown models and warns once", () => {
+  const stderr = captureWritable();
+  const tracker = new CostTracker(undefined, stderr.stream);
   tracker.recordUsage("step1", "unknown-model", { inputTokens: 1000, outputTokens: 500 });
+  tracker.recordUsage("step2", "unknown-model", { inputTokens: 1000, outputTokens: 500 });
   const summary = tracker.getSummary();
   assert.equal(summary.estimatedCostUsd, 0);
+  assert.equal(
+    stderr.output().match(/No LLM pricing configured for model "unknown-model"/g)?.length,
+    1,
+  );
+});
+
+test("CostTracker warns when usage omits the model id", () => {
+  const stderr = captureWritable();
+  const tracker = new CostTracker({ "": { input: 100, output: 100 } }, stderr.stream);
+  tracker.recordUsage("step1", null, { inputTokens: 1000, outputTokens: 500 });
+  tracker.recordUsage("step2", "", { inputTokens: 1000, outputTokens: 500 });
+  tracker.recordUsage("step3", "   ", { inputTokens: 1000, outputTokens: 500 });
+  const summary = tracker.getSummary();
+  assert.equal(summary.estimatedCostUsd, 0);
+  assert.equal(stderr.output().match(/model "<missing>"/g)?.length, 1);
+});
+
+test("CostTracker treats inherited object keys as unknown model ids", () => {
+  const stderr = captureWritable();
+  const tracker = new CostTracker(undefined, stderr.stream);
+  tracker.recordUsage("step1", "constructor", { inputTokens: 1000, outputTokens: 500 });
+  const summary = tracker.getSummary();
+  assert.equal(summary.estimatedCostUsd, 0);
+  assert.equal(Number.isNaN(summary.byStep[0].costUsd), false);
+  assert.match(stderr.output(), /No LLM pricing configured for model "constructor"/);
+});
+
+test("CostTracker warns when pricing env json is invalid", () => {
+  const stderr = captureWritable();
+  const pricing = CostTracker.parsePricingFromEnv(
+    {
+      LOBSTER_LLM_PRICING_JSON: "{not-json",
+    },
+    stderr.stream,
+  );
+  assert.equal(pricing, undefined);
+  assert.match(stderr.output(), /Ignoring invalid LOBSTER_LLM_PRICING_JSON/);
+});
+
+test("CostTracker rejects structurally invalid pricing env json", () => {
+  const stderr = captureWritable();
+  const pricing = CostTracker.parsePricingFromEnv(
+    {
+      LOBSTER_LLM_PRICING_JSON: '{"my-model":{"input":1.0}}',
+    },
+    stderr.stream,
+  );
+  assert.equal(pricing, undefined);
+  assert.match(stderr.output(), /Ignoring invalid LOBSTER_LLM_PRICING_JSON/);
+});
+
+test("CostTracker rejects blank pricing model keys", () => {
+  const stderr = captureWritable();
+  const pricing = CostTracker.parsePricingFromEnv(
+    {
+      LOBSTER_LLM_PRICING_JSON: '{"":{"input":1.0,"output":2.0}}',
+    },
+    stderr.stream,
+  );
+  assert.equal(pricing, undefined);
+  assert.match(stderr.output(), /Ignoring invalid LOBSTER_LLM_PRICING_JSON/);
 });
 
 test("CostTracker supports custom pricing from env json", () => {
@@ -78,7 +150,7 @@ async function runWorkflow(workflow: unknown, envOverride?: Record<string, strin
       stdin: process.stdin,
       stdout: process.stdout,
       stderr,
-      env: { ...process.env, LOBSTER_STATE_DIR: stateDir, ...(envOverride ?? {}) },
+      env: { ...process.env, LOBSTER_STATE_DIR: stateDir, ...envOverride },
       mode: "tool",
     },
   });
@@ -144,4 +216,68 @@ test("cost_limit stop throws when exceeded", async () => {
       }).then((x) => x.result),
     /Cost limit exceeded/,
   );
+});
+
+test("workflow cost tracking warns for unknown model ids", async () => {
+  const { result, stderrOutput } = await runWorkflow({
+    cost_limit: { max_usd: 0.00001, action: "warn" },
+    steps: [
+      {
+        id: "llm",
+        command:
+          "node -e \"process.stdout.write(JSON.stringify({model:'unknown-model',usage:{inputTokens:1000,outputTokens:1000}}))\"",
+      },
+    ],
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result._meta?.cost?.estimatedCostUsd, 0);
+  assert.match(stderrOutput, /No LLM pricing configured for model "unknown-model"/);
+});
+
+test("workflow cost tracking warns for invalid pricing env json", async () => {
+  const { result, stderrOutput } = await runWorkflow(
+    {
+      steps: [
+        {
+          id: "llm",
+          command:
+            "node -e \"process.stdout.write(JSON.stringify({model:'gpt-4o',usage:{inputTokens:1000,outputTokens:1000}}))\"",
+        },
+      ],
+    },
+    { LOBSTER_LLM_PRICING_JSON: "{not-json" },
+  );
+
+  assert.equal(result.status, "ok");
+  assert.match(stderrOutput, /Ignoring invalid LOBSTER_LLM_PRICING_JSON/);
+});
+
+test("workflow cost tracking warns when usage omits the model id", async () => {
+  const { result, stderrOutput } = await runWorkflow({
+    steps: [
+      {
+        id: "llm",
+        command:
+          'node -e "process.stdout.write(JSON.stringify({usage:{inputTokens:1000,outputTokens:1000}}))"',
+      },
+    ],
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result._meta?.cost?.estimatedCostUsd, 0);
+  assert.match(stderrOutput, /No LLM pricing configured for model "<missing>"/);
+});
+
+test("CostTracker escapes unknown model ids in warnings", () => {
+  const stderr = captureWritable();
+  const tracker = new CostTracker(undefined, stderr.stream);
+  tracker.recordUsage("step1", "bad\n\u001b[31m\u009b31m\u2028next\u2029line", {
+    inputTokens: 1,
+    outputTokens: 1,
+  });
+  assert.ok(stderr.output().includes('"bad\\n\\u001b[31m\\u009b31m\\u2028next\\u2029line"'));
+  assert.equal(stderr.output().includes("\u009b"), false);
+  assert.equal(stderr.output().includes("\u2028"), false);
+  assert.equal(stderr.output().includes("\u2029"), false);
 });
