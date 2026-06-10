@@ -52,7 +52,7 @@ export type PipelineToolRunResolution =
         items: unknown[];
         preview?: string;
         resumeToken: string;
-        approvalId: string;
+        approvalId?: string;
       };
       requiresInput: null;
     }
@@ -108,7 +108,7 @@ export async function finalizePipelineToolRun(params: {
       await cleanupApprovalIndexByStateKey({ env: params.env, stateKey: params.previousStateKey });
       await deleteStateJson({ env: params.env, key: params.previousStateKey });
     }
-    let approvalId: string;
+    let approvalId: string | null;
     try {
       approvalId = await createApprovalIndex({ env: params.env, stateKey: nextStateKey });
     } catch (err) {
@@ -127,7 +127,7 @@ export async function finalizePipelineToolRun(params: {
       requiresApproval: {
         ...approval,
         resumeToken,
-        approvalId,
+        ...(approvalId ? { approvalId } : null),
       },
       requiresInput: null,
     };

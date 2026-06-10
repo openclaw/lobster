@@ -6,6 +6,7 @@ All notable changes to Lobster will be documented in this file.
 
 - Require Node.js 22 or newer for the npm package, matching release CI.
 - Write Lobster state files atomically while preserving restricted file modes, preventing truncated resume/session state after process termination. Thanks to [@KrasimirKralev](https://github.com/KrasimirKralev) (Issues [#108](https://github.com/openclaw/lobster/issues/108), [#109](https://github.com/openclaw/lobster/issues/109), PR [#110](https://github.com/openclaw/lobster/pull/110)).
+- Harden LLM cache files, diff snapshots, and approval ID indexes against truncated JSON after process termination. Disposable cache/snapshot corruption now recovers as a miss, authoritative resume state still surfaces malformed JSON, and approval short-ID indexes are published atomically without overwriting existing mappings. Thanks to [@TurboTheTurtle](https://github.com/TurboTheTurtle) (Issues [#111](https://github.com/openclaw/lobster/issues/111), [#112](https://github.com/openclaw/lobster/issues/112), [#113](https://github.com/openclaw/lobster/issues/113), PR [#114](https://github.com/openclaw/lobster/pull/114)).
 - Fix `timeout_ms` + `retry` so per-attempt timeouts retry as documented while external workflow cancellation still stops immediately. Thanks to [@KrasimirKralev](https://github.com/KrasimirKralev) (PR [#106](https://github.com/openclaw/lobster/pull/106)).
 
 ## 2026.5.22

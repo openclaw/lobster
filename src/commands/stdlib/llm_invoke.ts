@@ -4,7 +4,14 @@ import { createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import type { ErrorObject } from "ajv";
 
-import { readStateJson, writeStateJson, stableStringify } from "../../state/store.js";
+import {
+  ensureDirectory,
+  isJsonSyntaxError,
+  readStateJson,
+  stableStringify,
+  writeFileAtomic,
+  writeStateJson,
+} from "../../state/store.js";
 import { createCompileCached } from "../../validation.js";
 import type { LobsterCommand } from "../types.js";
 
@@ -378,7 +385,7 @@ async function runLlmInvoke({
   });
 
   if (stateKey && !forceRefresh) {
-    const stored = await readStateJson({ env, key: stateKey }).catch(() => null);
+    const stored = await readReusableLlmState(env, stateKey);
     const reused = pickReusableState(stored, cacheKey, config.stateType);
     if (reused) {
       return {
@@ -887,6 +894,15 @@ async function persistOutputs({
   await writeStateJson({ env, key: stateKey, value: record });
 }
 
+async function readReusableLlmState(env: any, stateKey: string) {
+  try {
+    return await readStateJson({ env, key: stateKey });
+  } catch (err: any) {
+    if (isJsonSyntaxError(err)) return null;
+    throw err;
+  }
+}
+
 function pickReusableState(stored: any, cacheKey: string, stateType: string) {
   if (!stored || typeof stored !== "object") return null;
   if (stored.type !== stateType) return null;
@@ -908,9 +924,12 @@ async function readCacheEntry(
   const filePath = path.join(getCacheDir(env), cacheNamespace, `${key}.json`);
   try {
     const text = await fsp.readFile(filePath, "utf8");
-    return JSON.parse(text) as CacheEntry;
+    const parsed = JSON.parse(text) as Partial<CacheEntry>;
+    if (parsed?.cacheKey !== key || !Array.isArray(parsed.items)) return null;
+    return parsed as CacheEntry;
   } catch (err: any) {
     if (err?.code === "ENOENT") return null;
+    if (isJsonSyntaxError(err)) return null;
     throw err;
   }
 }
@@ -922,11 +941,11 @@ async function writeCacheEntry(
   cacheNamespace: string,
 ) {
   const dir = path.join(getCacheDir(env), cacheNamespace);
-  await fsp.mkdir(dir, { recursive: true });
+  await ensureDirectory(dir);
   const filePath = path.join(dir, `${key}.json`);
-  await fsp.writeFile(
+  await writeFileAtomic(
     filePath,
-    JSON.stringify({ items, cacheKey: key, storedAt: new Date().toISOString() }, null, 2),
+    JSON.stringify({ items, cacheKey: key, storedAt: new Date().toISOString() }, null, 2) + "\n",
   );
 }
 

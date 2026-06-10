@@ -1,6 +1,6 @@
 import { promises as fsp } from "node:fs";
 
-import { defaultStateDir, keyToPath, writeFileAtomic } from "../../state/store.js";
+import { defaultStateDir, ensureDirectory, keyToPath, writeFileAtomic } from "../../state/store.js";
 
 export const stateGetCommand = {
   name: "state.get",
@@ -69,7 +69,7 @@ export const stateSetCommand = {
     const stateDir = defaultStateDir(ctx.env);
     const filePath = keyToPath(stateDir, key);
 
-    await fsp.mkdir(stateDir, { recursive: true });
+    await ensureDirectory(stateDir);
     await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n");
 
     return { output: asStream([value]) };

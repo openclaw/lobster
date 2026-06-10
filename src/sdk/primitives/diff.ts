@@ -17,7 +17,7 @@
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { writeFileAtomic } from "../../state/store.js";
+import { ensureDirectory, isJsonSyntaxError, writeFileAtomic } from "../../state/store.js";
 
 /**
  * Get the state directory
@@ -64,10 +64,6 @@ function stableStringify(value) {
     }
     return v;
   });
-}
-
-function isJsonSyntaxError(err) {
-  return err instanceof SyntaxError;
 }
 
 /**
@@ -117,7 +113,7 @@ export function diffLast(key, options: any = {}) {
       const changed = stableStringify(before) !== stableStringify(value);
 
       // Store new value
-      await fsp.mkdir(stateDir, { recursive: true });
+      await ensureDirectory(stateDir);
       await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n");
 
       // Build result
@@ -173,7 +169,7 @@ export async function diffAndStoreValue(key, value, ctx = {}) {
   const changed = stableStringify(before) !== stableStringify(value);
 
   // Store new value
-  await fsp.mkdir(stateDir, { recursive: true });
+  await ensureDirectory(stateDir);
   await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n");
 
   return { before, after: value, changed };

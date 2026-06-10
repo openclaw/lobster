@@ -1293,7 +1293,7 @@ export async function runWorkflowFile({
             createdAt: new Date().toISOString(),
           });
 
-          let approvalId: string;
+          let approvalId: string | null;
           try {
             approvalId = await createApprovalIndex({ env: ctx.env, stateKey });
           } catch (err) {
@@ -1318,7 +1318,7 @@ export async function runWorkflowFile({
             requiresApproval: {
               ...approval,
               resumeToken,
-              approvalId,
+              ...(approvalId ? { approvalId } : null),
             },
           };
         }
