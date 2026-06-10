@@ -336,13 +336,13 @@ test("diffAndStore treats corrupt previous state as a miss and rewrites atomical
 test("SDK diff primitives treat corrupt previous state as a miss (#112)", async () => {
   const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-sdk-diff-corrupt-"));
   const ctx = { env: { LOBSTER_STATE_DIR: tmp } };
-  await fsp.writeFile(path.join(tmp, "sdk_snapshot.json"), '{"partial"', "utf8");
+  await fsp.writeFile(path.join(tmp, "sdk-snapshot.json"), '{"partial"', "utf8");
 
   const direct = await diffAndStoreValue("sdk-snapshot", { next: true }, ctx);
   assert.equal(direct.before, null);
   assert.equal(direct.changed, true);
 
-  await fsp.writeFile(path.join(tmp, "stage_snapshot.json"), '{"partial"', "utf8");
+  await fsp.writeFile(path.join(tmp, "stage-snapshot.json"), '{"partial"', "utf8");
   const stage = diffLast("stage-snapshot");
   const result = await stage.run({ input: streamOf([{ next: true }]), ctx });
   const output = [];
