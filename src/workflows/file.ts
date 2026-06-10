@@ -761,7 +761,10 @@ export async function runWorkflowFile({
       return dryRunWorkflow({ steps, resolvedArgs, results, startIndex, ctx });
     }
 
-    const costTracker = new CostTracker(CostTracker.parsePricingFromEnv(ctx.env));
+    const costTracker = new CostTracker(
+      CostTracker.parsePricingFromEnv(ctx.env, ctx.stderr),
+      ctx.stderr,
+    );
     let lastStepId: string | null =
       resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
 
