@@ -9,14 +9,17 @@ import {
   writeStateJson,
 } from "./state/store.js";
 import { compileCached } from "./validation.js";
+import { validateCommandInputState, type CommandInputState } from "./input_request.js";
 
 export type PipelineResumeState = {
   pipeline: Array<{ name: string; args: Record<string, unknown>; raw: string }>;
   resumeAtIndex: number;
   items: unknown[];
   haltType?: "approval_request" | "input_request";
+  resumeMode?: "next_stage" | "same_stage";
   inputSchema?: unknown;
   prompt?: string;
+  commandInput?: CommandInputState;
   createdAt: string;
 };
 
@@ -34,6 +37,7 @@ export type PipelineInputRequest = {
   defaults?: unknown;
   subject?: unknown;
   items?: unknown[];
+  commandInput?: CommandInputState;
 };
 
 export type PipelineRunOutput = {
@@ -134,13 +138,19 @@ export async function finalizePipelineToolRun(params: {
   }
 
   if (inputRequest) {
+    const resumeMode = inputRequest.commandInput ? "same_stage" : "next_stage";
     const nextStateKey = await savePipelineResumeState(params.env, {
       pipeline: params.pipeline,
-      resumeAtIndex: (params.output.haltedAt?.index ?? -1) + 1,
-      items: [],
+      resumeAtIndex:
+        resumeMode === "same_stage"
+          ? (params.output.haltedAt?.index ?? -1)
+          : (params.output.haltedAt?.index ?? -1) + 1,
+      items: resumeMode === "same_stage" ? (inputRequest.items ?? []) : [],
       haltType: "input_request",
+      resumeMode,
       inputSchema: inputRequest.responseSchema,
       prompt: inputRequest.prompt,
+      ...(inputRequest.commandInput ? { commandInput: inputRequest.commandInput } : null),
       createdAt: new Date().toISOString(),
     });
     if (params.previousStateKey) {
@@ -199,12 +209,38 @@ export async function loadPipelineResumeState(
   }
   const data = stored as Partial<PipelineResumeState>;
   if (!Array.isArray(data.pipeline)) throw new Error("Invalid pipeline resume state");
-  if (typeof data.resumeAtIndex !== "number") throw new Error("Invalid pipeline resume state");
+  validatePipelineShape(data.pipeline);
+  if (
+    typeof data.resumeAtIndex !== "number" ||
+    !Number.isInteger(data.resumeAtIndex) ||
+    data.resumeAtIndex < 0 ||
+    data.resumeAtIndex > data.pipeline.length
+  ) {
+    throw new Error("Invalid pipeline resume state");
+  }
   if (!Array.isArray(data.items)) throw new Error("Invalid pipeline resume state");
   if (
     data.haltType !== undefined &&
     !["approval_request", "input_request"].includes(data.haltType)
   ) {
+    throw new Error("Invalid pipeline resume state");
+  }
+  if (data.resumeMode !== undefined && !["next_stage", "same_stage"].includes(data.resumeMode)) {
+    throw new Error("Invalid pipeline resume state");
+  }
+  if (data.haltType === "input_request") {
+    if (data.inputSchema === undefined || typeof data.prompt !== "string") {
+      throw new Error("Invalid pipeline resume state");
+    }
+    if (data.resumeMode === "same_stage") {
+      if (data.resumeAtIndex >= data.pipeline.length) {
+        throw new Error("Invalid pipeline resume state");
+      }
+      data.commandInput = validateCommandInputState(data.commandInput);
+    } else if (data.commandInput !== undefined) {
+      throw new Error("Invalid pipeline resume state");
+    }
+  } else if (data.resumeMode === "same_stage" || data.commandInput !== undefined) {
     throw new Error("Invalid pipeline resume state");
   }
   return data as PipelineResumeState;
@@ -226,4 +262,18 @@ export function validatePipelineInputResponse(schema: unknown, response: unknown
   const pathValue = first?.instancePath || "/";
   const reason = first?.message ? ` ${first.message}` : "";
   throw new Error(`pipeline input response failed schema validation at ${pathValue}:${reason}`);
+}
+
+function validatePipelineShape(pipeline: unknown[]) {
+  for (const stage of pipeline) {
+    if (!stage || typeof stage !== "object") throw new Error("Invalid pipeline resume state");
+    const data = stage as Record<string, unknown>;
+    if (typeof data.name !== "string" || data.name.length === 0) {
+      throw new Error("Invalid pipeline resume state");
+    }
+    if (!data.args || typeof data.args !== "object" || Array.isArray(data.args)) {
+      throw new Error("Invalid pipeline resume state");
+    }
+    if (typeof data.raw !== "string") throw new Error("Invalid pipeline resume state");
+  }
 }

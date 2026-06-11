@@ -218,6 +218,12 @@ Notes:
   - `LOBSTER_APPROVAL_INITIATED_BY` can provide a default initiator id at run time.
   - `LOBSTER_APPROVAL_APPROVED_BY` is used at resume/approval time for identity checks.
 
+### Command-level input requests
+
+Pipeline commands can call `ctx.requestInput({ prompt, responseSchema, defaults, subject, suspendedState })` to pause in tool mode, workflows, or the SDK and resume the same command after a structured response. CLI/tool resume tokens store only a state key; the persisted state validates the suspended request metadata before returning the submitted response to the command. SDK same-command resumes store the command frame in the configured SDK state directory.
+
+Commands are re-run on resume, so they must be idempotent until `requestInput` returns. Array-backed command input is snapshotted with bounds for replay; lazy stream input is not buffered and requires a compact JSON `suspendedState` supplied by the command. On resume, call `ctx.requestInput.getSuspendedState()` before reading lazy input to restore that command-owned continuation state.
+
 ## Visualizing workflows
 
 Use `lobster graph` to inspect workflow structure before execution.

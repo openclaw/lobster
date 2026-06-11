@@ -83,6 +83,28 @@ test("for_each supports custom item_var and index_var", async () => {
   ]);
 });
 
+test("for_each pipeline sub-steps reject command-level requestInput", async () => {
+  await assert.rejects(
+    () =>
+      runWorkflow({
+        steps: [
+          { id: "vals", command: 'node -e "process.stdout.write(JSON.stringify([1]))"' },
+          {
+            id: "loop",
+            for_each: "$vals.json",
+            steps: [
+              {
+                id: "review",
+                pipeline: "ask --prompt 'Review?'",
+              },
+            ],
+          },
+        ],
+      }),
+    /requestInput is not supported in this pipeline context/,
+  );
+});
+
 test("for_each throws when source is not an array", async () => {
   await assert.rejects(
     () =>

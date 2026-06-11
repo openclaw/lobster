@@ -277,10 +277,24 @@ export async function resumeToolRequest({
     }
   }
 
+  const isSameStageInput =
+    resumeState.haltType === "input_request" && resumeState.resumeMode === "same_stage";
   const remaining = resumeState.pipeline.slice(resumeState.resumeAtIndex);
-  const input = streamFromItems(
-    resumeState.haltType === "input_request" ? [response] : resumeState.items,
-  );
+  const input = isSameStageInput
+    ? resumeState.items
+    : resumeState.haltType === "input_request"
+      ? [response]
+      : resumeState.items;
+  const requestInputResume = isSameStageInput
+    ? {
+        state: resumeState.commandInput!,
+        response,
+        onConsumed: async () => {
+          await cleanupIndex();
+          await deleteStateJson({ env: runtime.env, key: payload.stateKey });
+        },
+      }
+    : undefined;
 
   try {
     const output = await runPipeline({
@@ -295,6 +309,7 @@ export async function resumeToolRequest({
       llmAdapters: runtime.llmAdapters,
       signal: runtime.signal,
       input,
+      requestInputResume,
     });
 
     await cleanupIndex();
@@ -360,14 +375,6 @@ function errorEnvelope(type: string, message: string): ToolEnvelope {
     ok: false,
     error: { type, message },
   };
-}
-
-function streamFromItems(items: unknown[]) {
-  return (async function* () {
-    for (const item of items) {
-      yield item;
-    }
-  })();
 }
 
 async function resolveWorkflowFile(candidate: string, cwd: string) {

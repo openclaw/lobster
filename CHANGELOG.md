@@ -4,6 +4,7 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Add command-level `ctx.requestInput(...)` for CLI/tool/SDK pipeline commands, with state-backed same-command resume, bounded command-input replay, and workflow `pipeline:` propagation (Issue [#101](https://github.com/openclaw/lobster/issues/101)).
 - Warn when LLM usage records an unknown or missing model ID or invalid `LOBSTER_LLM_PRICING_JSON`, keeping zero-cost fallback behavior visible for `cost_limit` users. Thanks to [@KrasimirKralev](https://github.com/KrasimirKralev) (Issue [#107](https://github.com/openclaw/lobster/issues/107)).
 - Require Node.js 22 or newer for the npm package, matching release CI.
 - Write Lobster state files atomically while preserving restricted file modes, preventing truncated resume/session state after process termination. Thanks to [@KrasimirKralev](https://github.com/KrasimirKralev) (Issues [#108](https://github.com/openclaw/lobster/issues/108), [#109](https://github.com/openclaw/lobster/issues/109), PR [#110](https://github.com/openclaw/lobster/pull/110)).

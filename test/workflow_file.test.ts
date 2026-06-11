@@ -8,6 +8,13 @@ import os from "node:os";
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { runWorkflowFile } from "../src/workflows/file.js";
 import { decodeResumeToken } from "../src/resume.js";
+import { readStateJson } from "../src/state/store.js";
+
+function streamOf(items: unknown[]) {
+  return (async function* () {
+    for (const item of items) yield item;
+  })();
+}
 
 test("workflow file runs with approval and resume", async () => {
   const workflow = {
@@ -286,6 +293,549 @@ test("workflow file input steps pause and resume with structured responses", asy
 
   assert.equal(resumed.status, "ok");
   assert.deepEqual(resumed.output, [{ decision: "approve", subject: "hello" }]);
+});
+
+test("workflow pipeline command input pauses and resumes the same pipeline step", async () => {
+  const schema = JSON.stringify({
+    type: "object",
+    properties: { decision: { type: "string", enum: ["approve", "reject"] } },
+    required: ["decision"],
+  });
+  const workflow = {
+    steps: [
+      {
+        id: "draft",
+        run: "node -e \"process.stdout.write(JSON.stringify({text:'hello'}))\"",
+      },
+      {
+        id: "review",
+        pipeline: `ask --subject-from-stdin --prompt 'Review draft?' --schema ${JSON.stringify(schema)} | pick decision`,
+        stdin: "$draft.json",
+      },
+      {
+        id: "finish",
+        run: 'node -e "process.stdout.write(JSON.stringify({decision:process.env.DECISION}))"',
+        env: {
+          DECISION: "$review.json.decision",
+        },
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-pipeline-input-"));
+  const stateDir = path.join(tmpDir, "state");
+  const filePath = path.join(tmpDir, "workflow.lobster");
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env,
+      mode: "tool",
+      registry: createDefaultRegistry(),
+    },
+  });
+
+  assert.equal(first.status, "needs_input");
+  assert.deepEqual(first.requiresInput?.subject, { text: '{"text":"hello"}' });
+  const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? "");
+  assert.equal(payload.kind, "workflow-file");
+  const state = (await readStateJson({ env, key: payload.stateKey! })) as any;
+  assert.equal(state.resumeAtIndex, 1);
+  assert.equal(state.inputKind, "pipeline_command");
+  assert.equal(state.inputStepId, "review");
+  assert.equal(state.pipelineInput.resumeAtIndex, 0);
+  assert.deepEqual(state.pipelineInput.items, [{ text: "hello" }]);
+  assert.deepEqual(state.pipelineInput.commandInput.pending.suspendedState, {
+    type: "ask",
+    subject: { text: '{"text":"hello"}' },
+  });
+
+  const resumed = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env,
+      mode: "tool",
+      registry: createDefaultRegistry(),
+    },
+    resume: payload,
+    response: { decision: "approve" },
+  });
+
+  assert.equal(resumed.status, "ok");
+  assert.deepEqual(resumed.output, [{ decision: "approve" }]);
+});
+
+test("workflow pipeline requestInput resume invariant bypasses on_error", async () => {
+  const schema = {
+    type: "object",
+    properties: { decision: { type: "string" } },
+    required: ["decision"],
+  };
+  let calls = 0;
+  let sideEffects = 0;
+  const choose = {
+    name: "choose",
+    async run({ ctx }: any) {
+      calls += 1;
+      if (calls > 1) return { output: streamOf([{ skipped: true }]) };
+      await ctx.requestInput({ prompt: "Review?", responseSchema: schema });
+      return { output: streamOf([]) };
+    },
+  };
+  const side = {
+    name: "side",
+    async run() {
+      sideEffects += 1;
+      return { output: streamOf([{ sideEffects }]) };
+    },
+  };
+  const registry = {
+    get(name: string) {
+      return name === "choose" ? choose : name === "side" ? side : undefined;
+    },
+    list() {
+      return ["choose", "side"];
+    },
+  };
+  const workflow = {
+    name: "sample",
+    steps: [
+      {
+        id: "review",
+        pipeline: "choose",
+        on_error: "continue",
+      },
+      {
+        id: "side",
+        pipeline: "side",
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-pipeline-invariant-"));
+  const stateDir = path.join(tmpDir, "state");
+  const filePath = path.join(tmpDir, "workflow.lobster");
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env,
+      mode: "tool",
+      registry,
+    },
+  });
+  assert.equal(first.status, "needs_input");
+  const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? "");
+  assert.equal(payload.kind, "workflow-file");
+
+  await assert.rejects(
+    runWorkflowFile({
+      filePath,
+      ctx: {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env,
+        mode: "tool",
+        registry,
+      },
+      resume: payload,
+      response: { decision: "approve" },
+    }),
+    /not consumed/,
+  );
+  assert.equal(sideEffects, 0);
+  await fsp.access(path.join(stateDir, `${payload.stateKey}.json`));
+});
+
+test("workflow pipeline requestInput resume rejects changed pipeline", async () => {
+  const schema = {
+    type: "object",
+    properties: { decision: { type: "string" } },
+    required: ["decision"],
+  };
+  let sideEffects = 0;
+  const choose = {
+    name: "choose",
+    async run({ ctx }: any) {
+      const response = await ctx.requestInput({ prompt: "Review?", responseSchema: schema });
+      return { output: streamOf([{ decision: response.decision }]) };
+    },
+  };
+  const side = {
+    name: "side",
+    async run({ input }: any) {
+      sideEffects += 1;
+      return { output: input };
+    },
+  };
+  const registry = {
+    get(name: string) {
+      return name === "choose" ? choose : name === "side" ? side : undefined;
+    },
+    list() {
+      return ["choose", "side"];
+    },
+  };
+  const workflow = {
+    name: "sample",
+    steps: [
+      {
+        id: "review",
+        pipeline: "choose | side",
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-pipeline-change-"));
+  const stateDir = path.join(tmpDir, "state");
+  const filePath = path.join(tmpDir, "workflow.lobster");
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env,
+      mode: "tool",
+      registry,
+    },
+  });
+  assert.equal(first.status, "needs_input");
+  const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? "");
+  assert.equal(payload.kind, "workflow-file");
+
+  workflow.steps[0].pipeline = "choose";
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+
+  await assert.rejects(
+    runWorkflowFile({
+      filePath,
+      ctx: {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env,
+        mode: "tool",
+        registry,
+      },
+      resume: payload,
+      response: { decision: "approve" },
+    }),
+    /pipeline changed/,
+  );
+  assert.equal(sideEffects, 0);
+  await fsp.access(path.join(stateDir, `${payload.stateKey}.json`));
+});
+
+test("workflow pipeline requestInput keeps full pipeline across repeated suspensions", async () => {
+  const schema = {
+    type: "object",
+    properties: { decision: { type: "string" } },
+    required: ["decision"],
+  };
+  const produce = {
+    name: "produce",
+    async run() {
+      return { output: streamOf([{ id: 1 }]) };
+    },
+  };
+  const choose = {
+    name: "choose",
+    async run({ ctx }: any) {
+      const first = await ctx.requestInput({
+        prompt: "First?",
+        responseSchema: schema,
+        suspendedState: { phase: "first" },
+      });
+      const second = await ctx.requestInput({
+        prompt: `Second after ${first.decision}`,
+        responseSchema: schema,
+        suspendedState: { phase: "second" },
+      });
+      return { output: streamOf([{ first: first.decision, second: second.decision }]) };
+    },
+  };
+  const registry = {
+    get(name: string) {
+      return name === "produce" ? produce : name === "choose" ? choose : undefined;
+    },
+    list() {
+      return ["produce", "choose"];
+    },
+  };
+  const workflow = {
+    name: "sample",
+    steps: [
+      {
+        id: "review",
+        pipeline: "produce | choose",
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-pipeline-repeat-"));
+  const stateDir = path.join(tmpDir, "state");
+  const filePath = path.join(tmpDir, "workflow.lobster");
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env,
+      mode: "tool",
+      registry,
+    },
+  });
+  assert.equal(first.status, "needs_input");
+  const firstPayload = decodeResumeToken(first.requiresInput?.resumeToken ?? "");
+  assert.equal(firstPayload.kind, "workflow-file");
+
+  const second = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env,
+      mode: "tool",
+      registry,
+    },
+    resume: firstPayload,
+    response: { decision: "approve" },
+  });
+  assert.equal(second.status, "needs_input");
+  const secondPayload = decodeResumeToken(second.requiresInput?.resumeToken ?? "");
+  assert.equal(secondPayload.kind, "workflow-file");
+  const state = (await readStateJson({ env, key: secondPayload.stateKey! })) as any;
+  assert.equal(state.pipelineInput.resumeAtIndex, 1);
+  assert.equal(state.pipelineInput.pipeline.length, 2);
+
+  const done = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env,
+      mode: "tool",
+      registry,
+    },
+    resume: secondPayload,
+    response: { decision: "ship" },
+  });
+  assert.equal(done.status, "ok");
+  assert.deepEqual(done.output, [{ first: "approve", second: "ship" }]);
+});
+
+test("workflow pipeline requestInput resume rejects condition bypass", async () => {
+  const schema = {
+    type: "object",
+    properties: { decision: { type: "string" } },
+    required: ["decision"],
+  };
+  let sideEffects = 0;
+  const choose = {
+    name: "choose",
+    async run({ ctx }: any) {
+      const response = await ctx.requestInput({ prompt: "Review?", responseSchema: schema });
+      return { output: streamOf([{ decision: response.decision }]) };
+    },
+  };
+  const side = {
+    name: "side",
+    async run() {
+      sideEffects += 1;
+      return { output: streamOf([{ sideEffects }]) };
+    },
+  };
+  const registry = {
+    get(name: string) {
+      return name === "choose" ? choose : name === "side" ? side : undefined;
+    },
+    list() {
+      return ["choose", "side"];
+    },
+  };
+  const workflow = {
+    name: "sample",
+    steps: [
+      {
+        id: "gate",
+        run: 'node -e "process.stdout.write(JSON.stringify({ok:true}))"',
+      },
+      {
+        id: "review",
+        pipeline: "choose",
+        condition: "$gate.json.ok",
+      },
+      {
+        id: "side",
+        pipeline: "side",
+      },
+    ],
+  };
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-pipeline-condition-"));
+  const stateDir = path.join(tmpDir, "state");
+  const filePath = path.join(tmpDir, "workflow.lobster");
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+  const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+
+  const first = await runWorkflowFile({
+    filePath,
+    ctx: {
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      env,
+      mode: "tool",
+      registry,
+    },
+  });
+  assert.equal(first.status, "needs_input");
+  const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? "");
+  assert.equal(payload.kind, "workflow-file");
+
+  workflow.steps[1].condition = "$gate.json.missing";
+  await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+
+  await assert.rejects(
+    runWorkflowFile({
+      filePath,
+      ctx: {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env,
+        mode: "tool",
+        registry,
+      },
+      resume: payload,
+      response: { decision: "approve" },
+    }),
+    /condition changed/,
+  );
+  assert.equal(sideEffects, 0);
+  await fsp.access(path.join(stateDir, `${payload.stateKey}.json`));
+});
+
+test("workflow pipeline command input preserves replayable stdin without suspended state", async () => {
+  const schema = {
+    type: "object",
+    properties: { decision: { type: "string" } },
+    required: ["decision"],
+  };
+  const reviewCommand = {
+    name: "review_input",
+    async run({ input, ctx }: any) {
+      const response = await ctx.requestInput({ prompt: "Review?", responseSchema: schema });
+      const items = [];
+      for await (const item of input) items.push(item);
+      return { output: streamOf([{ items, decision: response.decision }]) };
+    },
+  };
+  const registry = {
+    get(name: string) {
+      return name === reviewCommand.name ? reviewCommand : undefined;
+    },
+    list() {
+      return [reviewCommand.name];
+    },
+  };
+
+  async function runCase({
+    sourceStep,
+    stdin,
+    prefix,
+  }: {
+    sourceStep?: Record<string, unknown>;
+    stdin?: string;
+    prefix: string;
+  }) {
+    const steps = [
+      ...(sourceStep ? [sourceStep] : []),
+      {
+        id: "review",
+        pipeline: "review_input",
+        ...(stdin ? { stdin } : null),
+      },
+    ];
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
+    const stateDir = path.join(tmpDir, "state");
+    const filePath = path.join(tmpDir, "workflow.lobster");
+    await fsp.writeFile(filePath, JSON.stringify({ name: "sample", steps }, null, 2), "utf8");
+    const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+
+    const first = await runWorkflowFile({
+      filePath,
+      ctx: {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env,
+        mode: "tool",
+        registry,
+      },
+    });
+    assert.equal(first.status, "needs_input");
+
+    const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? "");
+    assert.equal(payload.kind, "workflow-file");
+    const state = (await readStateJson({ env, key: payload.stateKey! })) as any;
+    const resumed = await runWorkflowFile({
+      filePath,
+      ctx: {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env,
+        mode: "tool",
+        registry,
+      },
+      resume: payload,
+      response: { decision: "approve" },
+    });
+
+    return { state, resumed };
+  }
+
+  const noStdin = await runCase({ prefix: "lobster-workflow-pipeline-no-stdin-" });
+  assert.deepEqual(noStdin.state.pipelineInput.items, []);
+  assert.equal(noStdin.resumed.status, "ok");
+  assert.deepEqual(noStdin.resumed.output, [{ items: [], decision: "approve" }]);
+
+  const withArrayStdin = await runCase({
+    prefix: "lobster-workflow-pipeline-array-stdin-",
+    sourceStep: {
+      id: "draft",
+      run: 'node -e "process.stdout.write(JSON.stringify([{id:1}]))"',
+    },
+    stdin: "$draft.json",
+  });
+  assert.deepEqual(withArrayStdin.state.pipelineInput.items, [{ id: 1 }]);
+  assert.equal(withArrayStdin.resumed.status, "ok");
+  assert.deepEqual(withArrayStdin.resumed.output, [{ items: [{ id: 1 }], decision: "approve" }]);
 });
 
 test("workflow input resumes preserve the full subject even when the tool envelope preview is truncated", async () => {

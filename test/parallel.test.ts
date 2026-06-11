@@ -122,6 +122,24 @@ test("parallel wait=all propagates branch failure", async () => {
   );
 });
 
+test("parallel pipeline branches reject command-level requestInput", async () => {
+  await assert.rejects(
+    () =>
+      runWorkflow({
+        steps: [
+          {
+            id: "p",
+            parallel: {
+              wait: "all",
+              branches: [{ id: "review", pipeline: "ask --prompt 'Review?'" }],
+            },
+          },
+        ],
+      }),
+    /requestInput is not supported in this pipeline context/,
+  );
+});
+
 test("parallel validation rejects empty branches", async () => {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-parallel-"));
   const filePath = path.join(tmpDir, "bad.lobster");

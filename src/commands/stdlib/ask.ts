@@ -78,9 +78,6 @@ export const askCommand = {
     const subjectFromStdin = Boolean(args["subject-from-stdin"] ?? args.subjectFromStdin);
     const schemaRaw = typeof args.schema === "string" ? args.schema : null;
 
-    const items = [];
-    for await (const item of input) items.push(item);
-
     const defaultSchema = {
       type: "object",
       properties: {
@@ -105,7 +102,22 @@ export const askCommand = {
     }
     const responseValidator = compileAskValidator(responseSchema);
 
-    let subject;
+    const forceEmit = Boolean(args.emit);
+    const emit = forceEmit || ctx.mode === "tool" || !isInteractive(ctx.stdin);
+    const canRequestInput =
+      !forceEmit && ctx.mode === "tool" && typeof ctx.requestInput === "function";
+    const restoredState = canRequestInput ? ctx.requestInput.getSuspendedState?.() : undefined;
+    const restoredAskState =
+      restoredState && typeof restoredState === "object" && restoredState.type === "ask"
+        ? restoredState
+        : null;
+
+    const items = [];
+    if (!restoredAskState) {
+      for await (const item of input) items.push(item);
+    }
+
+    let subject = restoredAskState?.subject;
     if (subjectFromStdin && items.length > 0) {
       const preview = items
         .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
@@ -114,8 +126,18 @@ export const askCommand = {
       subject = { text: preview };
     }
 
-    const emit = Boolean(args.emit) || ctx.mode === "tool" || !isInteractive(ctx.stdin);
     if (emit) {
+      if (canRequestInput) {
+        const response = await ctx.requestInput({
+          prompt,
+          responseSchema,
+          ...(subject ? { subject } : null),
+          suspendedState: { type: "ask", ...(subject ? { subject } : null) },
+        });
+        return {
+          output: asStream([response]),
+        };
+      }
       return {
         halt: true,
         output: (async function* () {
@@ -151,3 +173,7 @@ export const askCommand = {
     throw lastError ?? new Error("ask response failed schema validation");
   },
 };
+
+async function* asStream(items) {
+  for (const item of items) yield item;
+}

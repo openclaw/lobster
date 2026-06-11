@@ -1,6 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { runPipelineInternal } from "./runtime.js";
 import { encodeToken, decodeToken } from "./token.js";
 import { compileCached } from "../validation.js";
+import { validateCommandInputState, type CommandInputState } from "../input_request.js";
+import { deleteStateJson, readStateJson, writeStateJson } from "../state/store.js";
 
 type SdkResumePayload = {
   protocolVersion: 1;
@@ -11,6 +14,16 @@ type SdkResumePayload = {
   prompt?: string;
   inputSchema?: unknown;
   inputSubject?: unknown;
+  resumeMode?: "next_stage" | "same_stage";
+  stateKey?: string;
+};
+
+type SdkCommandInputResumeState = {
+  resumeAtIndex: number;
+  items: unknown[];
+  inputSchema: unknown;
+  inputSubject?: unknown;
+  commandInput: CommandInputState;
 };
 
 /**
@@ -109,13 +122,30 @@ export class Lobster {
 
       if (result.halted && result.items.length === 1 && result.items[0]?.type === "input_request") {
         const input = result.items[0];
+        const resumeMode = input.commandInput ? "same_stage" : "next_stage";
+        const resumeAtIndex =
+          resumeMode === "same_stage"
+            ? (result.haltedAt?.index ?? -1)
+            : (result.haltedAt?.index ?? -1) + 1;
+        const stateKey =
+          resumeMode === "same_stage"
+            ? await saveSdkCommandInputResumeState(this.#options, {
+                resumeAtIndex,
+                items: input.items ?? [],
+                inputSchema: input.responseSchema,
+                ...(input.subject !== undefined ? { inputSubject: input.subject } : null),
+                commandInput: input.commandInput,
+              })
+            : undefined;
         const resumeToken = encodeToken({
           protocolVersion: 1,
           v: 1,
           stageIndex: result.haltedAt?.index ?? -1,
-          resumeAtIndex: (result.haltedAt?.index ?? -1) + 1,
-          items: [],
-          inputSchema: input.responseSchema,
+          resumeAtIndex,
+          resumeMode,
+          ...(resumeMode === "same_stage"
+            ? { stateKey }
+            : { items: [], inputSchema: input.responseSchema }),
           inputSubject: input.subject,
         });
 
@@ -174,7 +204,15 @@ export class Lobster {
 
     const payload = decodeSdkResumePayload(token);
 
+    let sdkCommandInputState: SdkCommandInputResumeState | undefined;
+    if (payload.resumeMode === "same_stage") {
+      sdkCommandInputState = await loadSdkCommandInputResumeState(this.#options, payload.stateKey!);
+    }
+
     if (cancel === true) {
+      if (payload.resumeMode === "same_stage") {
+        await deleteStateJson({ env: sdkStateEnv(this.#options), key: payload.stateKey! });
+      }
       return {
         ok: true,
         status: "cancelled",
@@ -184,7 +222,7 @@ export class Lobster {
       };
     }
 
-    const expectsInput = payload.inputSchema !== undefined;
+    const expectsInput = payload.inputSchema !== undefined || payload.resumeMode === "same_stage";
     if (expectsInput) {
       if (approved !== undefined) {
         throw new Error("resume token expects an input response, not approved");
@@ -210,10 +248,11 @@ export class Lobster {
       }
     }
 
-    const resumeIndex = payload.resumeAtIndex ?? 0;
-    let resumeItems = payload.items ?? [];
+    const resumeIndex = sdkCommandInputState?.resumeAtIndex ?? payload.resumeAtIndex ?? 0;
+    let resumeItems = sdkCommandInputState?.items ?? payload.items ?? [];
+    let requestInputResume;
     if (response !== undefined) {
-      const schema = payload.inputSchema;
+      const schema = sdkCommandInputState?.inputSchema ?? payload.inputSchema;
       if (schema === undefined) {
         throw new Error("resume token does not support input responses");
       }
@@ -230,7 +269,18 @@ export class Lobster {
           `response does not match schema at ${first?.instancePath || "/"}: ${first?.message || "invalid"}`,
         );
       }
-      resumeItems = [response];
+      if (payload.resumeMode === "same_stage") {
+        resumeItems = sdkCommandInputState!.items;
+        requestInputResume = {
+          state: sdkCommandInputState!.commandInput,
+          response,
+          onConsumed: async () => {
+            await deleteStateJson({ env: sdkStateEnv(this.#options), key: payload.stateKey! });
+          },
+        };
+      } else {
+        resumeItems = [response];
+      }
     }
 
     const remainingStages = this.#stages.slice(resumeIndex);
@@ -245,6 +295,7 @@ export class Lobster {
         stages: remainingStages,
         ctx,
         input: resumeItems,
+        requestInputResume,
       });
 
       if (
@@ -277,13 +328,27 @@ export class Lobster {
 
       if (result.halted && result.items.length === 1 && result.items[0]?.type === "input_request") {
         const input = result.items[0];
+        const inputStageIndex = resumeIndex + (result.haltedAt?.index ?? 0);
+        const resumeMode = input.commandInput ? "same_stage" : "next_stage";
+        const stateKey =
+          resumeMode === "same_stage"
+            ? await saveSdkCommandInputResumeState(this.#options, {
+                resumeAtIndex: inputStageIndex,
+                items: input.items ?? [],
+                inputSchema: input.responseSchema,
+                ...(input.subject !== undefined ? { inputSubject: input.subject } : null),
+                commandInput: input.commandInput,
+              })
+            : undefined;
         const resumeToken = encodeToken({
           protocolVersion: 1,
           v: 1,
-          stageIndex: resumeIndex + (result.haltedAt?.index ?? 0),
-          resumeAtIndex: resumeIndex + (result.haltedAt?.index ?? 0) + 1,
-          items: [],
-          inputSchema: input.responseSchema,
+          stageIndex: inputStageIndex,
+          resumeAtIndex: resumeMode === "same_stage" ? inputStageIndex : inputStageIndex + 1,
+          resumeMode,
+          ...(resumeMode === "same_stage"
+            ? { stateKey }
+            : { items: [], inputSchema: input.responseSchema }),
           inputSubject: input.subject,
         });
 
@@ -351,5 +416,51 @@ function decodeSdkResumePayload(token: string): SdkResumePayload {
   if (data.items !== undefined && !Array.isArray(data.items)) {
     throw new Error("Invalid token");
   }
+  if (
+    data.resumeMode !== undefined &&
+    (typeof data.resumeMode !== "string" || !["next_stage", "same_stage"].includes(data.resumeMode))
+  ) {
+    throw new Error("Invalid token");
+  }
+  if (data.resumeMode === "same_stage") {
+    if (typeof data.stateKey !== "string" || data.stateKey.length === 0) {
+      throw new Error("Invalid token");
+    }
+  } else if (data.stateKey !== undefined) {
+    throw new Error("Invalid token");
+  }
+  if (data.commandInput !== undefined) throw new Error("Invalid token");
   return data as unknown as SdkResumePayload;
+}
+
+function sdkStateEnv(options: any) {
+  return options.stateDir
+    ? { ...(options.env ?? process.env), LOBSTER_STATE_DIR: options.stateDir }
+    : (options.env ?? process.env);
+}
+
+async function saveSdkCommandInputResumeState(options: any, state: SdkCommandInputResumeState) {
+  const stateKey = `sdk_resume_${randomUUID()}`;
+  await writeStateJson({ env: sdkStateEnv(options), key: stateKey, value: state });
+  return stateKey;
+}
+
+async function loadSdkCommandInputResumeState(
+  options: any,
+  stateKey: string,
+): Promise<SdkCommandInputResumeState> {
+  const stored = await readStateJson({ env: sdkStateEnv(options), key: stateKey });
+  if (!stored || typeof stored !== "object") throw new Error("SDK resume state not found");
+  const data = stored as Partial<SdkCommandInputResumeState>;
+  if (
+    typeof data.resumeAtIndex !== "number" ||
+    !Number.isInteger(data.resumeAtIndex) ||
+    data.resumeAtIndex < 0
+  ) {
+    throw new Error("Invalid SDK resume state");
+  }
+  if (!Array.isArray(data.items)) throw new Error("Invalid SDK resume state");
+  if (data.inputSchema === undefined) throw new Error("Invalid SDK resume state");
+  data.commandInput = validateCommandInputState(data.commandInput);
+  return data as SdkCommandInputResumeState;
 }

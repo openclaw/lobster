@@ -1,8 +1,11 @@
 /**
  * SDK Runtime - Executes Lobster pipelines
  *
- * This is adapted from the CLI runtime but designed for SDK use.
+ * This adapts SDK stages to the core runtime so command-level suspension rules
+ * stay identical across CLI, tool mode, and SDK entry points.
  */
+
+import { runPipeline as runCorePipeline } from "../runtime.js";
 
 /**
  * @typedef {Object} StageResult
@@ -19,39 +22,6 @@
  */
 
 /**
- * Convert various inputs to an async iterable
- * @param {any} input
- * @returns {AsyncIterable}
- */
-async function* toAsyncIterable(input) {
-  if (input === null || input === undefined) {
-    return;
-  }
-
-  if (Array.isArray(input)) {
-    for (const item of input) {
-      yield item;
-    }
-    return;
-  }
-
-  if (typeof input[Symbol.asyncIterator] === "function") {
-    yield* input;
-    return;
-  }
-
-  if (typeof input[Symbol.iterator] === "function") {
-    for (const item of input) {
-      yield item;
-    }
-    return;
-  }
-
-  // Single item
-  yield input;
-}
-
-/**
  * Collect async iterable to array
  * @param {AsyncIterable} iterable
  * @returns {Promise<any[]>}
@@ -64,6 +34,29 @@ async function collectItems(iterable) {
   return items;
 }
 
+function normalizeSdkOutput(output) {
+  if (output === null || output === undefined) return [];
+  if (Array.isArray(output)) return output;
+  if (
+    typeof output?.[Symbol.asyncIterator] === "function" ||
+    typeof output?.[Symbol.iterator] === "function"
+  ) {
+    return output;
+  }
+  return [output];
+}
+
+function createNullWritable() {
+  return {
+    write() {
+      return true;
+    },
+    end() {
+      return undefined;
+    },
+  };
+}
+
 /**
  * Run a pipeline of stages
  *
@@ -73,53 +66,72 @@ async function collectItems(iterable) {
  * @param {any[]} [options.input] - Initial input items
  * @returns {Promise<PipelineResult>}
  */
-export async function runPipelineInternal({ stages, ctx, input = [] }) {
-  let stream = toAsyncIterable(input);
-  let halted = false;
-  let haltedAt = null;
+export async function runPipelineInternal({
+  stages,
+  ctx,
+  input = [],
+  requestInputResume = undefined,
+}) {
+  const runtimeCtx = ctx ?? {};
+  const pipeline = stages.map((_stage, index) => ({
+    name: `sdk.stage.${index}`,
+    args: {},
+    raw: `sdk.stage.${index}`,
+  }));
+  const commands = new Map(
+    stages.map((stage, index) => [
+      `sdk.stage.${index}`,
+      {
+        async run({ input, ctx }) {
+          const stageCtx = { ...runtimeCtx, ...ctx };
+          if (typeof stage === "function") {
+            const isGenerator =
+              stage.constructor?.name === "AsyncGeneratorFunction" ||
+              stage.constructor?.name === "GeneratorFunction";
 
-  for (let idx = 0; idx < stages.length; idx++) {
-    const stage = stages[idx];
+            if (isGenerator) {
+              return { output: normalizeSdkOutput(stage(input, stageCtx)) };
+            }
 
-    let result;
+            const items = await collectItems(input);
+            return { output: normalizeSdkOutput(await stage(items, stageCtx)) };
+          }
 
-    if (typeof stage === "function") {
-      // Check if it's a generator function
-      const isGenerator =
-        stage.constructor?.name === "AsyncGeneratorFunction" ||
-        stage.constructor?.name === "GeneratorFunction";
+          if (typeof stage?.run === "function") {
+            const result = await stage.run({ input, ctx: stageCtx });
+            return result && "output" in result
+              ? { ...result, output: normalizeSdkOutput(result.output) }
+              : result;
+          }
 
-      if (isGenerator) {
-        // Generator function - pass the stream directly
-        result = { output: stage(stream, ctx) };
-      } else {
-        // Regular function - collect items first, then call
-        const items = await collectItems(stream);
-        const output = await stage(items, ctx);
-        result = { output: toAsyncIterable(output) };
-      }
-    } else if (typeof stage?.run === "function") {
-      // Stage object with run method (primitives)
-      result = await stage.run({ input: stream, ctx });
-    } else {
-      throw new Error(`Invalid stage at index ${idx}: must be a function or have run() method`);
-    }
+          throw new Error(
+            `Invalid stage at index ${index}: must be a function or have run() method`,
+          );
+        },
+      },
+    ]),
+  );
+  const stdout = runtimeCtx.stdout ?? createNullWritable();
+  const stderr = runtimeCtx.stderr ?? createNullWritable();
 
-    // Handle halt
-    if (result?.halt) {
-      halted = true;
-      haltedAt = { index: idx, stage };
-      stream = result.output ?? toAsyncIterable([]);
-      break;
-    }
-
-    stream = result?.output ?? toAsyncIterable([]);
-  }
-
-  // Collect final output
-  const items = await collectItems(stream);
-
-  return { items, halted, haltedAt };
+  return runCorePipeline({
+    pipeline,
+    registry: {
+      get(name) {
+        return commands.get(name);
+      },
+    },
+    stdin: runtimeCtx.stdin ?? { isTTY: false },
+    stdout,
+    stderr,
+    env: runtimeCtx.env ?? process.env,
+    mode: runtimeCtx.mode ?? "sdk",
+    cwd: runtimeCtx.cwd,
+    llmAdapters: runtimeCtx.llmAdapters,
+    signal: runtimeCtx.signal,
+    input: normalizeSdkOutput(input),
+    requestInputResume,
+  });
 }
 
 /**
@@ -134,34 +146,19 @@ export async function runPipeline({
   env,
   mode = "human",
   input,
+  requestInputResume = undefined,
+  requestInputEnabled = true,
 }) {
-  // This wraps the CLI-style pipeline execution
-  // Convert pipeline stages to functions using registry
-
-  const stages = pipeline.map((stage) => {
-    const command = registry.get(stage.name);
-    if (!command) {
-      throw new Error(`Unknown command: ${stage.name}`);
-    }
-
-    return {
-      run: async ({ input, ctx }) => {
-        return command.run({ input, args: stage.args, ctx });
-      },
-    };
-  });
-
-  const ctx = {
+  return runCorePipeline({
+    pipeline,
+    registry,
     stdin,
     stdout,
     stderr,
     env,
     mode,
-  };
-
-  return runPipelineInternal({
-    stages,
-    ctx,
-    input: input ? await collectItems(input) : [],
+    input,
+    requestInputResume,
+    requestInputEnabled,
   });
 }

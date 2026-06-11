@@ -294,6 +294,10 @@ async function handleRun({ argv, registry }) {
       return;
     }
 
+    if (output.halted && isPipelineInputRequest(output.items)) {
+      throw new Error("requestInput requires --mode tool when stdin is not interactive");
+    }
+
     // Human mode: if the last command didn't render, print JSON.
     if (!output.rendered) {
       process.stdout.write(JSON.stringify(output.items, null, 2));
@@ -311,6 +315,12 @@ async function handleRun({ argv, registry }) {
     process.stderr.write(`Error: ${err?.message ?? String(err)}\n`);
     process.exitCode = 1;
   }
+}
+
+function isPipelineInputRequest(items) {
+  return (
+    items.length === 1 && items[0]?.type === "input_request" && items[0]?.commandInput !== undefined
+  );
 }
 
 function parseRunArgs(argv) {
@@ -697,10 +707,24 @@ async function handleResume({ argv, registry }) {
     }
   }
 
+  const isSameStageInput =
+    resumeState.haltType === "input_request" && resumeState.resumeMode === "same_stage";
   const remaining = resumeState.pipeline.slice(resumeState.resumeAtIndex);
-  const input = streamFromItems(
-    resumeState.haltType === "input_request" ? [response] : resumeState.items,
-  );
+  const input = isSameStageInput
+    ? resumeState.items
+    : resumeState.haltType === "input_request"
+      ? [response]
+      : resumeState.items;
+  const requestInputResume = isSameStageInput
+    ? {
+        state: resumeState.commandInput!,
+        response,
+        onConsumed: async () => {
+          await cleanupIndex();
+          await deleteStateJson({ env: process.env, key: previousStateKey });
+        },
+      }
+    : undefined;
 
   try {
     const output = await runPipeline({
@@ -712,6 +736,7 @@ async function handleResume({ argv, registry }) {
       env: process.env,
       mode,
       input,
+      requestInputResume,
     });
     await cleanupIndex();
     const finalized = await finalizePipelineToolRun({
@@ -735,12 +760,6 @@ async function handleResume({ argv, registry }) {
     });
     process.exitCode = 1;
   }
-}
-
-function streamFromItems(items: unknown[]) {
-  return (async function* () {
-    for (const item of items) yield item;
-  })();
 }
 
 async function readVersion() {

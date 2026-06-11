@@ -1,4 +1,12 @@
 import { createJsonRenderer } from "./renderers/json.js";
+import {
+  InputRequestSuspension,
+  RequestInputResumeError,
+  assertRequestInputResumeConsumed,
+  createInputTracker,
+  createStageRequestInput,
+  type CommandInputResume,
+} from "./input_request.js";
 
 export async function runPipeline({
   pipeline,
@@ -13,6 +21,8 @@ export async function runPipeline({
   llmAdapters = undefined,
   signal = undefined,
   dryRun = false,
+  requestInputResume = undefined,
+  requestInputEnabled = true,
 }: {
   pipeline: any[];
   registry: any;
@@ -26,17 +36,20 @@ export async function runPipeline({
   llmAdapters?: Record<string, any> | undefined;
   signal?: AbortSignal | undefined;
   dryRun?: boolean;
+  requestInputResume?: CommandInputResume | undefined;
+  requestInputEnabled?: boolean;
 }) {
   if (dryRun) {
     return dryRunPipeline({ pipeline, registry, stderr });
   }
 
-  let stream = input ?? emptyStream();
+  let stream = input ?? [];
   let rendered = false;
   let halted = false;
   let haltedAt = null;
+  let pipelineOutputStarted = false;
 
-  const ctx = {
+  const baseCtx = {
     stdin,
     stdout,
     stderr,
@@ -46,7 +59,6 @@ export async function runPipeline({
     cwd,
     llmAdapters,
     signal,
-    render: createJsonRenderer(stdout),
   };
 
   for (let idx = 0; idx < pipeline.length; idx++) {
@@ -56,26 +68,124 @@ export async function runPipeline({
       throw new Error(`Unknown command: ${stage.name}`);
     }
 
-    const result = await command.run({ input: stream, args: stage.args, ctx });
+    const inputTracker = createInputTracker(stream);
+    const stageResume = idx === 0 ? requestInputResume : undefined;
+    let commandActive = true;
+    let inactiveReason: string | undefined;
+    let commandOutputStarted = false;
+    let stageFinished = false;
+    async function finishStage({ assertResume = true, suppressCloseErrors = false } = {}) {
+      if (stageFinished) return;
+      stageFinished = true;
+      commandActive = false;
+      inputTracker.disableReplay();
+      await inputTracker.close({ suppressErrors: suppressCloseErrors });
+      if (assertResume) assertRequestInputResumeConsumed(stageResume);
+    }
+    const stageStdout = trackWritableOutput(stdout, () => {
+      pipelineOutputStarted = true;
+    });
+    const ctx = {
+      ...baseCtx,
+      stdout: stageStdout,
+      render: createJsonRenderer(stageStdout),
+    };
+    const stageCtx = {
+      ...ctx,
+      requestInput: requestInputEnabled
+        ? createStageRequestInput({
+            ctx,
+            stageIndex: idx,
+            mode,
+            inputTracker,
+            isCommandActive: () => commandActive,
+            getInactiveReason: () => inactiveReason,
+            isOutputStarted: () => pipelineOutputStarted || commandOutputStarted,
+            resume: stageResume,
+          })
+        : createUnsupportedRequestInput(),
+    };
+
+    let result;
+    try {
+      result = await command.run({ input: inputTracker.iterable, args: stage.args, ctx: stageCtx });
+    } catch (err) {
+      await finishStage({ assertResume: false, suppressCloseErrors: true });
+      if (haltForInputRequest(err)) break;
+      assertNoUnconsumedResumeAfterError(stageResume, err);
+      throw err;
+    }
 
     if (result?.rendered) {
       rendered = true;
     }
 
+    const output = result?.output;
+    if (Array.isArray(output)) {
+      stream = output;
+      await finishStage();
+    } else if (output && !result?.halt && idx < pipeline.length - 1) {
+      commandActive = false;
+      inactiveReason = "requestInput cannot suspend from lazy output before downstream stages";
+      assertRequestInputResumeConsumed(stageResume);
+      stream = trackCommandOutput(
+        output,
+        () => {
+          commandOutputStarted = true;
+        },
+        () => assertRequestInputResumeConsumed(stageResume),
+        (err) => assertNoUnconsumedResumeAfterError(stageResume, err),
+        finishStage,
+      );
+    } else {
+      stream = output
+        ? trackCommandOutput(
+            output,
+            () => {
+              commandOutputStarted = true;
+            },
+            () => assertRequestInputResumeConsumed(stageResume),
+            (err) => assertNoUnconsumedResumeAfterError(stageResume, err),
+            finishStage,
+          )
+        : [];
+      if (!output) await finishStage();
+    }
+
     if (result?.halt) {
       halted = true;
       haltedAt = { index: idx, stage };
-      stream = result.output ?? emptyStream();
       break;
     }
-
-    stream = result?.output ?? emptyStream();
   }
 
   const items = [];
-  for await (const item of stream) items.push(item);
+  try {
+    for await (const item of stream) items.push(item);
+  } catch (err) {
+    if (haltForInputRequest(err)) {
+      items.length = 0;
+      for await (const item of stream) items.push(item);
+    } else {
+      throw err;
+    }
+  }
+  assertRequestInputResumeConsumed(requestInputResume);
 
   return { items, rendered, halted, haltedAt };
+
+  function haltForInputRequest(err: unknown) {
+    if (!(err instanceof InputRequestSuspension)) return false;
+    const stageIndex = err.stageIndex;
+    halted = true;
+    haltedAt = {
+      index: stageIndex,
+      stage: pipeline[stageIndex],
+      inPlace: true,
+    };
+    stream = streamFromItems([err.request]);
+    return true;
+  }
 }
 
 function dryRunPipeline({
@@ -122,4 +232,67 @@ function formatStageArgs(args: Record<string, unknown>) {
   return parts.join(", ");
 }
 
-async function* emptyStream() {}
+function streamFromItems(items: unknown[]) {
+  return (async function* () {
+    for (const item of items) yield item;
+  })();
+}
+
+function trackCommandOutput(
+  output: AsyncIterable<unknown> | Iterable<unknown>,
+  markOutput: () => void,
+  assertResumeConsumed: () => void,
+  assertNoUnconsumedResumeAfterError: (err: unknown) => void,
+  finishStage: (options?: {
+    assertResume?: boolean;
+    suppressCloseErrors?: boolean;
+  }) => Promise<void>,
+) {
+  return (async function* () {
+    let completed = false;
+    try {
+      for await (const item of output) {
+        assertResumeConsumed();
+        markOutput();
+        yield item;
+      }
+      completed = true;
+    } catch (err) {
+      await finishStage({ assertResume: false, suppressCloseErrors: true });
+      assertNoUnconsumedResumeAfterError(err);
+      throw err;
+    } finally {
+      await finishStage({ assertResume: completed });
+    }
+  })();
+}
+
+function assertNoUnconsumedResumeAfterError(resume: CommandInputResume | undefined, err: unknown) {
+  if (err instanceof RequestInputResumeError) return;
+  assertRequestInputResumeConsumed(resume);
+}
+
+function trackWritableOutput(stdout: any, markOutput: () => void) {
+  return new Proxy(stdout, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (prop === "write" || prop === "end") {
+        return (...args: unknown[]) => {
+          markOutput();
+          return value.apply(target, args);
+        };
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function createUnsupportedRequestInput() {
+  const requestInput = async function requestInput() {
+    throw new Error("requestInput is not supported in this pipeline context");
+  };
+  requestInput.getSuspendedState = function getSuspendedState() {
+    return undefined;
+  };
+  return requestInput;
+}

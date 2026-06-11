@@ -22,6 +22,11 @@ import { CostTracker } from "../core/cost_tracker.js";
 import type { CostLimit, CostSummary } from "../core/cost_tracker.js";
 import { withRetry, resolveRetryConfig } from "../core/retry.js";
 import type { RetryConfig } from "../core/retry.js";
+import {
+  RequestInputResumeError,
+  validateCommandInputState,
+  type CommandInputState,
+} from "../input_request.js";
 
 export type WorkflowFile = {
   name?: string;
@@ -178,8 +183,10 @@ export type WorkflowResumePayload = {
   approvalStepId?: string;
   approvalIdentity?: WorkflowApprovalIdentity;
   inputStepId?: string;
+  inputKind?: "workflow_step" | "pipeline_command";
   inputSchema?: unknown;
   inputSubject?: unknown;
+  pipelineInput?: WorkflowPipelineInputResumeState;
 };
 
 type WorkflowResumeState = {
@@ -190,15 +197,51 @@ type WorkflowResumeState = {
   approvalStepId?: string;
   approvalIdentity?: WorkflowApprovalIdentity;
   inputStepId?: string;
+  inputKind?: "workflow_step" | "pipeline_command";
   inputSchema?: unknown;
   inputSubject?: unknown;
+  pipelineInput?: WorkflowPipelineInputResumeState;
   createdAt: string;
+};
+
+type WorkflowPipelineInputResumeState = {
+  pipeline: Array<{ name: string; args: Record<string, unknown>; raw: string }>;
+  resumeAtIndex: number;
+  items: unknown[];
+  commandInput: CommandInputState;
 };
 
 export class WorkflowResumeArgumentError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "WorkflowResumeArgumentError";
+  }
+}
+
+class WorkflowPipelineInputSuspension extends Error {
+  stepId: string;
+  request: {
+    prompt: string;
+    responseSchema: unknown;
+    defaults?: unknown;
+    subject?: unknown;
+  };
+  pipelineInput: WorkflowPipelineInputResumeState;
+
+  constructor({
+    stepId,
+    request,
+    pipelineInput,
+  }: {
+    stepId: string;
+    request: WorkflowPipelineInputSuspension["request"];
+    pipelineInput: WorkflowPipelineInputResumeState;
+  }) {
+    super(`Workflow step ${stepId} pipeline requested input`);
+    this.name = "WorkflowPipelineInputSuspension";
+    this.stepId = stepId;
+    this.request = request;
+    this.pipelineInput = pipelineInput;
   }
 }
 
@@ -726,6 +769,13 @@ export async function runWorkflowFile({
       results[resumeState.approvalStepId] = previous;
     }
 
+    let resumedPipelineInput: {
+      stepId: string;
+      response: unknown;
+      pipelineInput: WorkflowPipelineInputResumeState;
+      onConsumed?: () => Promise<void>;
+    } | null = null;
+
     if (resumeState?.inputStepId) {
       if (approved !== undefined) {
         throw new WorkflowResumeArgumentError(
@@ -737,24 +787,61 @@ export async function runWorkflowFile({
           "Workflow resume requires --response-json for input requests",
         );
       }
-      const inputStep = steps[stepIndexById.get(resumeState.inputStepId) ?? -1];
-      if (!inputStep || !isInputStep(inputStep.input)) {
-        throw new Error(`Invalid input step in resume state: ${resumeState.inputStepId}`);
-      }
-      try {
-        validateInputResponse({
-          schema: resumeState.inputSchema ?? inputStep.input.responseSchema,
+      if (resumeState.inputKind === "pipeline_command") {
+        const resumedStepIndex = stepIndexById.get(resumeState.inputStepId);
+        if (resumedStepIndex !== startIndex) {
+          throw new RequestInputResumeError("workflow input step changed since input request");
+        }
+        const pipelineStep = steps[resumedStepIndex];
+        if (!pipelineStep || typeof pipelineStep.pipeline !== "string") {
+          throw new Error(
+            `Invalid pipeline input step in resume state: ${resumeState.inputStepId}`,
+          );
+        }
+        if (!evaluateCondition(pipelineStep.when ?? pipelineStep.condition, results)) {
+          throw new RequestInputResumeError(
+            "workflow input step condition changed since input request",
+          );
+        }
+        try {
+          validateInputResponse({
+            schema: resumeState.inputSchema,
+            response,
+            stepId: pipelineStep.id,
+          });
+        } catch (err: any) {
+          throw new WorkflowResumeArgumentError(err?.message ?? String(err));
+        }
+        resumedPipelineInput = {
+          stepId: resumeState.inputStepId,
           response,
-          stepId: inputStep.id,
-        });
-      } catch (err: any) {
-        throw new WorkflowResumeArgumentError(err?.message ?? String(err));
+          pipelineInput: resumeState.pipelineInput!,
+          onConsumed: consumedResumeStateKey
+            ? async () => {
+                await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+              }
+            : undefined,
+        };
+      } else {
+        const inputStep = steps[stepIndexById.get(resumeState.inputStepId) ?? -1];
+        if (!inputStep || !isInputStep(inputStep.input)) {
+          throw new Error(`Invalid input step in resume state: ${resumeState.inputStepId}`);
+        }
+        try {
+          validateInputResponse({
+            schema: resumeState.inputSchema ?? inputStep.input.responseSchema,
+            response,
+            stepId: inputStep.id,
+          });
+        } catch (err: any) {
+          throw new WorkflowResumeArgumentError(err?.message ?? String(err));
+        }
+        const previous = results[resumeState.inputStepId] ?? { id: resumeState.inputStepId };
+        previous.subject = resumeState.inputSubject ?? null;
+        previous.response = response;
+        delete previous.skipped;
+        results[resumeState.inputStepId] = previous;
       }
-      const previous = results[resumeState.inputStepId] ?? { id: resumeState.inputStepId };
-      previous.subject = resumeState.inputSubject ?? null;
-      previous.response = response;
-      delete previous.skipped;
-      results[resumeState.inputStepId] = previous;
     }
 
     if (ctx.dryRun) {
@@ -925,6 +1012,7 @@ export async function runWorkflowFile({
                 ctx,
                 env: subEnv,
                 cwd: subCwd,
+                requestInputEnabled: false,
               });
             } else {
               const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
@@ -1053,6 +1141,7 @@ export async function runWorkflowFile({
                   ctx: { ...ctx, signal: branchSignal },
                   env: branchEnv,
                   cwd: branchCwd,
+                  requestInputEnabled: false,
                 });
                 return { branchId: branch.id, result: branchResult };
               }
@@ -1196,6 +1285,14 @@ export async function runWorkflowFile({
               ctx: { ...ctx, signal: stepSignal },
               env,
               cwd,
+              resume:
+                resumedPipelineInput?.stepId === step.id
+                  ? {
+                      pipelineInput: resumedPipelineInput.pipelineInput,
+                      response: resumedPipelineInput.response,
+                      onConsumed: resumedPipelineInput.onConsumed,
+                    }
+                  : undefined,
             });
           } else {
             const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
@@ -1216,6 +1313,12 @@ export async function runWorkflowFile({
             ? await withRetry(executeStepAttempt, retryConfig, {
                 signal: ctx.signal,
                 shouldRetry: (error) => {
+                  if (
+                    error instanceof WorkflowPipelineInputSuspension ||
+                    error instanceof RequestInputResumeError
+                  ) {
+                    return false;
+                  }
                   const message = error?.message ?? String(error);
                   return !/halted (for approval inside|before completion at) pipeline/.test(
                     message,
@@ -1231,6 +1334,51 @@ export async function runWorkflowFile({
         result = attemptResult.result;
         parallelBranchResults = attemptResult.parallelBranchResults;
       } catch (err: any) {
+        if (err instanceof WorkflowPipelineInputSuspension) {
+          const inputRequest = buildNeedsInputRequest({
+            stepId: err.stepId,
+            prompt: err.request.prompt,
+            responseSchema: err.request.responseSchema,
+            defaults: err.request.defaults,
+            subject: err.request.subject,
+            maxEnvelopeBytes: resolveToolEnvelopeMaxBytes(ctx.env),
+          });
+          const stateKey = await saveWorkflowResumeState(ctx.env, {
+            filePath: resolvedFilePath,
+            resumeAtIndex: idx,
+            steps: results,
+            args: resolvedArgs,
+            inputStepId: err.stepId,
+            inputKind: "pipeline_command",
+            inputSchema: err.request.responseSchema,
+            inputSubject: err.request.subject,
+            pipelineInput: err.pipelineInput,
+            createdAt: new Date().toISOString(),
+          });
+
+          if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
+            await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+          }
+
+          const resumeToken = encodeToken({
+            protocolVersion: 1,
+            v: 1,
+            kind: "workflow-file",
+            stateKey,
+          } satisfies WorkflowResumePayload);
+
+          return {
+            status: "needs_input",
+            output: [],
+            requiresInput: {
+              ...inputRequest,
+              resumeToken,
+            },
+          };
+        }
+        if (err instanceof RequestInputResumeError) {
+          throw err;
+        }
         if (ctx.signal?.aborted && (err?.name === "AbortError" || err?.code === "ABORT_ERR")) {
           throw err;
         }
@@ -1716,7 +1864,54 @@ async function loadWorkflowResumeState(env: Record<string, string | undefined>, 
   if (!data.steps || typeof data.steps !== "object")
     throw new Error("Invalid workflow resume state");
   if (!data.args || typeof data.args !== "object") throw new Error("Invalid workflow resume state");
+  if (
+    data.inputKind !== undefined &&
+    !["workflow_step", "pipeline_command"].includes(data.inputKind)
+  ) {
+    throw new Error("Invalid workflow resume state");
+  }
+  if (data.inputKind === "pipeline_command") {
+    if (typeof data.inputStepId !== "string") throw new Error("Invalid workflow resume state");
+    if (data.inputSchema === undefined) throw new Error("Invalid workflow resume state");
+    data.pipelineInput = validateWorkflowPipelineInputResumeState(data.pipelineInput);
+  } else if (data.pipelineInput !== undefined) {
+    throw new Error("Invalid workflow resume state");
+  }
   return data as WorkflowResumeState;
+}
+
+function validateWorkflowPipelineInputResumeState(
+  value: unknown,
+): WorkflowPipelineInputResumeState {
+  if (!value || typeof value !== "object") throw new Error("Invalid workflow resume state");
+  const data = value as Partial<WorkflowPipelineInputResumeState>;
+  if (!Array.isArray(data.pipeline)) throw new Error("Invalid workflow resume state");
+  validateWorkflowPipelineShape(data.pipeline);
+  if (
+    typeof data.resumeAtIndex !== "number" ||
+    !Number.isInteger(data.resumeAtIndex) ||
+    data.resumeAtIndex < 0 ||
+    data.resumeAtIndex >= data.pipeline.length
+  ) {
+    throw new Error("Invalid workflow resume state");
+  }
+  if (!Array.isArray(data.items)) throw new Error("Invalid workflow resume state");
+  data.commandInput = validateCommandInputState(data.commandInput);
+  return data as WorkflowPipelineInputResumeState;
+}
+
+function validateWorkflowPipelineShape(pipeline: unknown[]) {
+  for (const stage of pipeline) {
+    if (!stage || typeof stage !== "object") throw new Error("Invalid workflow resume state");
+    const data = stage as Record<string, unknown>;
+    if (typeof data.name !== "string" || data.name.length === 0) {
+      throw new Error("Invalid workflow resume state");
+    }
+    if (!data.args || typeof data.args !== "object" || Array.isArray(data.args)) {
+      throw new Error("Invalid workflow resume state");
+    }
+    if (typeof data.raw !== "string") throw new Error("Invalid workflow resume state");
+  }
 }
 
 function mergeEnv(
@@ -2652,6 +2847,8 @@ async function runPipelineStep({
   ctx,
   env,
   cwd,
+  resume,
+  requestInputEnabled = true,
 }: {
   stepId: string;
   pipelineText: string;
@@ -2659,11 +2856,26 @@ async function runPipelineStep({
   ctx: RunContext;
   env: Record<string, string | undefined>;
   cwd?: string;
+  resume?: {
+    pipelineInput: WorkflowPipelineInputResumeState;
+    response: unknown;
+    onConsumed?: () => Promise<void>;
+  };
+  requestInputEnabled?: boolean;
 }) {
   let pipeline;
   try {
-    pipeline = parsePipeline(pipelineText);
+    const currentPipeline = parsePipeline(pipelineText);
+    if (resume) {
+      if (!isDeepStrictEqual(currentPipeline, resume.pipelineInput.pipeline)) {
+        throw new RequestInputResumeError("workflow pipeline changed since input request");
+      }
+      pipeline = resume.pipelineInput.pipeline;
+    } else {
+      pipeline = currentPipeline;
+    }
   } catch (err: any) {
+    if (err instanceof RequestInputResumeError) throw err;
     throw new Error(
       `Workflow step ${stepId} pipeline parse failed: ${err?.message ?? String(err)}`,
     );
@@ -2676,8 +2888,10 @@ async function runPipelineStep({
     renderedStdout += String(chunk);
   });
 
+  const pipelineStartIndex = resume ? resume.pipelineInput.resumeAtIndex : 0;
+  const remainingPipeline = pipeline.slice(pipelineStartIndex);
   const result = await runPipeline({
-    pipeline,
+    pipeline: remainingPipeline,
     registry: ctx.registry,
     stdin: ctx.stdin,
     stdout,
@@ -2687,7 +2901,15 @@ async function runPipelineStep({
     cwd,
     signal: ctx.signal,
     llmAdapters: ctx.llmAdapters,
-    input: inputValueToStream(inputValue),
+    input: resume ? resume.pipelineInput.items : inputValueToPipelineItems(inputValue),
+    requestInputEnabled,
+    requestInputResume: resume
+      ? {
+          state: resume.pipelineInput.commandInput,
+          response: resume.response,
+          onConsumed: resume.onConsumed,
+        }
+      : undefined,
   });
   stdout.end();
 
@@ -2697,6 +2919,27 @@ async function runPipelineStep({
       throw new Error(
         `Workflow step ${stepId} halted for approval inside pipeline stage ${haltedName}. Use a separate approval step in the workflow file.`,
       );
+    }
+    const request =
+      result.items.length === 1 && result.items[0]?.type === "input_request"
+        ? (result.items[0] as Record<string, any>)
+        : null;
+    if (request?.commandInput) {
+      throw new WorkflowPipelineInputSuspension({
+        stepId,
+        request: {
+          prompt: String(request.prompt),
+          responseSchema: request.responseSchema,
+          ...(request.defaults !== undefined ? { defaults: request.defaults } : null),
+          ...(request.subject !== undefined ? { subject: request.subject } : null),
+        },
+        pipelineInput: {
+          pipeline,
+          resumeAtIndex: pipelineStartIndex + (result.haltedAt?.index ?? 0),
+          items: Array.isArray(request.items) ? request.items : [],
+          commandInput: request.commandInput,
+        },
+      });
     }
     throw new Error(
       `Workflow step ${stepId} halted before completion at pipeline stage ${haltedName}`,
@@ -2772,12 +3015,8 @@ function* inputValueToItems(value: unknown) {
   yield value;
 }
 
-function inputValueToStream(value: unknown) {
-  return (async function* () {
-    for (const item of inputValueToItems(value)) {
-      yield item;
-    }
-  })();
+function inputValueToPipelineItems(value: unknown) {
+  return [...inputValueToItems(value)];
 }
 
 function serializePipelineItemsToStdout(items: unknown[]) {
