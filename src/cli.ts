@@ -856,7 +856,7 @@ function helpText() {
     `  lobster 'exec --json "echo [1,2,3]" | json'\n` +
     `  lobster run --mode tool 'exec --json "echo [1]" | approve --prompt "ok?"'\n\n` +
     `Commands:\n` +
-    `  exec, head, json, pick, table, where, approve, ask, openclaw.invoke, llm.invoke, llm_task.invoke, state.get, state.set, diff.last, commands.list, workflows.list, workflows.run, graph\n`
+    `  exec, head, json, pick, table, where, approve, ask, openclaw.agent, openclaw.invoke, llm.invoke, llm_task.invoke, state.get, state.set, diff.last, commands.list, workflows.list, workflows.run, graph\n`
   );
 }
 

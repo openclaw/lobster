@@ -12,6 +12,7 @@ import { groupByCommand } from "./stdlib/group_by.js";
 import { approveCommand } from "./stdlib/approve.js";
 import { askCommand } from "./stdlib/ask.js";
 import { clawdInvokeCommand, openclawInvokeCommand } from "./stdlib/openclaw_invoke.js";
+import { openclawAgentCommand } from "./stdlib/openclaw_agent.js";
 import { llmInvokeCommand } from "./stdlib/llm_invoke.js";
 import { llmTaskInvokeCommand } from "./stdlib/llm_task_invoke.js";
 import { stateGetCommand, stateSetCommand } from "./stdlib/state.js";
@@ -42,6 +43,7 @@ export function createDefaultRegistry() {
     askCommand,
     openclawInvokeCommand,
     clawdInvokeCommand,
+    openclawAgentCommand,
     llmInvokeCommand,
     llmTaskInvokeCommand,
     stateGetCommand,

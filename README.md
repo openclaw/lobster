@@ -275,9 +275,20 @@ Workflow `_meta.cost` and `cost_limit` use a static pricing table plus optional 
 
 `llm_task.invoke` remains available as a backward-compatible alias for the OpenClaw provider.
 
+### Calling configured OpenClaw agents
+
+Use `openclaw.agent` when a workflow needs a configured OpenClaw agent rather than a direct model call:
+
+```bash
+openclaw.agent --agent ops --prompt 'Summarize these logs'
+openclaw.agent --agent ops --session-key incident-42 --model openai/gpt-5.4 --prompt 'Continue the investigation'
+```
+
+The command delegates agent identity, model defaults and overrides, sessions, authentication, and execution to the installed `openclaw agent` CLI. It accepts `--agent`, `--session-key`, `--session-id`, `--model`, `--thinking`, `--timeout`, and `--local`, and returns OpenClaw's structured `--json` response. Pipeline input is appended to the prompt as labeled JSONL.
+
 ### `pipeline:` vs `run:` for LLM calls
 
-- Use `pipeline:` for `llm.invoke` and `llm_task.invoke` (they are Lobster pipeline stages, not shell executables).
+- Use `pipeline:` for `openclaw.agent`, `llm.invoke`, and `llm_task.invoke` (they are Lobster pipeline stages, not shell executables).
 - Use `run:` only for real binaries in your shell (for example `openclaw.invoke`).
 
 Example (`stdin` from a prior step is passed to the LLM as artifacts):
