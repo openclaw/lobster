@@ -136,6 +136,7 @@ export async function runToolRequest({
 			env: runtime.env,
 			pipeline: parsed,
 			output,
+			signal: runtime.signal,
 		});
 		return okEnvelope(
 			finalized.status,
@@ -318,6 +319,7 @@ export async function resumeToolRequest({
 			pipeline: remaining,
 			output,
 			previousStateKey: payload.stateKey,
+			signal: runtime.signal,
 		});
 		return okEnvelope(
 			finalized.status,

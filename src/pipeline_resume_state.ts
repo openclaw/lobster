@@ -97,97 +97,146 @@ export async function finalizePipelineToolRun(params: {
 	pipeline: PipelineResumeState["pipeline"];
 	output: PipelineRunOutput;
 	previousStateKey?: string;
+	signal?: AbortSignal;
 }): Promise<PipelineToolRunResolution> {
+	params.signal?.throwIfAborted();
 	const { approval, inputRequest } = extractPipelineHalt(params.output);
 	if (approval) {
-		const nextStateKey = await savePipelineResumeState(params.env, {
-			pipeline: params.pipeline,
-			resumeAtIndex: (params.output.haltedAt?.index ?? -1) + 1,
-			items: approval.items,
-			haltType: "approval_request",
-			prompt: approval.prompt,
-			createdAt: new Date().toISOString(),
-		});
-		if (params.previousStateKey) {
-			await cleanupApprovalIndexByStateKey({ env: params.env, stateKey: params.previousStateKey });
-			await deleteStateJson({ env: params.env, key: params.previousStateKey });
-		}
-		let approvalId: string | null;
+		let nextStateKey: string | undefined;
 		try {
-			approvalId = await createApprovalIndex({ env: params.env, stateKey: nextStateKey });
+			nextStateKey = await savePipelineResumeState(params.env, {
+				pipeline: params.pipeline,
+				resumeAtIndex: (params.output.haltedAt?.index ?? -1) + 1,
+				items: approval.items,
+				haltType: "approval_request",
+				prompt: approval.prompt,
+				createdAt: new Date().toISOString(),
+			});
+			params.signal?.throwIfAborted();
+			if (params.previousStateKey) {
+				await cleanupApprovalIndexByStateKey({
+					env: params.env,
+					stateKey: params.previousStateKey,
+				});
+				await deleteStateJson({ env: params.env, key: params.previousStateKey });
+				params.signal?.throwIfAborted();
+			}
+			const approvalId = await createApprovalIndex({ env: params.env, stateKey: nextStateKey });
+			params.signal?.throwIfAborted();
+			const resumeToken = encodeToken({
+				protocolVersion: 1,
+				v: 1,
+				kind: "pipeline-resume",
+				stateKey: nextStateKey,
+			});
+			return {
+				status: "needs_approval",
+				output: [],
+				requiresApproval: {
+					...approval,
+					resumeToken,
+					...(approvalId ? { approvalId } : null),
+				},
+				requiresInput: null,
+			};
 		} catch (err) {
-			await deleteStateJson({ env: params.env, key: nextStateKey }).catch(() => {});
+			if (nextStateKey) {
+				await cleanupFailedResumeState(params.env, nextStateKey, err);
+			}
 			throw err;
 		}
-		const resumeToken = encodeToken({
-			protocolVersion: 1,
-			v: 1,
-			kind: "pipeline-resume",
-			stateKey: nextStateKey,
-		});
-		return {
-			status: "needs_approval",
-			output: [],
-			requiresApproval: {
-				...approval,
-				resumeToken,
-				...(approvalId ? { approvalId } : null),
-			},
-			requiresInput: null,
-		};
 	}
 
 	if (inputRequest) {
-		const resumeMode = inputRequest.commandInput ? "same_stage" : "next_stage";
-		const nextStateKey = await savePipelineResumeState(params.env, {
-			pipeline: params.pipeline,
-			resumeAtIndex:
-				resumeMode === "same_stage"
-					? (params.output.haltedAt?.index ?? -1)
-					: (params.output.haltedAt?.index ?? -1) + 1,
-			items: resumeMode === "same_stage" ? (inputRequest.items ?? []) : [],
-			haltType: "input_request",
-			resumeMode,
-			inputSchema: inputRequest.responseSchema,
-			prompt: inputRequest.prompt,
-			...(inputRequest.commandInput ? { commandInput: inputRequest.commandInput } : null),
-			createdAt: new Date().toISOString(),
-		});
-		if (params.previousStateKey) {
-			await cleanupApprovalIndexByStateKey({ env: params.env, stateKey: params.previousStateKey });
-			await deleteStateJson({ env: params.env, key: params.previousStateKey });
-		}
-		const resumeToken = encodeToken({
-			protocolVersion: 1,
-			v: 1,
-			kind: "pipeline-resume",
-			stateKey: nextStateKey,
-		});
-		return {
-			status: "needs_input",
-			output: [],
-			requiresApproval: null,
-			requiresInput: {
-				type: "input_request",
+		let nextStateKey: string | undefined;
+		try {
+			const resumeMode = inputRequest.commandInput ? "same_stage" : "next_stage";
+			nextStateKey = await savePipelineResumeState(params.env, {
+				pipeline: params.pipeline,
+				resumeAtIndex:
+					resumeMode === "same_stage"
+						? (params.output.haltedAt?.index ?? -1)
+						: (params.output.haltedAt?.index ?? -1) + 1,
+				items: resumeMode === "same_stage" ? (inputRequest.items ?? []) : [],
+				haltType: "input_request",
+				resumeMode,
+				inputSchema: inputRequest.responseSchema,
 				prompt: inputRequest.prompt,
-				responseSchema: inputRequest.responseSchema,
-				...(inputRequest.defaults !== undefined ? { defaults: inputRequest.defaults } : null),
-				...(inputRequest.subject !== undefined ? { subject: inputRequest.subject } : null),
-				resumeToken,
-			},
-		};
+				...(inputRequest.commandInput ? { commandInput: inputRequest.commandInput } : null),
+				createdAt: new Date().toISOString(),
+			});
+			params.signal?.throwIfAborted();
+			if (params.previousStateKey) {
+				await cleanupApprovalIndexByStateKey({
+					env: params.env,
+					stateKey: params.previousStateKey,
+				});
+				await deleteStateJson({ env: params.env, key: params.previousStateKey });
+				params.signal?.throwIfAborted();
+			}
+			const resumeToken = encodeToken({
+				protocolVersion: 1,
+				v: 1,
+				kind: "pipeline-resume",
+				stateKey: nextStateKey,
+			});
+			return {
+				status: "needs_input",
+				output: [],
+				requiresApproval: null,
+				requiresInput: {
+					type: "input_request",
+					prompt: inputRequest.prompt,
+					responseSchema: inputRequest.responseSchema,
+					...(inputRequest.defaults !== undefined ? { defaults: inputRequest.defaults } : null),
+					...(inputRequest.subject !== undefined ? { subject: inputRequest.subject } : null),
+					resumeToken,
+				},
+			};
+		} catch (err) {
+			if (nextStateKey) {
+				await cleanupFailedResumeState(params.env, nextStateKey, err);
+			}
+			throw err;
+		}
 	}
 
 	if (params.previousStateKey) {
 		await cleanupApprovalIndexByStateKey({ env: params.env, stateKey: params.previousStateKey });
 		await deleteStateJson({ env: params.env, key: params.previousStateKey });
+		params.signal?.throwIfAborted();
 	}
+	params.signal?.throwIfAborted();
 	return {
 		status: "ok",
 		output: params.output.items,
 		requiresApproval: null,
 		requiresInput: null,
 	};
+}
+
+async function cleanupFailedResumeState(
+	env: Record<string, string | undefined>,
+	stateKey: string,
+	originalError: unknown,
+) {
+	const cleanupErrors: unknown[] = [];
+	try {
+		await cleanupApprovalIndexByStateKey({ env, stateKey });
+	} catch (err) {
+		cleanupErrors.push(err);
+	}
+	try {
+		await deleteStateJson({ env, key: stateKey });
+	} catch (err) {
+		cleanupErrors.push(err);
+	}
+	if (cleanupErrors.length) {
+		throw new AggregateError(
+			[originalError, ...cleanupErrors],
+			"Failed to clean up canceled pipeline resume state",
+		);
+	}
 }
 
 export async function savePipelineResumeState(

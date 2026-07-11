@@ -1,8 +1,13 @@
 import { spawn } from "node:child_process";
 
-function runProcess(command, argv, { env, cwd }) {
+function runProcess(command, argv, { env, cwd, signal }) {
 	return new Promise((resolve, reject) => {
-		const child = spawn(command, argv, { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(command, argv, {
+			env,
+			cwd,
+			signal,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
 
 		let stdout = "";
 		let stderr = "";
@@ -83,6 +88,7 @@ function formatPrChangeMessage({ repo, pr, changedFields, prInfo }) {
 }
 
 export async function runGithubPrMonitorWorkflow({ args, ctx }) {
+	ctx.signal?.throwIfAborted();
 	const repo = args.repo;
 	const pr = args.pr;
 	if (!repo || !pr) throw new Error("github.pr.monitor requires args.repo and args.pr");
@@ -101,7 +107,12 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 		"number,title,url,state,isDraft,mergeable,reviewDecision,author,baseRefName,headRefName,updatedAt",
 	];
 
-	const { stdout } = (await runProcess("gh", argv, { env: ctx.env, cwd: process.cwd() })) as any;
+	const { stdout } = (await runProcess("gh", argv, {
+		env: ctx.env,
+		cwd: process.cwd(),
+		signal: ctx.signal,
+	})) as any;
+	ctx.signal?.throwIfAborted();
 
 	let current;
 	try {

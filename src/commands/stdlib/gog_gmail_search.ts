@@ -1,10 +1,17 @@
 import { spawn } from "node:child_process";
 
-function run(cmd: string, argv: string[], env: Record<string, string | undefined>, cwd?: string) {
+function run(
+	cmd: string,
+	argv: string[],
+	env: Record<string, string | undefined>,
+	cwd?: string,
+	signal?: AbortSignal,
+) {
 	return new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
 		const child = spawn(cmd, argv, {
 			env: { ...process.env, ...env },
 			cwd,
+			signal,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 
@@ -55,10 +62,12 @@ export const gogGmailSearchCommand = {
 		);
 	},
 	async run({ input, args, ctx }) {
+		ctx.signal?.throwIfAborted();
 		// Drain input
 		for await (const _item of input) {
 			// no-op
 		}
+		ctx.signal?.throwIfAborted();
 
 		const query = String(args.query ?? "newer_than:1d");
 		const max = Number(args.max ?? args.limit ?? 20);
@@ -75,7 +84,7 @@ export const gogGmailSearchCommand = {
 		const gogBin = isScript ? process.execPath : gogBinRaw;
 		const argv = isScript ? [gogBinRaw, ...argvBase] : argvBase;
 
-		const res = await run(gogBin, argv, ctx.env, process.cwd());
+		const res = await run(gogBin, argv, ctx.env, process.cwd(), ctx.signal);
 		if (res.code !== 0) {
 			throw new Error(`gog.gmail.search failed (${res.code ?? "?"}): ${res.stderr.slice(0, 400)}`);
 		}
