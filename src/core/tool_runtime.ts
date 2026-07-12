@@ -328,26 +328,7 @@ export async function resumeToolRequest({
 			finalized.requiresInput,
 		);
 	} catch (err: any) {
-		if (runtime.signal?.aborted) {
-			const cleanupErrors: unknown[] = [];
-			try {
-				await cleanupIndex();
-			} catch (cleanupErr) {
-				cleanupErrors.push(cleanupErr);
-			}
-			try {
-				await deleteStateJson({ env: runtime.env, key: payload.stateKey });
-			} catch (cleanupErr) {
-				cleanupErrors.push(cleanupErr);
-			}
-			if (cleanupErrors.length) {
-				return errorEnvelope(
-					"runtime_error",
-					"Failed to invalidate cancelled pipeline resume state",
-				);
-			}
-		}
-		// Non-cancellation failures retain their state so callers can retry.
+		// Don't clean up index on error — allow retry by --id
 		return errorEnvelope("runtime_error", err?.message ?? String(err));
 	}
 }

@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
-import { resumeToolRequest, runToolRequest } from "../src/core/tool_runtime.js";
+import { runToolRequest } from "../src/core/tool_runtime.js";
 import { finalizePipelineToolRun } from "../src/pipeline_resume_state.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -384,77 +384,6 @@ test("approval finalization removes resume state and index when cancellation win
 			? await readdir(stateDir, { recursive: true })
 			: [];
 		assert.equal(stateEntries.length, 0);
-	} finally {
-		await rm(dir, { recursive: true, force: true });
-	}
-});
-
-test("external cancellation invalidates a resumed pipeline after side effects may have started", async () => {
-	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-resume-replay-"));
-	try {
-		const stateDir = join(dir, "state");
-		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
-		const controller = new AbortController();
-		const defaultRegistry = createDefaultRegistry();
-		let sideEffectRuns = 0;
-		let sideEffectStarted!: () => void;
-		const started = new Promise<void>((resolve) => {
-			sideEffectStarted = resolve;
-		});
-		const sideEffect = {
-			name: "side-effect",
-			async run({ ctx }: any) {
-				sideEffectRuns += 1;
-				if (sideEffectRuns === 1) {
-					sideEffectStarted();
-					await new Promise<void>((resolve, reject) => {
-						if (ctx.signal?.aborted) {
-							reject(ctx.signal.reason);
-							return;
-						}
-						ctx.signal?.addEventListener("abort", () => reject(ctx.signal.reason), {
-							once: true,
-						});
-					});
-				}
-				return { output: [] };
-			},
-		};
-		const registry = withCommand(defaultRegistry, sideEffect);
-		const first = await runToolRequest({
-			pipeline: "approve | side-effect",
-			ctx: { env, registry },
-		});
-
-		assert.equal(first.status, "needs_approval");
-		assert.ok(first.requiresApproval?.resumeToken);
-		assert.ok(first.requiresApproval?.approvalId);
-
-		const resumed = resumeToolRequest({
-			token: first.requiresApproval.resumeToken,
-			approved: true,
-			ctx: { env, registry, signal: controller.signal },
-		});
-		await started;
-		controller.abort();
-		assertCancellationEnvelope(await resumed);
-
-		const approvalReplay = await resumeToolRequest({
-			approvalId: first.requiresApproval.approvalId,
-			approved: true,
-			ctx: { env, registry },
-		});
-		assert.equal(approvalReplay.ok, false);
-		assert.match(approvalReplay.error?.message ?? "", /not found|expired/i);
-
-		const tokenReplay = await resumeToolRequest({
-			token: first.requiresApproval.resumeToken,
-			approved: true,
-			ctx: { env, registry },
-		});
-		assert.equal(tokenReplay.ok, false);
-		assert.match(tokenReplay.error?.message ?? "", /state not found/i);
-		assert.equal(sideEffectRuns, 1);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
