@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+const ABORT_FORCE_KILL_AFTER_MS = 250;
+
 function run(
 	cmd: string,
 	argv: string[],
@@ -17,18 +19,38 @@ function run(
 
 		let stdout = "";
 		let stderr = "";
+		let abortError: Error | undefined;
+		let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+		let settled = false;
 		child.stdout?.on("data", (d) => (stdout += String(d)));
 		child.stderr?.on("data", (d) => (stderr += String(d)));
 
 		child.on("error", (err: any) => {
+			if (err?.name === "AbortError") {
+				abortError = err;
+				forceKillTimer = setTimeout(() => {
+					if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+				}, ABORT_FORCE_KILL_AFTER_MS);
+				forceKillTimer.unref();
+				return;
+			}
 			if (err?.code === "ENOENT") {
+				settled = true;
 				reject(new Error("gog not found on PATH (install: https://github.com/steipete/gogcli)"));
 				return;
 			}
+			settled = true;
 			reject(err);
 		});
 
 		child.on("close", (code) => {
+			if (forceKillTimer) clearTimeout(forceKillTimer);
+			if (settled) return;
+			settled = true;
+			if (abortError) {
+				reject(abortError);
+				return;
+			}
 			resolve({ stdout, stderr, code });
 		});
 	});

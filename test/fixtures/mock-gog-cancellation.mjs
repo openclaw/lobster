@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 
@@ -8,15 +8,17 @@ function mark(path, value) {
 }
 
 function waitForCompletion({ startedFile, terminatedFile, completedFile, output }) {
+	const terminationDelayMs = Number(process.env.MOCK_GOG_TERMINATION_DELAY_MS ?? 0);
+	const completionDelayMs = Number(process.env.MOCK_GOG_COMPLETION_DELAY_MS ?? 1200);
 	process.once("SIGTERM", () => {
 		mark(terminatedFile, "SIGTERM");
-		process.exit(143);
+		setTimeout(() => process.exit(143), terminationDelayMs);
 	});
 	mark(startedFile, String(process.pid));
 	setTimeout(() => {
 		mark(completedFile, "completed");
 		process.stdout.write(JSON.stringify(output));
-	}, 1200);
+	}, completionDelayMs);
 }
 
 if (argv[0] === "gmail" && argv[1] === "search") {
@@ -27,6 +29,9 @@ if (argv[0] === "gmail" && argv[1] === "search") {
 		output: [{ to: "user@example.com", subject: "Reply", body: "Hello" }],
 	});
 } else if (argv[0] === "gmail" && argv[1] === "send") {
+	if (process.env.MOCK_GOG_SEND_INVOCATIONS_FILE) {
+		appendFileSync(process.env.MOCK_GOG_SEND_INVOCATIONS_FILE, `${process.pid}\n`, "utf8");
+	}
 	waitForCompletion({
 		startedFile: process.env.MOCK_GOG_SEND_STARTED_FILE,
 		terminatedFile: process.env.MOCK_GOG_SEND_TERMINATED_FILE,

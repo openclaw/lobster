@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+const ABORT_FORCE_KILL_AFTER_MS = 250;
+
 function runProcess(command, argv, { env, cwd, signal }) {
 	return new Promise((resolve, reject) => {
 		const child = spawn(command, argv, {
@@ -11,6 +13,9 @@ function runProcess(command, argv, { env, cwd, signal }) {
 
 		let stdout = "";
 		let stderr = "";
+		let abortError;
+		let forceKillTimer;
+		let settled = false;
 
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
@@ -23,14 +28,31 @@ function runProcess(command, argv, { env, cwd, signal }) {
 		});
 
 		child.on("error", (err: any) => {
+			if (err?.name === "AbortError") {
+				abortError = err;
+				forceKillTimer = setTimeout(() => {
+					if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+				}, ABORT_FORCE_KILL_AFTER_MS);
+				forceKillTimer.unref();
+				return;
+			}
 			if (err?.code === "ENOENT") {
+				settled = true;
 				reject(new Error("gh not found on PATH (install GitHub CLI)"));
 				return;
 			}
+			settled = true;
 			reject(err);
 		});
 
 		child.on("close", (code) => {
+			if (forceKillTimer) clearTimeout(forceKillTimer);
+			if (settled) return;
+			settled = true;
+			if (abortError) {
+				reject(abortError);
+				return;
+			}
 			if (code === 0) return resolve({ stdout, stderr });
 			reject(new Error(`gh failed (${code}): ${stderr.trim() || stdout.trim()}`));
 		});

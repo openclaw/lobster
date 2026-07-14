@@ -7,23 +7,27 @@ function mark(path, value) {
 
 process.once("SIGTERM", () => {
 	mark(process.env.MOCK_GH_TERMINATED_FILE, "SIGTERM");
-	process.exit(143);
+	const terminationDelayMs = Number(process.env.MOCK_GH_TERMINATION_DELAY_MS ?? 0);
+	setTimeout(() => process.exit(143), terminationDelayMs);
 });
 mark(process.env.MOCK_GH_STARTED_FILE, String(process.pid));
-setTimeout(() => {
-	mark(process.env.MOCK_GH_COMPLETED_FILE, "completed");
-	process.stdout.write(
-		JSON.stringify({
-			number: 1,
-			title: "Fixture PR",
-			url: "https://example.invalid/pr/1",
-			state: "OPEN",
-			isDraft: false,
-			mergeable: "MERGEABLE",
-			reviewDecision: "",
-			updatedAt: "2026-07-11T00:00:00Z",
-			baseRefName: "main",
-			headRefName: "fixture",
-		}),
-	);
-}, 1200);
+setTimeout(
+	() => {
+		mark(process.env.MOCK_GH_COMPLETED_FILE, "completed");
+		process.stdout.write(
+			JSON.stringify({
+				number: 1,
+				title: "Fixture PR",
+				url: "https://example.invalid/pr/1",
+				state: "OPEN",
+				isDraft: false,
+				mergeable: "MERGEABLE",
+				reviewDecision: "",
+				updatedAt: "2026-07-11T00:00:00Z",
+				baseRefName: "main",
+				headRefName: "fixture",
+			}),
+		);
+	},
+	Number(process.env.MOCK_GH_COMPLETION_DELAY_MS ?? 1200),
+);

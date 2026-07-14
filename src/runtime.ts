@@ -39,7 +39,6 @@ export async function runPipeline({
 	requestInputResume?: CommandInputResume | undefined;
 	requestInputEnabled?: boolean;
 }) {
-	signal?.throwIfAborted();
 	if (dryRun) {
 		return dryRunPipeline({ pipeline, registry, stderr });
 	}
@@ -63,7 +62,6 @@ export async function runPipeline({
 	};
 
 	for (let idx = 0; idx < pipeline.length; idx++) {
-		signal?.throwIfAborted();
 		const stage = pipeline[idx];
 		const command = registry.get(stage.name);
 		if (!command) {
@@ -111,7 +109,6 @@ export async function runPipeline({
 		let result;
 		try {
 			result = await command.run({ input: inputTracker.iterable, args: stage.args, ctx: stageCtx });
-			signal?.throwIfAborted();
 		} catch (err) {
 			await finishStage({ assertResume: false, suppressCloseErrors: true });
 			if (haltForInputRequest(err)) break;
@@ -164,19 +161,11 @@ export async function runPipeline({
 
 	const items = [];
 	try {
-		for await (const item of stream) {
-			signal?.throwIfAborted();
-			items.push(item);
-		}
-		signal?.throwIfAborted();
+		for await (const item of stream) items.push(item);
 	} catch (err) {
 		if (haltForInputRequest(err)) {
 			items.length = 0;
-			for await (const item of stream) {
-				signal?.throwIfAborted();
-				items.push(item);
-			}
-			signal?.throwIfAborted();
+			for await (const item of stream) items.push(item);
 		} else {
 			throw err;
 		}
@@ -187,7 +176,6 @@ export async function runPipeline({
 
 	function haltForInputRequest(err: unknown) {
 		if (!(err instanceof InputRequestSuspension)) return false;
-		signal?.throwIfAborted();
 		const stageIndex = err.stageIndex;
 		halted = true;
 		haltedAt = {

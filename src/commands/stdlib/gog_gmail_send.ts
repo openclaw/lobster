@@ -1,17 +1,10 @@
 import { spawn } from "node:child_process";
 
-function run(
-	cmd: string,
-	argv: string[],
-	env: Record<string, string | undefined>,
-	cwd?: string,
-	signal?: AbortSignal,
-) {
+function run(cmd: string, argv: string[], env: Record<string, string | undefined>, cwd?: string) {
 	return new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
 		const child = spawn(cmd, argv, {
 			env: { ...process.env, ...env },
 			cwd,
-			signal,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 
@@ -88,7 +81,10 @@ export const gogGmailSendCommand = {
 		const results: any[] = [];
 
 		for await (const item of input) {
-			ctx.signal?.throwIfAborted();
+			if (ctx.signal?.aborted) {
+				if (results.length > 0) break;
+				ctx.signal.throwIfAborted();
+			}
 			const draft = parseDraft(item);
 
 			if (dryRun) {
@@ -107,7 +103,7 @@ export const gogGmailSendCommand = {
 			];
 
 			const argv = isScript ? [gogBinRaw, ...argvBase] : argvBase;
-			const res = await run(gogBin, argv, ctx.env, process.cwd(), ctx.signal);
+			const res = await run(gogBin, argv, ctx.env, process.cwd());
 			if (res.code !== 0) {
 				throw new Error(`gog.gmail.send failed (${res.code ?? "?"}): ${res.stderr.slice(0, 400)}`);
 			}
@@ -120,6 +116,7 @@ export const gogGmailSendCommand = {
 			}
 
 			results.push(parsed);
+			if (ctx.signal?.aborted) break;
 		}
 
 		return {
