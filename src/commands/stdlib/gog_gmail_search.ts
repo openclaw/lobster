@@ -107,6 +107,7 @@ export const gogGmailSearchCommand = {
 		const argv = isScript ? [gogBinRaw, ...argvBase] : argvBase;
 
 		const res = await run(gogBin, argv, ctx.env, process.cwd(), ctx.signal);
+		ctx.signal?.throwIfAborted();
 		if (res.code !== 0) {
 			throw new Error(`gog.gmail.search failed (${res.code ?? "?"}): ${res.stderr.slice(0, 400)}`);
 		}

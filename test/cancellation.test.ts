@@ -119,6 +119,55 @@ test("parent cancellation terminates gog.gmail.search and skips gog.gmail.send",
 	}
 });
 
+test("cancellation after Gmail search completion stops the next pipeline stage", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-search-handoff-"));
+	try {
+		const repoRoot = join(__dirname, "..", "..");
+		const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+		const controller = new AbortController();
+		const signal = controller.signal;
+		const throwIfAborted = signal.throwIfAborted.bind(signal);
+		let signalChecks = 0;
+		Object.defineProperty(signal, "throwIfAborted", {
+			value() {
+				signalChecks += 1;
+				if (signalChecks === 3) controller.abort();
+				throwIfAborted();
+			},
+		});
+
+		let downstreamStarted = false;
+		const downstream = {
+			name: "test.side-effect",
+			async run({ input }: { input: AsyncIterable<unknown> }) {
+				downstreamStarted = true;
+				for await (const _item of input) {
+					// Drain search output before reporting success.
+				}
+				return { output: streamOf([{ ok: true }]) };
+			},
+		};
+		const envelope = await runToolRequest({
+			pipeline: "gog.gmail.search --query newer_than:1d | test.side-effect",
+			ctx: {
+				registry: withCommand(createDefaultRegistry(), downstream),
+				signal,
+				env: {
+					...process.env,
+					GOG_BIN: mockGog,
+					MOCK_GOG_COMPLETION_DELAY_MS: "0",
+				},
+			},
+		});
+
+		assertCancellationEnvelope(envelope);
+		assert.equal(signalChecks, 3);
+		assert.equal(downstreamStarted, false, "cancellation must stop downstream side effects");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("an in-flight gog.gmail.send completes with a definitive result after parent cancellation", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-send-"));
 	try {
