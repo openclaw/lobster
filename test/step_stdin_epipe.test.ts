@@ -27,12 +27,10 @@ async function runWorkflow(workflow: unknown) {
 }
 
 test("a step that exits before draining large stdin fails cleanly instead of crashing", async () => {
-	// The first step's stdout exceeds the OS pipe buffer (64KB on Linux), so the
-	// engine's write into the second step's stdin is still pending when that
-	// step exits without reading. Before the stdin error guard, the resulting
-	// EPIPE was emitted as an unhandled 'error' event on the stdin socket and
-	// took down the whole engine process (losing approval gates and resume
-	// tokens) instead of reporting the step failure.
+	// 300KB exceeds the OS pipe buffer (64KB on Linux), so the write to the
+	// second step's stdin is still pending when that step exits without reading.
+	// Before the EPIPE guard, this crashed the engine instead of reporting the
+	// step failure.
 	await assert.rejects(
 		() =>
 			runWorkflow({

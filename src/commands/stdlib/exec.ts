@@ -108,11 +108,8 @@ function runProcess(command, argv, { env, cwd, stdin, signal }) {
 			stderr += d;
 		});
 
-		// A child that exits before draining stdin (e.g. a fast preamble
-		// failure) surfaces EPIPE on this socket as an 'error' event; without a
-		// listener that crashes the whole process. The close handler already
-		// reports the real exit code and stderr, so stdin write errors are safe
-		// to ignore.
+		// EPIPE is expected when the child exits before draining stdin; the
+		// close handler reports the real exit code and stderr.
 		child.stdin.on("error", () => {});
 		if (typeof stdin === "string") {
 			child.stdin.setDefaultEncoding("utf8");
