@@ -108,6 +108,7 @@ function runProcess(command, argv, { env, cwd, stdin, signal }) {
 			stderr += d;
 		});
 
+		child.stdin.on("error", () => {});
 		if (typeof stdin === "string") {
 			child.stdin.setDefaultEncoding("utf8");
 			child.stdin.write(stdin);
