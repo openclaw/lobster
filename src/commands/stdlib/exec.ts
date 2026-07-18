@@ -108,8 +108,6 @@ function runProcess(command, argv, { env, cwd, stdin, signal }) {
 			stderr += d;
 		});
 
-		// EPIPE is expected when the child exits before draining stdin; the
-		// close handler reports the real exit code and stderr.
 		child.stdin.on("error", () => {});
 		if (typeof stdin === "string") {
 			child.stdin.setDefaultEncoding("utf8");
