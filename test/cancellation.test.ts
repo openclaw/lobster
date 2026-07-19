@@ -102,6 +102,24 @@ function createCustomAbortSideEffect() {
 	};
 }
 
+function createCountingSideEffect(name: string) {
+	let invocations = 0;
+	return {
+		command: {
+			name,
+			async run({ input }: { input: AsyncIterable<unknown> }) {
+				invocations += 1;
+				const items = [];
+				for await (const item of input) items.push(item);
+				return { output: streamOf(items.length > 0 ? items : [{ ok: true }]) };
+			},
+		},
+		get invocations() {
+			return invocations;
+		},
+	};
+}
+
 test("pre-aborted tool pipeline does not start its first stage", async () => {
 	const controller = new AbortController();
 	controller.abort();
@@ -159,6 +177,137 @@ test("pre-aborted workflow pipeline does not start its first stage", async () =>
 
 		assertCancellationEnvelope(envelope);
 		assert.equal(sideEffectStarted, false, "pre-aborted workflows must not start side effects");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("pre-aborted pipeline approval resume remains retryable", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-abort-approval-resume-"));
+	try {
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const sideEffect = createCountingSideEffect("test.pre-abort-approval-side-effect");
+		const source = {
+			name: "test.pre-abort-source",
+			async run() {
+				return { output: streamOf([{ value: 1 }]) };
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), source, sideEffect.command);
+		const first = await runToolRequest({
+			pipeline:
+				"test.pre-abort-source | approve --prompt Continue? | test.pre-abort-approval-side-effect",
+			ctx: { registry, env },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const controller = new AbortController();
+		controller.abort(new Error("pre-aborted approval resume"));
+		const aborted = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { registry, signal: controller.signal, env },
+		});
+		assertCancellationEnvelope(aborted);
+		assert.equal(sideEffect.invocations, 0);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { registry, env },
+		});
+		assert.equal(retried.ok, true);
+		assert.deepEqual(retried.output, [{ value: 1 }]);
+		assert.equal(sideEffect.invocations, 1);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("pre-aborted pipeline input resume remains retryable", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-abort-input-resume-"));
+	try {
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const sideEffect = createCountingSideEffect("test.pre-abort-input-side-effect");
+		const registry = withCommands(createDefaultRegistry(), sideEffect.command);
+		const responseSchema = JSON.stringify({
+			type: "object",
+			properties: { value: { type: "number" } },
+			required: ["value"],
+		});
+		const first = await runToolRequest({
+			pipeline: `ask --emit --prompt Continue? --schema '${responseSchema}' | test.pre-abort-input-side-effect`,
+			ctx: { registry, env },
+		});
+		assert.equal(first.status, "needs_input");
+		assert.ok(first.requiresInput?.resumeToken);
+
+		const controller = new AbortController();
+		controller.abort(new Error("pre-aborted input resume"));
+		const aborted = await resumeToolRequest({
+			token: first.requiresInput.resumeToken,
+			response: { value: 1 },
+			ctx: { registry, signal: controller.signal, env },
+		});
+		assertCancellationEnvelope(aborted);
+		assert.equal(sideEffect.invocations, 0);
+
+		const retried = await resumeToolRequest({
+			token: first.requiresInput.resumeToken,
+			response: { value: 1 },
+			ctx: { registry, env },
+		});
+		assert.equal(retried.ok, true);
+		assert.deepEqual(retried.output, [{ value: 1 }]);
+		assert.equal(sideEffect.invocations, 1);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("pre-aborted workflow approval resume remains retryable", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-abort-workflow-resume-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const sideEffect = createCountingSideEffect("test.pre-abort-workflow-side-effect");
+		const registry = withCommands(createDefaultRegistry(), sideEffect.command);
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "confirm", approval: "Continue?" },
+					{
+						id: "effect",
+						pipeline: "test.pre-abort-workflow-side-effect",
+						when: "$confirm.approved",
+					},
+				],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, registry, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const controller = new AbortController();
+		controller.abort(new Error("pre-aborted workflow resume"));
+		const aborted = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, registry, signal: controller.signal, env },
+		});
+		assertCancellationEnvelope(aborted);
+		assert.equal(sideEffect.invocations, 0);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, registry, env },
+		});
+		assert.equal(retried.ok, true);
+		assert.equal(sideEffect.invocations, 1);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

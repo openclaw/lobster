@@ -214,6 +214,7 @@ export async function resumeToolRequest({
 	}
 
 	if (payload.kind === "workflow-file") {
+		const abortedBeforeResume = runtime.signal?.aborted === true;
 		try {
 			const output = await runWorkflowFile({
 				filePath: payload.filePath,
@@ -241,11 +242,11 @@ export async function resumeToolRequest({
 				return errorEnvelope("parse_error", err.message);
 			}
 			const abortedResume = runtime.signal?.aborted === true;
-			if (abortedResume) {
+			if (abortedResume && !abortedBeforeResume) {
 				await cleanupIndex();
 				await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 			}
-			// Non-abort failures remain retryable by token or approval ID.
+			// Non-abort failures and pre-aborted resumes remain retryable by token or approval ID.
 			return errorEnvelope("runtime_error", err?.message ?? String(err));
 		}
 	}
@@ -301,6 +302,7 @@ export async function resumeToolRequest({
 				},
 			}
 		: undefined;
+	const abortedBeforeResume = runtime.signal?.aborted === true;
 
 	try {
 		const output = await runPipeline({
@@ -334,11 +336,11 @@ export async function resumeToolRequest({
 		);
 	} catch (err: any) {
 		const abortedResume = runtime.signal?.aborted === true;
-		if (abortedResume) {
+		if (abortedResume && !abortedBeforeResume) {
 			await cleanupIndex();
 			await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 		}
-		// Non-abort failures remain retryable by token or approval ID.
+		// Non-abort failures and pre-aborted resumes remain retryable by token or approval ID.
 		return errorEnvelope("runtime_error", err?.message ?? String(err));
 	}
 }
