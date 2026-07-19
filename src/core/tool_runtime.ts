@@ -130,6 +130,7 @@ export async function runToolRequest({
 			cwd: runtime.cwd,
 			llmAdapters: runtime.llmAdapters,
 			signal: runtime.signal,
+			haltAfterStageOnAbort: true,
 		});
 
 		const finalized = await finalizePipelineToolRun({
@@ -308,6 +309,7 @@ export async function resumeToolRequest({
 			cwd: runtime.cwd,
 			llmAdapters: runtime.llmAdapters,
 			signal: runtime.signal,
+			haltAfterStageOnAbort: true,
 			input,
 			requestInputResume,
 		});

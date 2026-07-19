@@ -53,10 +53,13 @@ function processIsRunning(pid: number) {
 	}
 }
 
-function withCommand(defaultRegistry: ReturnType<typeof createDefaultRegistry>, command: any) {
+function withCommands(
+	defaultRegistry: ReturnType<typeof createDefaultRegistry>,
+	...commands: any[]
+) {
 	return {
 		get(name: string) {
-			return name === command.name ? command : defaultRegistry.get(name);
+			return commands.find((command) => command.name === name) ?? defaultRegistry.get(name);
 		},
 	};
 }
@@ -150,7 +153,7 @@ test("cancellation after Gmail search completion stops the next pipeline stage",
 		const envelope = await runToolRequest({
 			pipeline: "gog.gmail.search --query newer_than:1d | test.side-effect",
 			ctx: {
-				registry: withCommand(createDefaultRegistry(), downstream),
+				registry: withCommands(createDefaultRegistry(), downstream),
 				signal,
 				env: {
 					...process.env,
@@ -168,7 +171,58 @@ test("cancellation after Gmail search completion stops the next pipeline stage",
 	}
 });
 
-test("an in-flight gog.gmail.send completes with a definitive result after parent cancellation", async () => {
+test("cancellation during eager stage cleanup stops the next tool stage", async () => {
+	const controller = new AbortController();
+	const source = {
+		name: "test.source",
+		async run() {
+			return {
+				output: (async function* () {
+					try {
+						yield { source: true };
+						yield { ignored: true };
+					} finally {
+						controller.abort();
+					}
+				})(),
+			};
+		},
+	};
+	const eager = {
+		name: "test.eager",
+		async run({ input }: { input: AsyncIterable<unknown> }) {
+			const iterator = input[Symbol.asyncIterator]();
+			const first = await iterator.next();
+			assert.equal(first.done, false);
+			return { output: [{ ok: true }] };
+		},
+	};
+	let downstreamStarted = false;
+	const downstream = {
+		name: "test.side-effect",
+		async run({ input }: { input: AsyncIterable<unknown> }) {
+			downstreamStarted = true;
+			const items = [];
+			for await (const item of input) items.push(item);
+			return { output: streamOf(items) };
+		},
+	};
+
+	const envelope = await runToolRequest({
+		pipeline: "test.source | test.eager | test.side-effect",
+		ctx: {
+			registry: withCommands(createDefaultRegistry(), source, eager, downstream),
+			signal: controller.signal,
+		},
+	});
+
+	assert.equal(controller.signal.aborted, true);
+	assert.equal(envelope.ok, true);
+	assert.deepEqual(envelope.output, [{ ok: true }]);
+	assert.equal(downstreamStarted, false, "cleanup cancellation must stop the next stage");
+});
+
+test("an in-flight gog.gmail.send completes and halts the pipeline after cancellation", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-send-"));
 	try {
 		const repoRoot = join(__dirname, "..", "..");
@@ -190,10 +244,20 @@ test("an in-flight gog.gmail.send completes with a definitive result after paren
 				};
 			},
 		};
+		let downstreamStarted = false;
+		const downstream = {
+			name: "test.side-effect",
+			async run({ input }: { input: AsyncIterable<unknown> }) {
+				downstreamStarted = true;
+				const items = [];
+				for await (const item of input) items.push(item);
+				return { output: streamOf(items) };
+			},
+		};
 		const run = runToolRequest({
-			pipeline: "draft | gog.gmail.send",
+			pipeline: "draft | gog.gmail.send | test.side-effect",
 			ctx: {
-				registry: withCommand(defaultRegistry, source),
+				registry: withCommands(defaultRegistry, source, downstream),
 				signal: controller.signal,
 				env: {
 					...process.env,
@@ -219,6 +283,7 @@ test("an in-flight gog.gmail.send completes with a definitive result after paren
 		);
 		assert.equal(envelope.ok, true);
 		assert.deepEqual(envelope.output, [{ ok: true }]);
+		assert.equal(downstreamStarted, false, "cancellation must stop later pipeline stages");
 		await waitForFile(sendCompleted, 500);
 		const invocations = (await readFile(sendInvocations, "utf8")).trim().split(/\r?\n/);
 		assert.equal(invocations.length, 1, "cancellation must prevent the second send from starting");

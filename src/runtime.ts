@@ -20,6 +20,7 @@ export async function runPipeline({
 	cwd = undefined,
 	llmAdapters = undefined,
 	signal = undefined,
+	haltAfterStageOnAbort = false,
 	dryRun = false,
 	requestInputResume = undefined,
 	requestInputEnabled = true,
@@ -35,6 +36,7 @@ export async function runPipeline({
 	cwd?: string | undefined;
 	llmAdapters?: Record<string, any> | undefined;
 	signal?: AbortSignal | undefined;
+	haltAfterStageOnAbort?: boolean;
 	dryRun?: boolean;
 	requestInputResume?: CommandInputResume | undefined;
 	requestInputEnabled?: boolean;
@@ -120,11 +122,12 @@ export async function runPipeline({
 			rendered = true;
 		}
 
+		let stageHalted = Boolean(result?.halt || (haltAfterStageOnAbort && signal?.aborted));
 		const output = result?.output;
 		if (Array.isArray(output)) {
 			stream = output;
 			await finishStage();
-		} else if (output && !result?.halt && idx < pipeline.length - 1) {
+		} else if (output && !stageHalted && idx < pipeline.length - 1) {
 			commandActive = false;
 			inactiveReason = "requestInput cannot suspend from lazy output before downstream stages";
 			assertRequestInputResumeConsumed(stageResume);
@@ -152,7 +155,8 @@ export async function runPipeline({
 			if (!output) await finishStage();
 		}
 
-		if (result?.halt) {
+		stageHalted ||= Boolean(haltAfterStageOnAbort && signal?.aborted);
+		if (stageHalted) {
 			halted = true;
 			haltedAt = { index: idx, stage };
 			break;
