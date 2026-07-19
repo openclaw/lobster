@@ -132,7 +132,7 @@ export async function runPipeline({
 			commandActive = false;
 			inactiveReason = "requestInput cannot suspend from lazy output before downstream stages";
 			assertRequestInputResumeConsumed(stageResume);
-			stream = trackCommandOutput(
+			const trackedOutput = trackCommandOutput(
 				output,
 				() => {
 					commandOutputStarted = true;
@@ -141,6 +141,9 @@ export async function runPipeline({
 				(err) => assertNoUnconsumedResumeAfterError(stageResume, err),
 				finishStage,
 			);
+			stream = haltAfterStageOnAbort
+				? throwIfAbortedAfterDrain(trackedOutput, signal)
+				: trackedOutput;
 		} else {
 			stream = output
 				? trackCommandOutput(
@@ -242,6 +245,16 @@ function formatStageArgs(args: Record<string, unknown>) {
 function streamFromItems(items: unknown[]) {
 	return (async function* () {
 		for (const item of items) yield item;
+	})();
+}
+
+function throwIfAbortedAfterDrain(
+	input: AsyncIterable<unknown> | Iterable<unknown>,
+	signal?: AbortSignal,
+) {
+	return (async function* () {
+		for await (const item of input) yield item;
+		signal?.throwIfAborted();
 	})();
 }
 

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { access, chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -340,6 +341,45 @@ test("cancellation while draining terminal lazy output returns cancellation", as
 
 	assertCancellationEnvelope(envelope);
 	assert.equal(outputDrained, true, "terminal output must finish before cancellation is reported");
+});
+
+test("cancellation while draining lazy input prevents a downstream OpenClaw call", async () => {
+	const controller = new AbortController();
+	let requests = 0;
+	const server = createServer((_req, res) => {
+		requests += 1;
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(JSON.stringify({ ok: true, result: { sent: true } }));
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+	try {
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("Missing server address");
+		const source = {
+			name: "test.lazy-abort-source",
+			async run() {
+				return {
+					output: (async function* () {
+						yield { value: 1 };
+						controller.abort(new Error("aborted during lazy stage handoff"));
+					})(),
+				};
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), source);
+		const envelope = await runToolRequest({
+			pipeline: `test.lazy-abort-source | openclaw.invoke --url http://127.0.0.1:${address.port} --tool messages --action send`,
+			ctx: { registry, signal: controller.signal },
+		});
+
+		assert.equal(requests, 0, "cancellation must prevent the downstream POST");
+		assertCancellationEnvelope(envelope);
+	} finally {
+		await new Promise<void>((resolve, reject) => {
+			server.close((err) => (err ? reject(err) : resolve()));
+		});
+	}
 });
 
 test("parent cancellation terminates gog.gmail.search and skips gog.gmail.send", async () => {
