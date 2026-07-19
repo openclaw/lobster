@@ -1379,7 +1379,7 @@ export async function runWorkflowFile({
 				if (err instanceof RequestInputResumeError) {
 					throw err;
 				}
-				if (ctx.signal?.aborted && (err?.name === "AbortError" || err?.code === "ABORT_ERR")) {
+				if (ctx.signal?.aborted) {
 					throw err;
 				}
 				if (

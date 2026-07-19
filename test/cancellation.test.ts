@@ -694,6 +694,55 @@ test("workflow resume state is consumed when cancellation uses a custom reason",
 	}
 });
 
+test("workflow on_error cannot swallow cancellation with a custom reason", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-on-error-custom-abort-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const sideEffect = createCustomAbortSideEffect();
+		const registry = withCommands(createDefaultRegistry(), sideEffect.command);
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{
+						id: "effect",
+						pipeline: "test.custom-abort-side-effect",
+						on_error: "continue",
+					},
+					{
+						id: "later",
+						input: {
+							prompt: "This input must not start",
+							responseSchema: { type: "boolean" },
+						},
+					},
+				],
+			}),
+			"utf8",
+		);
+		const controller = new AbortController();
+		const run = runToolRequest({
+			filePath,
+			ctx: { cwd: dir, registry, signal: controller.signal, env },
+		});
+		await sideEffect.started;
+		controller.abort(new Error("shutdown"));
+
+		const envelope = await run;
+
+		assert.equal(envelope.ok, false);
+		assert.match(envelope.error?.message ?? "", /shutdown/);
+		assert.equal(
+			sideEffect.invocations,
+			1,
+			"custom cancellation must stop the workflow before later steps",
+		);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("approval resume token remains retryable after a non-abort failure", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-resume-retry-"));
 	try {
