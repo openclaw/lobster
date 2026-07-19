@@ -240,7 +240,12 @@ export async function resumeToolRequest({
 			if (err instanceof WorkflowResumeArgumentError) {
 				return errorEnvelope("parse_error", err.message);
 			}
-			// Don't clean up index on error — allow retry by --id
+			const abortedResume = runtime.signal?.aborted === true;
+			if (abortedResume) {
+				await cleanupIndex();
+				await deleteStateJson({ env: runtime.env, key: payload.stateKey });
+			}
+			// Non-abort failures remain retryable by token or approval ID.
 			return errorEnvelope("runtime_error", err?.message ?? String(err));
 		}
 	}
@@ -328,11 +333,8 @@ export async function resumeToolRequest({
 			finalized.requiresInput,
 		);
 	} catch (err: any) {
-		const abortedApproval =
-			resumeState.haltType === "approval_request" &&
-			runtime.signal?.aborted &&
-			(err?.name === "AbortError" || err?.code === "ABORT_ERR");
-		if (abortedApproval) {
+		const abortedResume = runtime.signal?.aborted === true;
+		if (abortedResume) {
 			await cleanupIndex();
 			await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 		}

@@ -64,6 +64,7 @@ export async function runPipeline({
 	};
 
 	for (let idx = 0; idx < pipeline.length; idx++) {
+		if (haltAfterStageOnAbort) signal?.throwIfAborted();
 		const stage = pipeline[idx];
 		const command = registry.get(stage.name);
 		if (!command) {
@@ -163,6 +164,7 @@ export async function runPipeline({
 		}
 	}
 
+	const abortedBeforeFinalDrain = signal?.aborted === true;
 	const items = [];
 	try {
 		for await (const item of stream) items.push(item);
@@ -174,6 +176,7 @@ export async function runPipeline({
 			throw err;
 		}
 	}
+	if (haltAfterStageOnAbort && !abortedBeforeFinalDrain) signal?.throwIfAborted();
 	assertRequestInputResumeConsumed(requestInputResume);
 
 	return { items, rendered, halted, haltedAt };

@@ -2900,6 +2900,7 @@ async function runPipelineStep({
 		mode: ctx.mode,
 		cwd,
 		signal: ctx.signal,
+		haltAfterStageOnAbort: true,
 		llmAdapters: ctx.llmAdapters,
 		input: resume ? resume.pipelineInput.items : inputValueToPipelineItems(inputValue),
 		requestInputEnabled,
@@ -2912,6 +2913,7 @@ async function runPipelineStep({
 			: undefined,
 	});
 	stdout.end();
+	ctx.signal?.throwIfAborted();
 
 	if (result.halted) {
 		const haltedName = result.haltedAt?.stage?.name ?? "unknown";
