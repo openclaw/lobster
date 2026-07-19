@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
-import { runToolRequest } from "../src/core/tool_runtime.js";
+import { resumeToolRequest, runToolRequest } from "../src/core/tool_runtime.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -289,6 +289,143 @@ test("an in-flight gog.gmail.send completes and halts the pipeline after cancell
 		assert.equal(invocations.length, 1, "cancellation must prevent the second send from starting");
 		assert.equal(await fileExists(sendTerminated), false);
 		assert.equal(await fileExists(sendCompleted), true);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("approval resume token cannot replay a send after downstream cancellation", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-resume-cancel-replay-"));
+	try {
+		const repoRoot = join(__dirname, "..", "..");
+		const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+		const stateDir = join(dir, "state");
+		const sendStarted = join(dir, "send-started");
+		const sendCompleted = join(dir, "send-completed");
+		const sendInvocations = join(dir, "send-invocations");
+		const searchStarted = join(dir, "search-started");
+		const searchTerminated = join(dir, "search-terminated");
+		const defaultRegistry = createDefaultRegistry();
+		const source = {
+			name: "draft",
+			async run() {
+				return {
+					output: streamOf([{ to: "user@example.com", subject: "Hello", body: "World" }]),
+				};
+			},
+		};
+		const registry = withCommands(defaultRegistry, source);
+		const env = {
+			...process.env,
+			LOBSTER_STATE_DIR: stateDir,
+			GOG_BIN: mockGog,
+			MOCK_GOG_SEND_STARTED_FILE: sendStarted,
+			MOCK_GOG_SEND_COMPLETED_FILE: sendCompleted,
+			MOCK_GOG_SEND_INVOCATIONS_FILE: sendInvocations,
+			MOCK_GOG_SEARCH_STARTED_FILE: searchStarted,
+			MOCK_GOG_SEARCH_TERMINATED_FILE: searchTerminated,
+			MOCK_GOG_COMPLETION_DELAY_MS: "100",
+		};
+		const first = await runToolRequest({
+			pipeline:
+				"draft | approve --prompt Send? | gog.gmail.send | gog.gmail.search --query newer_than:1d",
+			ctx: { registry, env },
+		});
+
+		assert.equal(first.ok, true);
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.resumeToken);
+		assert.ok(first.requiresApproval.approvalId);
+
+		const controller = new AbortController();
+		const resumed = resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { registry, signal: controller.signal, env },
+		});
+		await waitForFile(searchStarted, 3000);
+		controller.abort();
+		const envelope = await resumed;
+
+		assertCancellationEnvelope(envelope);
+		await waitForFile(sendCompleted, 1000);
+		await waitForFile(searchTerminated, 1000);
+		let invocations = (await readFile(sendInvocations, "utf8")).trim().split(/\r?\n/);
+		assert.equal(invocations.length, 1);
+
+		const replayById = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: {
+				registry,
+				env: { ...env, MOCK_GOG_COMPLETION_DELAY_MS: "0" },
+			},
+		});
+		assert.equal(replayById.ok, false);
+		assert.match(replayById.error?.message ?? "", /not found or expired/);
+
+		const replayByToken = await resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: {
+				registry,
+				env: { ...env, MOCK_GOG_COMPLETION_DELAY_MS: "0" },
+			},
+		});
+		assert.equal(replayByToken.ok, false);
+		assert.match(replayByToken.error?.message ?? "", /Pipeline resume state not found/);
+		invocations = (await readFile(sendInvocations, "utf8")).trim().split(/\r?\n/);
+		assert.equal(invocations.length, 1, "retrying an aborted resume token must not resend");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("approval resume token remains retryable after a non-abort failure", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-resume-retry-"));
+	try {
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		let attempts = 0;
+		const source = {
+			name: "item",
+			async run() {
+				return { output: streamOf([{ value: 1 }]) };
+			},
+		};
+		const failOnce = {
+			name: "test.fail-once",
+			async run({ input }: { input: AsyncIterable<unknown> }) {
+				attempts += 1;
+				if (attempts === 1) throw new Error("retryable failure");
+				const items = [];
+				for await (const item of input) items.push(item);
+				return { output: streamOf(items) };
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), source, failOnce);
+		const first = await runToolRequest({
+			pipeline: "item | approve --prompt Continue? | test.fail-once",
+			ctx: { registry, env },
+		});
+
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.resumeToken);
+		const failed = await resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { registry, env },
+		});
+		assert.equal(failed.ok, false);
+		assert.match(failed.error?.message ?? "", /retryable failure/);
+
+		const retried = await resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { registry, env },
+		});
+		assert.equal(retried.ok, true);
+		assert.deepEqual(retried.output, [{ value: 1 }]);
+		assert.equal(attempts, 2);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
