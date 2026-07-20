@@ -20,6 +20,7 @@ export async function runPipeline({
 	cwd = undefined,
 	llmAdapters = undefined,
 	signal = undefined,
+	haltAfterStageOnAbort = false,
 	dryRun = false,
 	requestInputResume = undefined,
 	requestInputEnabled = true,
@@ -35,6 +36,7 @@ export async function runPipeline({
 	cwd?: string | undefined;
 	llmAdapters?: Record<string, any> | undefined;
 	signal?: AbortSignal | undefined;
+	haltAfterStageOnAbort?: boolean;
 	dryRun?: boolean;
 	requestInputResume?: CommandInputResume | undefined;
 	requestInputEnabled?: boolean;
@@ -62,6 +64,7 @@ export async function runPipeline({
 	};
 
 	for (let idx = 0; idx < pipeline.length; idx++) {
+		if (haltAfterStageOnAbort) signal?.throwIfAborted();
 		const stage = pipeline[idx];
 		const command = registry.get(stage.name);
 		if (!command) {
@@ -120,15 +123,16 @@ export async function runPipeline({
 			rendered = true;
 		}
 
+		let stageHalted = Boolean(result?.halt || (haltAfterStageOnAbort && signal?.aborted));
 		const output = result?.output;
 		if (Array.isArray(output)) {
 			stream = output;
 			await finishStage();
-		} else if (output && !result?.halt && idx < pipeline.length - 1) {
+		} else if (output && !stageHalted && idx < pipeline.length - 1) {
 			commandActive = false;
 			inactiveReason = "requestInput cannot suspend from lazy output before downstream stages";
 			assertRequestInputResumeConsumed(stageResume);
-			stream = trackCommandOutput(
+			const trackedOutput = trackCommandOutput(
 				output,
 				() => {
 					commandOutputStarted = true;
@@ -137,6 +141,9 @@ export async function runPipeline({
 				(err) => assertNoUnconsumedResumeAfterError(stageResume, err),
 				finishStage,
 			);
+			stream = haltAfterStageOnAbort
+				? throwIfAbortedAfterDrain(trackedOutput, signal)
+				: trackedOutput;
 		} else {
 			stream = output
 				? trackCommandOutput(
@@ -152,7 +159,8 @@ export async function runPipeline({
 			if (!output) await finishStage();
 		}
 
-		if (result?.halt) {
+		stageHalted ||= Boolean(haltAfterStageOnAbort && signal?.aborted);
+		if (stageHalted) {
 			halted = true;
 			haltedAt = { index: idx, stage };
 			break;
@@ -170,6 +178,7 @@ export async function runPipeline({
 			throw err;
 		}
 	}
+	if (haltAfterStageOnAbort) signal?.throwIfAborted();
 	assertRequestInputResumeConsumed(requestInputResume);
 
 	return { items, rendered, halted, haltedAt };
@@ -236,6 +245,65 @@ function streamFromItems(items: unknown[]) {
 	return (async function* () {
 		for (const item of items) yield item;
 	})();
+}
+
+function throwIfAbortedAfterDrain(input: AsyncIterable<unknown>, signal?: AbortSignal) {
+	return (async function* () {
+		const iterator = input[Symbol.asyncIterator]();
+		let completed = false;
+		try {
+			while (true) {
+				const next = await nextWithAbort(iterator, signal);
+				if (next.done) {
+					completed = true;
+					break;
+				}
+				signal?.throwIfAborted();
+				yield next.value;
+			}
+			signal?.throwIfAborted();
+		} finally {
+			if (!completed) await closeAfterAbortedRead(iterator, signal);
+		}
+	})();
+}
+
+async function closeAfterAbortedRead(iterator: AsyncIterator<unknown>, signal?: AbortSignal) {
+	if (typeof iterator.return !== "function") return;
+	try {
+		const close = iterator.return();
+		if (signal?.aborted) {
+			void Promise.resolve(close).catch(() => {});
+			return;
+		}
+		await close;
+	} catch (err) {
+		if (!signal?.aborted) throw err;
+	}
+}
+
+async function nextWithAbort(iterator: AsyncIterator<unknown>, signal?: AbortSignal) {
+	if (!signal) return iterator.next();
+	signal.throwIfAborted();
+
+	let onAbort!: () => void;
+	const aborted = new Promise<never>((_resolve, reject) => {
+		onAbort = () => {
+			try {
+				signal.throwIfAborted();
+			} catch (err) {
+				reject(err);
+			}
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	if (signal.aborted) onAbort();
+
+	try {
+		return await Promise.race([iterator.next(), aborted]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
 }
 
 function trackCommandOutput(

@@ -333,6 +333,33 @@ test("diffAndStore treats corrupt previous state as a miss and rewrites atomical
 	assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { ok: true });
 });
 
+test("diffAndStore does not publish a snapshot after cancellation before atomic replace", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-cancel-publish-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	await writeStateJson({ env, key: "snapshot", value: { version: "before" } });
+
+	const controller = new AbortController();
+	const signal = controller.signal;
+	const throwIfAborted = signal.throwIfAborted.bind(signal);
+	let signalChecks = 0;
+	Object.defineProperty(signal, "throwIfAborted", {
+		value() {
+			signalChecks += 1;
+			if (signalChecks === 2) controller.abort(new Error("abort before state publish"));
+			throwIfAborted();
+		},
+	});
+
+	await assert.rejects(
+		() => diffAndStore({ env, key: "snapshot", value: { version: "after" }, signal }),
+		/abort before state publish/,
+	);
+	assert.equal(signalChecks, 2);
+	assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { version: "before" });
+	const leftovers = (await fsp.readdir(tmp)).filter((file) => file.includes(".tmp"));
+	assert.deepEqual(leftovers, []);
+});
+
 test("SDK diff primitives treat corrupt previous state as a miss (#112)", async () => {
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-sdk-diff-corrupt-"));
 	const ctx = { env: { LOBSTER_STATE_DIR: tmp } };

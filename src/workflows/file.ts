@@ -169,6 +169,8 @@ type RunContext = {
 	llmAdapters?: Record<string, any>;
 	dryRun?: boolean;
 	_activeWorkflows?: Set<string>;
+	_onExecutionStart?: () => void;
+	_onResumeStateResolved?: (stateKey: string) => void;
 };
 
 export type WorkflowResumePayload = {
@@ -702,6 +704,7 @@ export async function runWorkflowFile({
 		resume?.stateKey && typeof resume.stateKey === "string"
 			? await resolveWorkflowResumeStateKey(ctx.env, resume.stateKey)
 			: null;
+	if (consumedResumeStateKey) ctx._onResumeStateResolved?.(consumedResumeStateKey);
 	const resumeState = resume?.stateKey
 		? await loadWorkflowResumeState(ctx.env, consumedResumeStateKey ?? resume.stateKey)
 		: (resume ?? null);
@@ -856,6 +859,8 @@ export async function runWorkflowFile({
 			resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
 
 		for (let idx = startIndex; idx < steps.length; idx++) {
+			ctx.signal?.throwIfAborted();
+			ctx._onExecutionStart?.();
 			const step = steps[idx];
 
 			if (!evaluateCondition(step.when ?? step.condition, results)) {
@@ -948,6 +953,7 @@ export async function runWorkflowFile({
 				const iterationResults: unknown[] = [];
 
 				for (let itemIdx = 0; itemIdx < itemsRef.length; itemIdx++) {
+					ctx.signal?.throwIfAborted();
 					if (step.pause_ms && itemIdx > 0 && itemIdx % batchSize === 0) {
 						await abortableSleep(step.pause_ms, ctx.signal);
 					}
@@ -966,6 +972,7 @@ export async function runWorkflowFile({
 					};
 
 					for (const subStep of step.steps) {
+						ctx.signal?.throwIfAborted();
 						if (!evaluateCondition(subStep.when ?? subStep.condition, scopedResults)) {
 							scopedResults[subStep.id] = { id: subStep.id, skipped: true };
 							continue;
@@ -1060,6 +1067,7 @@ export async function runWorkflowFile({
 				result: WorkflowStepResult;
 				parallelBranchResults: Record<string, WorkflowStepResult> | null;
 			}> => {
+				ctx.signal?.throwIfAborted();
 				// Combine external cancellation and optional per-step timeout into one signal.
 				let stepSignal: AbortSignal | undefined = ctx.signal;
 				let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -1379,7 +1387,7 @@ export async function runWorkflowFile({
 				if (err instanceof RequestInputResumeError) {
 					throw err;
 				}
-				if (ctx.signal?.aborted && (err?.name === "AbortError" || err?.code === "ABORT_ERR")) {
+				if (ctx.signal?.aborted) {
 					throw err;
 				}
 				if (
@@ -1817,7 +1825,7 @@ async function saveWorkflowResumeState(
 	return stateKey;
 }
 
-function alternateWorkflowResumeStateKey(stateKey: string): string | null {
+export function alternateWorkflowResumeStateKey(stateKey: string): string | null {
 	if (stateKey.includes("workflow-resume_")) {
 		return stateKey.replace("workflow-resume_", "workflow_resume_");
 	}
@@ -2776,7 +2784,9 @@ async function runShellCommand({
 	signal?: AbortSignal;
 	killSignal?: NodeJS.Signals;
 }) {
+	signal?.throwIfAborted();
 	const { spawn } = await import("node:child_process");
+	signal?.throwIfAborted();
 
 	return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
 		const shell = resolveInlineShellCommand({ command, env });
@@ -2900,6 +2910,7 @@ async function runPipelineStep({
 		mode: ctx.mode,
 		cwd,
 		signal: ctx.signal,
+		haltAfterStageOnAbort: true,
 		llmAdapters: ctx.llmAdapters,
 		input: resume ? resume.pipelineInput.items : inputValueToPipelineItems(inputValue),
 		requestInputEnabled,
@@ -2912,6 +2923,7 @@ async function runPipelineStep({
 			: undefined,
 	});
 	stdout.end();
+	ctx.signal?.throwIfAborted();
 
 	if (result.halted) {
 		const haltedName = result.haltedAt?.stage?.name ?? "unknown";

@@ -36,6 +36,7 @@ export function stableStringify(value) {
 type AtomicWriteOptions = {
 	renameFile?: typeof fsp.rename;
 	syncParentDir?: (filePath: string) => Promise<void>;
+	signal?: AbortSignal;
 };
 
 type AtomicExclusiveWriteOptions = {
@@ -148,6 +149,7 @@ export async function writeFileAtomic(filePath, data, options: AtomicWriteOption
 		await handle.sync();
 		await handle.close();
 		handle = undefined;
+		options.signal?.throwIfAborted();
 		await renameFile(tmpPath, filePath);
 		await syncDir(filePath);
 		cleanup = false;
@@ -215,12 +217,12 @@ export async function readStateJson({ env, key }) {
 	}
 }
 
-export async function writeStateJson({ env, key, value }) {
+export async function writeStateJson({ env, key, value, signal = undefined }) {
 	const stateDir = defaultStateDir(env);
 	const filePath = keyToPath(stateDir, key);
 
 	await ensureDirectory(stateDir);
-	await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n");
+	await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n", { signal });
 }
 
 export async function deleteStateJson({ env, key }) {
@@ -383,12 +385,13 @@ export async function cleanupApprovalIndexByStateKey({
 	}
 }
 
-export async function diffAndStore({ env, key, value }) {
+export async function diffAndStore({ env, key, value, signal = undefined }) {
 	const before = await readStateJson({ env, key }).catch((err) => {
 		if (isJsonSyntaxError(err)) return null;
 		throw err;
 	});
 	const changed = stableStringify(before) !== stableStringify(value);
-	await writeStateJson({ env, key, value });
+	signal?.throwIfAborted();
+	await writeStateJson({ env, key, value, signal });
 	return { before, after: value, changed };
 }
