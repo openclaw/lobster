@@ -383,12 +383,13 @@ export async function cleanupApprovalIndexByStateKey({
 	}
 }
 
-export async function diffAndStore({ env, key, value }) {
+export async function diffAndStore({ env, key, value, signal = undefined }) {
 	const before = await readStateJson({ env, key }).catch((err) => {
 		if (isJsonSyntaxError(err)) return null;
 		throw err;
 	});
 	const changed = stableStringify(before) !== stableStringify(value);
+	signal?.throwIfAborted();
 	await writeStateJson({ env, key, value });
 	return { before, after: value, changed };
 }

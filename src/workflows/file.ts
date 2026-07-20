@@ -856,6 +856,7 @@ export async function runWorkflowFile({
 			resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
 
 		for (let idx = startIndex; idx < steps.length; idx++) {
+			ctx.signal?.throwIfAborted();
 			const step = steps[idx];
 
 			if (!evaluateCondition(step.when ?? step.condition, results)) {
@@ -948,6 +949,7 @@ export async function runWorkflowFile({
 				const iterationResults: unknown[] = [];
 
 				for (let itemIdx = 0; itemIdx < itemsRef.length; itemIdx++) {
+					ctx.signal?.throwIfAborted();
 					if (step.pause_ms && itemIdx > 0 && itemIdx % batchSize === 0) {
 						await abortableSleep(step.pause_ms, ctx.signal);
 					}
@@ -966,6 +968,7 @@ export async function runWorkflowFile({
 					};
 
 					for (const subStep of step.steps) {
+						ctx.signal?.throwIfAborted();
 						if (!evaluateCondition(subStep.when ?? subStep.condition, scopedResults)) {
 							scopedResults[subStep.id] = { id: subStep.id, skipped: true };
 							continue;
@@ -1060,6 +1063,7 @@ export async function runWorkflowFile({
 				result: WorkflowStepResult;
 				parallelBranchResults: Record<string, WorkflowStepResult> | null;
 			}> => {
+				ctx.signal?.throwIfAborted();
 				// Combine external cancellation and optional per-step timeout into one signal.
 				let stepSignal: AbortSignal | undefined = ctx.signal;
 				let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -2776,7 +2780,9 @@ async function runShellCommand({
 	signal?: AbortSignal;
 	killSignal?: NodeJS.Signals;
 }) {
+	signal?.throwIfAborted();
 	const { spawn } = await import("node:child_process");
+	signal?.throwIfAborted();
 
 	return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
 		const shell = resolveInlineShellCommand({ command, env });

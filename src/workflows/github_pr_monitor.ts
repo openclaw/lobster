@@ -143,7 +143,12 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 		throw new Error("gh returned non-JSON output");
 	}
 
-	const { changed, before } = await diffAndStore({ env: ctx.env, key, value: current });
+	const { changed, before } = await diffAndStore({
+		env: ctx.env,
+		key,
+		value: current,
+		signal: ctx.signal,
+	});
 
 	if (changesOnly && !changed) {
 		return {

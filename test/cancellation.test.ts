@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { resumeToolRequest, runToolRequest } from "../src/core/tool_runtime.js";
+import { keyToPath } from "../src/state/store.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -178,6 +179,34 @@ test("pre-aborted workflow pipeline does not start its first stage", async () =>
 
 		assertCancellationEnvelope(envelope);
 		assert.equal(sideEffectStarted, false, "pre-aborted workflows must not start side effects");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("pre-aborted workflow shell does not start its process", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-shell-pre-abort-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const started = join(dir, "shell-started");
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [{ id: "shell", run: `printf started > ${started}` }],
+			}),
+			"utf8",
+		);
+		const controller = new AbortController();
+		controller.abort(new Error("pre-aborted workflow shell"));
+
+		const envelope = await runToolRequest({
+			filePath,
+			ctx: { cwd: dir, signal: controller.signal },
+		});
+
+		assertCancellationEnvelope(envelope);
+		assert.equal(envelope.error?.message, "pre-aborted workflow shell");
+		assert.equal(await fileExists(started), false, "pre-aborted workflow must not spawn a shell");
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
@@ -1362,6 +1391,60 @@ test(
 			assert.equal(processIsRunning(childPid), false);
 			assert.equal(await fileExists(terminated), true);
 			assert.equal(await fileExists(completed), false);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
+
+test(
+	"cancellation before github.pr.monitor persistence does not advance state",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-gh-state-"));
+		try {
+			const repoRoot = join(__dirname, "..", "..");
+			const mockGh = join(repoRoot, "test", "fixtures", "mock-gh-cancellation.mjs");
+			const ghBin = join(dir, "gh");
+			const stateDir = join(dir, "state");
+			await copyFile(mockGh, ghBin);
+			await chmod(ghBin, 0o755);
+			const controller = new AbortController();
+			const signal = controller.signal;
+			const throwIfAborted = signal.throwIfAborted.bind(signal);
+			let signalChecks = 0;
+			Object.defineProperty(signal, "throwIfAborted", {
+				value() {
+					signalChecks += 1;
+					if (signalChecks === 4) {
+						controller.abort(new Error("abort before monitor state write"));
+					}
+					throwIfAborted();
+				},
+			});
+			const key = "github.pr:openclaw/lobster#1";
+
+			const envelope = await runToolRequest({
+				pipeline:
+					'workflows.run --name github.pr.monitor --args-json \'{"repo":"openclaw/lobster","pr":1,"changesOnly":true}\'',
+				ctx: {
+					signal,
+					env: {
+						...process.env,
+						PATH: `${dir}:${process.env.PATH ?? ""}`,
+						LOBSTER_STATE_DIR: stateDir,
+						MOCK_GH_COMPLETION_DELAY_MS: "0",
+					},
+				},
+			});
+
+			assertCancellationEnvelope(envelope);
+			assert.equal(signalChecks, 4);
+			assert.equal(
+				await fileExists(keyToPath(stateDir, key)),
+				false,
+				"cancelled monitor must not persist its snapshot",
+			);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
