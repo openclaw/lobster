@@ -170,6 +170,7 @@ type RunContext = {
 	dryRun?: boolean;
 	_activeWorkflows?: Set<string>;
 	_onExecutionStart?: () => void;
+	_onResumeStateResolved?: (stateKey: string) => void;
 };
 
 export type WorkflowResumePayload = {
@@ -703,6 +704,7 @@ export async function runWorkflowFile({
 		resume?.stateKey && typeof resume.stateKey === "string"
 			? await resolveWorkflowResumeStateKey(ctx.env, resume.stateKey)
 			: null;
+	if (consumedResumeStateKey) ctx._onResumeStateResolved?.(consumedResumeStateKey);
 	const resumeState = resume?.stateKey
 		? await loadWorkflowResumeState(ctx.env, consumedResumeStateKey ?? resume.stateKey)
 		: (resume ?? null);
@@ -1823,7 +1825,7 @@ async function saveWorkflowResumeState(
 	return stateKey;
 }
 
-function alternateWorkflowResumeStateKey(stateKey: string): string | null {
+export function alternateWorkflowResumeStateKey(stateKey: string): string | null {
 	if (stateKey.includes("workflow-resume_")) {
 		return stateKey.replace("workflow-resume_", "workflow_resume_");
 	}

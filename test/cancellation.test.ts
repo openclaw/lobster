@@ -8,7 +8,9 @@ import { fileURLToPath } from "node:url";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { resumeToolRequest, runToolRequest } from "../src/core/tool_runtime.js";
+import { decodeResumeToken } from "../src/resume.js";
 import { keyToPath } from "../src/state/store.js";
+import { encodeToken } from "../src/token.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -430,6 +432,36 @@ test("cancellation while draining terminal lazy output returns cancellation", as
 	assert.equal(outputDrained, true, "terminal output must finish before cancellation is reported");
 });
 
+test("cancellation observed before terminal drain is reported after output cleanup", async () => {
+	const controller = new AbortController();
+	let outputDrained = false;
+	const terminal = {
+		name: "test.pre-drain-abort-output",
+		async run() {
+			controller.abort(new Error("abort before terminal drain"));
+			return {
+				halt: true,
+				output: (async function* () {
+					yield { cleanup: true };
+					outputDrained = true;
+				})(),
+			};
+		},
+	};
+
+	const envelope = await runToolRequest({
+		pipeline: "test.pre-drain-abort-output",
+		ctx: {
+			registry: withCommands(createDefaultRegistry(), terminal),
+			signal: controller.signal,
+		},
+	});
+
+	assertCancellationEnvelope(envelope);
+	assert.equal(envelope.error?.message, "abort before terminal drain");
+	assert.equal(outputDrained, true, "terminal output cleanup must complete before cancellation");
+});
+
 test("cancellation while draining lazy input prevents a downstream OpenClaw call", async () => {
 	const controller = new AbortController();
 	let requests = 0;
@@ -615,8 +647,7 @@ test("cancellation during eager stage cleanup stops the next tool stage", async 
 	});
 
 	assert.equal(controller.signal.aborted, true);
-	assert.equal(envelope.ok, true);
-	assert.deepEqual(envelope.output, [{ ok: true }]);
+	assertCancellationEnvelope(envelope);
 	assert.equal(downstreamStarted, false, "cleanup cancellation must stop the next stage");
 });
 
@@ -679,8 +710,7 @@ test("an in-flight gog.gmail.send completes and halts the pipeline after cancell
 			false,
 			"an already-started send must not report an ambiguous abort",
 		);
-		assert.equal(envelope.ok, true);
-		assert.deepEqual(envelope.output, [{ ok: true }]);
+		assertCancellationEnvelope(envelope);
 		assert.equal(downstreamStarted, false, "cancellation must stop later pipeline stages");
 		await waitForFile(sendCompleted, 500);
 		const invocations = (await readFile(sendInvocations, "utf8")).trim().split(/\r?\n/);
@@ -965,6 +995,168 @@ test("workflow resume state is consumed when cancellation uses a custom reason",
 			1,
 			"a custom abort reason must not leave the side effect replayable",
 		);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("aliased workflow resume state is consumed after cancellation starts execution", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-alias-custom-abort-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const sideEffect = createCustomAbortSideEffect();
+		const registry = withCommands(createDefaultRegistry(), sideEffect.command);
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "confirm", approval: "Continue?" },
+					{
+						id: "effect",
+						pipeline: "test.custom-abort-side-effect",
+						when: "$confirm.approved",
+					},
+				],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, registry, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		assert.equal(payload.kind, "workflow-file");
+		assert.ok(payload.stateKey?.startsWith("workflow_resume_"));
+		const aliasedStateKey = payload.stateKey.replace("workflow_resume_", "workflow-resume_");
+		const aliasedToken = encodeToken({ ...payload, stateKey: aliasedStateKey });
+
+		const controller = new AbortController();
+		const resumed = resumeToolRequest({
+			token: aliasedToken,
+			approved: true,
+			ctx: { cwd: dir, registry, signal: controller.signal, env },
+		});
+		await sideEffect.started;
+		controller.abort(new Error("abort aliased workflow resume"));
+		const aborted = await resumed;
+		assertCancellationEnvelope(aborted);
+
+		const replayById = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, registry, env },
+		});
+		assert.equal(replayById.ok, false);
+		assert.match(replayById.error?.message ?? "", /not found or expired/);
+
+		const replayByToken = await resumeToolRequest({
+			token: aliasedToken,
+			approved: true,
+			ctx: { cwd: dir, registry, env },
+		});
+		assert.equal(replayByToken.ok, false);
+		assert.match(replayByToken.error?.message ?? "", /Workflow resume state not found/);
+		assert.equal(sideEffect.invocations, 1, "the canonical workflow state must not be replayable");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("explicit cancellation consumes an aliased workflow resume state", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-alias-explicit-cancel-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [{ id: "confirm", approval: "Continue?" }],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		assert.equal(payload.kind, "workflow-file");
+		assert.ok(payload.stateKey?.startsWith("workflow_resume_"));
+		const aliasedToken = encodeToken({
+			...payload,
+			stateKey: payload.stateKey.replace("workflow_resume_", "workflow-resume_"),
+		});
+		const cancelled = await resumeToolRequest({
+			token: aliasedToken,
+			cancel: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(cancelled.ok, true);
+		assert.equal(cancelled.status, "cancelled");
+
+		const replayById = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(replayById.ok, false);
+		assert.match(replayById.error?.message ?? "", /not found or expired/);
+		const replayByToken = await resumeToolRequest({
+			token: aliasedToken,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(replayByToken.ok, false);
+		assert.match(replayByToken.error?.message ?? "", /Workflow resume state not found/);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("explicit cancellation removes a corrupt workflow state through an aliased token", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-alias-corrupt-cancel-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [{ id: "confirm", approval: "Continue?" }],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		assert.equal(payload.kind, "workflow-file");
+		assert.ok(payload.stateKey?.startsWith("workflow_resume_"));
+		await writeFile(keyToPath(stateDir, payload.stateKey), '{"corrupt"', "utf8");
+		const aliasedToken = encodeToken({
+			...payload,
+			stateKey: payload.stateKey.replace("workflow_resume_", "workflow-resume_"),
+		});
+
+		const cancelled = await resumeToolRequest({
+			token: aliasedToken,
+			cancel: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(cancelled.ok, true);
+		assert.equal(cancelled.status, "cancelled");
+		assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), false);
+		const replayById = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(replayById.ok, false);
+		assert.match(replayById.error?.message ?? "", /not found or expired/);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

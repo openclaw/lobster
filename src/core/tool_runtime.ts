@@ -12,7 +12,11 @@ import {
 	findStateKeyByApprovalId,
 	cleanupApprovalIndexByStateKey,
 } from "../state/store.js";
-import { WorkflowResumeArgumentError, runWorkflowFile } from "../workflows/file.js";
+import {
+	WorkflowResumeArgumentError,
+	alternateWorkflowResumeStateKey,
+	runWorkflowFile,
+} from "../workflows/file.js";
 import {
 	finalizePipelineToolRun,
 	loadPipelineResumeState,
@@ -194,27 +198,35 @@ export async function resumeToolRequest({
 	}
 
 	// Helper: clean up approval ID index after successful use
-	const cleanupIndex = async () => {
+	const cleanupIndex = async (stateKey = payload?.stateKey) => {
 		if (resolvedApprovalId) {
 			await deleteApprovalId({ env: runtime.env, approvalId: resolvedApprovalId });
-		} else if (payload?.stateKey) {
-			await cleanupApprovalIndexByStateKey({ env: runtime.env, stateKey: payload.stateKey });
+		} else if (stateKey) {
+			await cleanupApprovalIndexByStateKey({ env: runtime.env, stateKey });
 		}
 	};
 
 	if (cancel === true) {
-		await cleanupIndex();
+		const stateKeys = new Set<string>();
+		if (payload.stateKey) stateKeys.add(payload.stateKey);
 		if (payload.kind === "workflow-file" && payload.stateKey) {
-			await deleteStateJson({ env: runtime.env, key: payload.stateKey });
+			const alternateStateKey = alternateWorkflowResumeStateKey(payload.stateKey);
+			if (alternateStateKey) stateKeys.add(alternateStateKey);
 		}
-		if (payload.kind === "pipeline-resume" && payload.stateKey) {
-			await deleteStateJson({ env: runtime.env, key: payload.stateKey });
+		if (resolvedApprovalId) {
+			await cleanupIndex();
+		} else {
+			for (const stateKey of stateKeys) await cleanupIndex(stateKey);
+		}
+		for (const stateKey of stateKeys) {
+			await deleteStateJson({ env: runtime.env, key: stateKey });
 		}
 		return okEnvelope("cancelled", [], null, null);
 	}
 
 	if (payload.kind === "workflow-file") {
 		let workflowExecutionStarted = false;
+		let workflowResumeStateKey = payload.stateKey;
 		try {
 			const output = await runWorkflowFile({
 				filePath: payload.filePath,
@@ -222,6 +234,9 @@ export async function resumeToolRequest({
 					...runtime,
 					_onExecutionStart: () => {
 						workflowExecutionStarted = true;
+					},
+					_onResumeStateResolved: (stateKey) => {
+						workflowResumeStateKey = stateKey;
 					},
 				},
 				resume: payload,
@@ -237,7 +252,7 @@ export async function resumeToolRequest({
 			if (output.status === "needs_input") {
 				return okEnvelope("needs_input", [], null, output.requiresInput ?? null);
 			}
-			await cleanupIndex();
+			await cleanupIndex(workflowResumeStateKey);
 			if (output.status === "cancelled") {
 				return okEnvelope("cancelled", [], null, null);
 			}
@@ -248,8 +263,10 @@ export async function resumeToolRequest({
 			}
 			const abortedResume = runtime.signal?.aborted === true;
 			if (abortedResume && workflowExecutionStarted) {
-				await cleanupIndex();
-				await deleteStateJson({ env: runtime.env, key: payload.stateKey });
+				await cleanupIndex(workflowResumeStateKey);
+				if (workflowResumeStateKey) {
+					await deleteStateJson({ env: runtime.env, key: workflowResumeStateKey });
+				}
 			}
 			// Non-abort failures and cancellations before step execution remain retryable.
 			return errorEnvelope("runtime_error", err?.message ?? String(err));

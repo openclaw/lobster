@@ -167,7 +167,6 @@ export async function runPipeline({
 		}
 	}
 
-	const abortedBeforeFinalDrain = signal?.aborted === true;
 	const items = [];
 	try {
 		for await (const item of stream) items.push(item);
@@ -179,7 +178,7 @@ export async function runPipeline({
 			throw err;
 		}
 	}
-	if (haltAfterStageOnAbort && !abortedBeforeFinalDrain) signal?.throwIfAborted();
+	if (haltAfterStageOnAbort) signal?.throwIfAborted();
 	assertRequestInputResumeConsumed(requestInputResume);
 
 	return { items, rendered, halted, haltedAt };
