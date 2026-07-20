@@ -773,6 +773,84 @@ test("an in-flight gog.gmail.send completes and halts the pipeline after cancell
 	}
 });
 
+test("cancellation after a Gmail send interrupts a blocked next draft read", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-send-input-"));
+	let releaseBlockedRead!: () => void;
+	try {
+		const repoRoot = join(__dirname, "..", "..");
+		const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+		const sendCompleted = join(dir, "send-completed");
+		const sendInvocations = join(dir, "send-invocations");
+		const controller = new AbortController();
+		let markBlockedReadStarted!: () => void;
+		const blockedReadStarted = new Promise<void>((resolve) => {
+			markBlockedReadStarted = resolve;
+		});
+		const blockedRead = new Promise<IteratorResult<unknown>>((resolve) => {
+			releaseBlockedRead = () => resolve({ done: true, value: undefined });
+		});
+		const source = {
+			name: "draft",
+			async run() {
+				return {
+					output: {
+						[Symbol.asyncIterator]() {
+							let reads = 0;
+							return {
+								async next() {
+									reads += 1;
+									if (reads === 1) {
+										return {
+											done: false,
+											value: {
+												to: "first@example.com",
+												subject: "First",
+												body: "Hello",
+											},
+										};
+									}
+									markBlockedReadStarted();
+									return blockedRead;
+								},
+							};
+						},
+					},
+				};
+			},
+		};
+		const run = runToolRequest({
+			pipeline: "draft | gog.gmail.send",
+			ctx: {
+				registry: withCommands(createDefaultRegistry(), source),
+				signal: controller.signal,
+				env: {
+					...process.env,
+					GOG_BIN: mockGog,
+					MOCK_GOG_SEND_COMPLETED_FILE: sendCompleted,
+					MOCK_GOG_SEND_INVOCATIONS_FILE: sendInvocations,
+					MOCK_GOG_COMPLETION_DELAY_MS: "0",
+				},
+			},
+		});
+
+		await waitForFile(sendCompleted);
+		await blockedReadStarted;
+		controller.abort(new Error("abort while waiting for another draft"));
+		const observed = await observeSettlement(run, 100);
+		releaseBlockedRead();
+		const envelope = observed.settled ? observed.value : await run;
+
+		assert.equal(observed.settled, true, "cancellation must interrupt the blocked input read");
+		assertCancellationEnvelope(envelope);
+		assert.equal(envelope.error?.message, "abort while waiting for another draft");
+		const invocations = (await readFile(sendInvocations, "utf8")).trim().split(/\r?\n/);
+		assert.equal(invocations.length, 1, "cancellation must not start another send");
+	} finally {
+		releaseBlockedRead?.();
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("workflow pipeline halts after an in-flight send completes under cancellation", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-cancel-send-"));
 	try {

@@ -247,17 +247,63 @@ function streamFromItems(items: unknown[]) {
 	})();
 }
 
-function throwIfAbortedAfterDrain(
-	input: AsyncIterable<unknown> | Iterable<unknown>,
-	signal?: AbortSignal,
-) {
+function throwIfAbortedAfterDrain(input: AsyncIterable<unknown>, signal?: AbortSignal) {
 	return (async function* () {
-		for await (const item of input) {
+		const iterator = input[Symbol.asyncIterator]();
+		let completed = false;
+		try {
+			while (true) {
+				const next = await nextWithAbort(iterator, signal);
+				if (next.done) {
+					completed = true;
+					break;
+				}
+				signal?.throwIfAborted();
+				yield next.value;
+			}
 			signal?.throwIfAborted();
-			yield item;
+		} finally {
+			if (!completed) await closeAfterAbortedRead(iterator, signal);
 		}
-		signal?.throwIfAborted();
 	})();
+}
+
+async function closeAfterAbortedRead(iterator: AsyncIterator<unknown>, signal?: AbortSignal) {
+	if (typeof iterator.return !== "function") return;
+	try {
+		const close = iterator.return();
+		if (signal?.aborted) {
+			void Promise.resolve(close).catch(() => {});
+			return;
+		}
+		await close;
+	} catch (err) {
+		if (!signal?.aborted) throw err;
+	}
+}
+
+async function nextWithAbort(iterator: AsyncIterator<unknown>, signal?: AbortSignal) {
+	if (!signal) return iterator.next();
+	signal.throwIfAborted();
+
+	let onAbort!: () => void;
+	const aborted = new Promise<never>((_resolve, reject) => {
+		onAbort = () => {
+			try {
+				signal.throwIfAborted();
+			} catch (err) {
+				reject(err);
+			}
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	if (signal.aborted) onAbort();
+
+	try {
+		return await Promise.race([iterator.next(), aborted]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
 }
 
 function trackCommandOutput(
