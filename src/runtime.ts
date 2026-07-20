@@ -252,7 +252,10 @@ function throwIfAbortedAfterDrain(
 	signal?: AbortSignal,
 ) {
 	return (async function* () {
-		for await (const item of input) yield item;
+		for await (const item of input) {
+			signal?.throwIfAborted();
+			yield item;
+		}
 		signal?.throwIfAborted();
 	})();
 }

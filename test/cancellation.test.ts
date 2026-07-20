@@ -462,6 +462,57 @@ test("cancellation observed before terminal drain is reported after output clean
 	assert.equal(outputDrained, true, "terminal output cleanup must complete before cancellation");
 });
 
+test("cancellation during lazy handoff stops yielding items to the downstream stage", async () => {
+	const controller = new AbortController();
+	const delivered: number[] = [];
+	let sourceClosed = false;
+	const source = {
+		name: "test.lazy-item-source",
+		async run() {
+			return {
+				output: (async function* () {
+					try {
+						yield 1;
+						yield 2;
+						yield 3;
+					} finally {
+						sourceClosed = true;
+					}
+				})(),
+			};
+		},
+	};
+	const downstream = {
+		name: "test.per-item-side-effect",
+		async run({ input }: { input: AsyncIterable<unknown> }) {
+			return {
+				output: (async function* () {
+					for await (const item of input) {
+						delivered.push(item as number);
+						if (delivered.length === 1) {
+							controller.abort(new Error("abort after first lazy item"));
+						}
+						yield item;
+					}
+				})(),
+			};
+		},
+	};
+
+	const envelope = await runToolRequest({
+		pipeline: "test.lazy-item-source | test.per-item-side-effect",
+		ctx: {
+			registry: withCommands(createDefaultRegistry(), source, downstream),
+			signal: controller.signal,
+		},
+	});
+
+	assertCancellationEnvelope(envelope);
+	assert.equal(envelope.error?.message, "abort after first lazy item");
+	assert.deepEqual(delivered, [1], "cancelled handoff must not deliver later items");
+	assert.equal(sourceClosed, true, "cancelling the handoff must close the source iterator");
+});
+
 test("cancellation while draining lazy input prevents a downstream OpenClaw call", async () => {
 	const controller = new AbortController();
 	let requests = 0;
