@@ -169,6 +169,7 @@ type RunContext = {
 	llmAdapters?: Record<string, any>;
 	dryRun?: boolean;
 	_activeWorkflows?: Set<string>;
+	_onExecutionStart?: () => void;
 };
 
 export type WorkflowResumePayload = {
@@ -857,6 +858,7 @@ export async function runWorkflowFile({
 
 		for (let idx = startIndex; idx < steps.length; idx++) {
 			ctx.signal?.throwIfAborted();
+			ctx._onExecutionStart?.();
 			const step = steps[idx];
 
 			if (!evaluateCondition(step.when ?? step.condition, results)) {

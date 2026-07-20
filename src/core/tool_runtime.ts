@@ -214,11 +214,16 @@ export async function resumeToolRequest({
 	}
 
 	if (payload.kind === "workflow-file") {
-		const abortedBeforeResume = runtime.signal?.aborted === true;
+		let workflowExecutionStarted = false;
 		try {
 			const output = await runWorkflowFile({
 				filePath: payload.filePath,
-				ctx: runtime,
+				ctx: {
+					...runtime,
+					_onExecutionStart: () => {
+						workflowExecutionStarted = true;
+					},
+				},
 				resume: payload,
 				approved,
 				response,
@@ -242,11 +247,11 @@ export async function resumeToolRequest({
 				return errorEnvelope("parse_error", err.message);
 			}
 			const abortedResume = runtime.signal?.aborted === true;
-			if (abortedResume && !abortedBeforeResume) {
+			if (abortedResume && workflowExecutionStarted) {
 				await cleanupIndex();
 				await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 			}
-			// Non-abort failures and pre-aborted resumes remain retryable by token or approval ID.
+			// Non-abort failures and cancellations before step execution remain retryable.
 			return errorEnvelope("runtime_error", err?.message ?? String(err));
 		}
 	}

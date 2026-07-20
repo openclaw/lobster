@@ -343,6 +343,64 @@ test("pre-aborted workflow approval resume remains retryable", async () => {
 	}
 });
 
+test("workflow approval resume remains retryable when cancellation occurs during setup", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-setup-abort-workflow-resume-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const sideEffect = createCountingSideEffect("test.setup-abort-workflow-side-effect");
+		const registry = withCommands(createDefaultRegistry(), sideEffect.command);
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "confirm", approval: "Continue?" },
+					{
+						id: "effect",
+						pipeline: "test.setup-abort-workflow-side-effect",
+						when: "$confirm.approved",
+					},
+				],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, registry, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const controller = new AbortController();
+		const signal = controller.signal;
+		const throwIfAborted = signal.throwIfAborted.bind(signal);
+		let signalChecks = 0;
+		Object.defineProperty(signal, "throwIfAborted", {
+			value() {
+				signalChecks += 1;
+				if (signalChecks === 1) {
+					controller.abort(new Error("abort during workflow resume setup"));
+				}
+				throwIfAborted();
+			},
+		});
+		const aborted = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, registry, signal, env },
+		});
+		assertCancellationEnvelope(aborted);
+		assert.equal(sideEffect.invocations, 0);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, registry, env },
+		});
+		assert.equal(retried.ok, true);
+		assert.equal(sideEffect.invocations, 1);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("cancellation while draining terminal lazy output returns cancellation", async () => {
 	const controller = new AbortController();
 	let outputDrained = false;
