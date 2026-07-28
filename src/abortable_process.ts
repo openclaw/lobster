@@ -24,17 +24,21 @@ function abortError(signal: AbortSignal) {
 	return error;
 }
 
-function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals) {
-	if (!child.pid) return;
+function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): Promise<void> {
+	if (!child.pid) return Promise.resolve();
 
 	if (process.platform === "win32") {
-		const taskkill = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-			stdio: "ignore",
-			windowsHide: true,
+		return new Promise((resolve) => {
+			const taskkill = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+				stdio: "ignore",
+				windowsHide: true,
+			});
+			taskkill.once("error", () => {
+				child.kill(signal);
+				resolve();
+			});
+			taskkill.once("close", resolve);
 		});
-		taskkill.once("error", () => child.kill(signal));
-		taskkill.unref();
-		return;
 	}
 
 	try {
@@ -42,6 +46,7 @@ function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals) {
 	} catch {
 		child.kill(signal);
 	}
+	return Promise.resolve();
 }
 
 export function runAbortableProcess({
@@ -66,15 +71,21 @@ export function runAbortableProcess({
 		let stderr = "";
 		let cancellation: Error | undefined;
 		let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+		let processClosed = false;
+		let forceKillIssued = false;
 		let settled = false;
 		child.stdout?.on("data", (data) => (stdout += String(data)));
 		child.stderr?.on("data", (data) => (stderr += String(data)));
 
 		const cleanup = () => {
 			signal?.removeEventListener("abort", onAbort);
-			// Keep the group-level SIGKILL timer after the direct child has exited:
-			// a descendant may have ignored SIGTERM and still be running.
-			if (!cancellation && forceKillTimer) clearTimeout(forceKillTimer);
+			if (forceKillTimer) clearTimeout(forceKillTimer);
+		};
+		const failCancellationWhenTreeIsStopped = () => {
+			if (!cancellation || !processClosed || !forceKillIssued || settled) return;
+			settled = true;
+			cleanup();
+			reject(cancellation);
 		};
 		const fail = (error: Error) => {
 			if (settled) return;
@@ -85,16 +96,22 @@ export function runAbortableProcess({
 		const onAbort = () => {
 			if (settled || cancellation || !signal) return;
 			cancellation = abortError(signal);
-			terminateProcessTree(child, "SIGTERM");
-			forceKillTimer = setTimeout(
-				() => terminateProcessTree(child, "SIGKILL"),
-				ABORT_FORCE_KILL_AFTER_MS,
-			);
-			forceKillTimer.unref();
+			void terminateProcessTree(child, "SIGTERM");
+			forceKillTimer = setTimeout(() => {
+				forceKillTimer = undefined;
+				void terminateProcessTree(child, "SIGKILL").finally(() => {
+					forceKillIssued = true;
+					failCancellationWhenTreeIsStopped();
+				});
+			}, ABORT_FORCE_KILL_AFTER_MS);
 		};
 
 		child.on("error", (error: NodeJS.ErrnoException) => {
-			if (cancellation) return;
+			if (cancellation) {
+				processClosed = true;
+				failCancellationWhenTreeIsStopped();
+				return;
+			}
 			if (error.code === "ENOENT") {
 				fail(new Error(notFoundMessage));
 				return;
@@ -103,12 +120,13 @@ export function runAbortableProcess({
 		});
 		child.on("close", (code) => {
 			if (settled) return;
-			settled = true;
-			cleanup();
+			processClosed = true;
 			if (cancellation) {
-				reject(cancellation);
+				failCancellationWhenTreeIsStopped();
 				return;
 			}
+			settled = true;
+			cleanup();
 			resolve({ stdout, stderr, code });
 		});
 

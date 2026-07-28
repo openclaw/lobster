@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { access, chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -605,7 +606,9 @@ test("parent cancellation terminates the gog process tree and skips Gmail sends"
 		assert.equal(immediate.settled, false, "workflow must wait for the child to exit");
 		assert.equal(observed.settled, true, "workflow should settle promptly after parent abort");
 		assertCancellationEnvelope(envelope);
-		await waitForFile(searchTerminated, 500);
+		if (process.platform !== "win32") {
+			await waitForFile(searchTerminated, 500);
+		}
 		await new Promise((resolve) => setTimeout(resolve, 700));
 		assert.equal(processIsRunning(childPid), false);
 		assert.equal(
@@ -613,7 +616,9 @@ test("parent cancellation terminates the gog process tree and skips Gmail sends"
 			false,
 			"cancellation must kill child processes too",
 		);
-		assert.equal(await fileExists(searchTerminated), true);
+		if (process.platform !== "win32") {
+			assert.equal(await fileExists(searchTerminated), true);
+		}
 		assert.equal(await fileExists(searchCompleted), false);
 		assert.equal(
 			await fileExists(descendantCompleted),
@@ -725,6 +730,47 @@ test("cancellation during eager stage cleanup stops the next tool stage", async 
 	assert.equal(controller.signal.aborted, true);
 	assertCancellationEnvelope(envelope);
 	assert.equal(downstreamStarted, false, "cleanup cancellation must stop the next stage");
+});
+
+test("process-tree escalation survives a short-lived caller", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-short-lived-"));
+	try {
+		const repoRoot = join(__dirname, "..", "..");
+		const runner = join(repoRoot, "dist", "src", "abortable_process.js");
+		const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+		const wrapper = join(repoRoot, "test", "fixtures", "abortable-process-short-lived.mjs");
+		const childStarted = join(dir, "search-started");
+		const descendantStarted = join(dir, "descendant-started");
+		const descendantCompleted = join(dir, "descendant-completed");
+		const child = spawn(process.execPath, [wrapper, runner, mockGog], {
+			env: {
+				...process.env,
+				MOCK_GOG_SEARCH_STARTED_FILE: childStarted,
+				MOCK_GOG_DESCENDANT_STARTED_FILE: descendantStarted,
+				MOCK_GOG_DESCENDANT_COMPLETED_FILE: descendantCompleted,
+				MOCK_GOG_TERMINATION_DELAY_MS: "0",
+				MOCK_GOG_COMPLETION_DELAY_MS: "5000",
+			},
+			stdio: "inherit",
+		});
+		const exitCode = await new Promise<number | null>((resolve, reject) => {
+			child.once("error", reject);
+			child.once("exit", resolve);
+		});
+
+		assert.equal(exitCode, 0, "the caller should settle cancellation before it exits");
+		await waitForFile(descendantStarted);
+		const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+		await new Promise((resolve) => setTimeout(resolve, 900));
+		assert.equal(processIsRunning(descendantPid), false);
+		assert.equal(
+			await fileExists(descendantCompleted),
+			false,
+			"a descendant must not outlive a caller that exits after cancellation",
+		);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 });
 
 test("an in-flight gog.gmail.send completes and halts the pipeline after cancellation", async () => {
