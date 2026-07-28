@@ -10,6 +10,7 @@ import { parsePipeline } from "../parser.js";
 import { runPipeline } from "../runtime.js";
 import { encodeToken, decodeToken } from "../token.js";
 import {
+	cleanupApprovalIndexByStateKey,
 	createApprovalIndex,
 	deleteStateJson,
 	readStateJson,
@@ -886,38 +887,49 @@ export async function runWorkflowFile({
 						subject,
 						maxEnvelopeBytes: resolveToolEnvelopeMaxBytes(ctx.env),
 					});
-					const stateKey = await saveWorkflowResumeState(ctx.env, {
-						filePath: resolvedFilePath,
-						resumeAtIndex: idx + 1,
-						steps: results,
-						args: resolvedArgs,
-						inputStepId: step.id,
-						inputSchema: step.input.responseSchema,
-						// Preserve the full resolved subject for resume semantics; the tool
-						// envelope may contain a truncated preview to stay within size limits.
-						inputSubject: subject,
-						createdAt: new Date().toISOString(),
-					});
+					let stateKey: string | undefined;
+					try {
+						stateKey = await saveWorkflowResumeState(
+							ctx.env,
+							{
+								filePath: resolvedFilePath,
+								resumeAtIndex: idx + 1,
+								steps: results,
+								args: resolvedArgs,
+								inputStepId: step.id,
+								inputSchema: step.input.responseSchema,
+								// Preserve the full resolved subject for resume semantics; the tool
+								// envelope may contain a truncated preview to stay within size limits.
+								inputSubject: subject,
+								createdAt: new Date().toISOString(),
+							},
+							ctx.signal,
+						);
 
-					if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
-						await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+						if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
+							await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+						}
+						ctx.signal?.throwIfAborted();
+
+						const resumeToken = encodeToken({
+							protocolVersion: 1,
+							v: 1,
+							kind: "workflow-file",
+							stateKey,
+						} satisfies WorkflowResumePayload);
+
+						return {
+							status: "needs_input",
+							output: [],
+							requiresInput: {
+								...inputRequest,
+								resumeToken,
+							},
+						};
+					} catch (err) {
+						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
+						throw err;
 					}
-
-					const resumeToken = encodeToken({
-						protocolVersion: 1,
-						v: 1,
-						kind: "workflow-file",
-						stateKey,
-					} satisfies WorkflowResumePayload);
-
-					return {
-						status: "needs_input",
-						output: [],
-						requiresInput: {
-							...inputRequest,
-							resumeToken,
-						},
-					};
 				}
 
 				ctx.stdout.write(`${step.input.prompt}\n`);
@@ -1352,38 +1364,49 @@ export async function runWorkflowFile({
 						subject: err.request.subject,
 						maxEnvelopeBytes: resolveToolEnvelopeMaxBytes(ctx.env),
 					});
-					const stateKey = await saveWorkflowResumeState(ctx.env, {
-						filePath: resolvedFilePath,
-						resumeAtIndex: idx,
-						steps: results,
-						args: resolvedArgs,
-						inputStepId: err.stepId,
-						inputKind: "pipeline_command",
-						inputSchema: err.request.responseSchema,
-						inputSubject: err.request.subject,
-						pipelineInput: err.pipelineInput,
-						createdAt: new Date().toISOString(),
-					});
+					let stateKey: string | undefined;
+					try {
+						stateKey = await saveWorkflowResumeState(
+							ctx.env,
+							{
+								filePath: resolvedFilePath,
+								resumeAtIndex: idx,
+								steps: results,
+								args: resolvedArgs,
+								inputStepId: err.stepId,
+								inputKind: "pipeline_command",
+								inputSchema: err.request.responseSchema,
+								inputSubject: err.request.subject,
+								pipelineInput: err.pipelineInput,
+								createdAt: new Date().toISOString(),
+							},
+							ctx.signal,
+						);
 
-					if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
-						await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+						if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
+							await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+						}
+						ctx.signal?.throwIfAborted();
+
+						const resumeToken = encodeToken({
+							protocolVersion: 1,
+							v: 1,
+							kind: "workflow-file",
+							stateKey,
+						} satisfies WorkflowResumePayload);
+
+						return {
+							status: "needs_input",
+							output: [],
+							requiresInput: {
+								...inputRequest,
+								resumeToken,
+							},
+						};
+					} catch (stateError) {
+						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
+						throw stateError;
 					}
-
-					const resumeToken = encodeToken({
-						protocolVersion: 1,
-						v: 1,
-						kind: "workflow-file",
-						stateKey,
-					} satisfies WorkflowResumePayload);
-
-					return {
-						status: "needs_input",
-						output: [],
-						requiresInput: {
-							...inputRequest,
-							resumeToken,
-						},
-					};
 				}
 				if (err instanceof RequestInputResumeError) {
 					throw err;
@@ -1443,44 +1466,49 @@ export async function runWorkflowFile({
 				}
 
 				if (ctx.mode === "tool" || !isInteractive(ctx.stdin)) {
-					const stateKey = await saveWorkflowResumeState(ctx.env, {
-						filePath: resolvedFilePath,
-						resumeAtIndex: idx + 1,
-						steps: results,
-						args: resolvedArgs,
-						approvalStepId: step.id,
-						approvalIdentity,
-						createdAt: new Date().toISOString(),
-					});
-
-					let approvalId: string | null;
+					let stateKey: string | undefined;
 					try {
-						approvalId = await createApprovalIndex({ env: ctx.env, stateKey });
+						stateKey = await saveWorkflowResumeState(
+							ctx.env,
+							{
+								filePath: resolvedFilePath,
+								resumeAtIndex: idx + 1,
+								steps: results,
+								args: resolvedArgs,
+								approvalStepId: step.id,
+								approvalIdentity,
+								createdAt: new Date().toISOString(),
+							},
+							ctx.signal,
+						);
+
+						const approvalId = await createApprovalIndex({ env: ctx.env, stateKey });
+						ctx.signal?.throwIfAborted();
+						if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
+							await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+						}
+						ctx.signal?.throwIfAborted();
+
+						const resumeToken = encodeToken({
+							protocolVersion: 1,
+							v: 1,
+							kind: "workflow-file",
+							stateKey,
+						} satisfies WorkflowResumePayload);
+
+						return {
+							status: "needs_approval",
+							output: [],
+							requiresApproval: {
+								...approval,
+								resumeToken,
+								...(approvalId ? { approvalId } : null),
+							},
+						};
 					} catch (err) {
-						await deleteStateJson({ env: ctx.env, key: stateKey }).catch(() => {});
+						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
 						throw err;
 					}
-
-					if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
-						await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
-					}
-
-					const resumeToken = encodeToken({
-						protocolVersion: 1,
-						v: 1,
-						kind: "workflow-file",
-						stateKey,
-					} satisfies WorkflowResumePayload);
-
-					return {
-						status: "needs_approval",
-						output: [],
-						requiresApproval: {
-							...approval,
-							resumeToken,
-							...(approvalId ? { approvalId } : null),
-						},
-					};
 				}
 
 				ctx.stdout.write(`${approval.prompt} [y/N] `);
@@ -1820,10 +1848,26 @@ export function decodeWorkflowResumePayload(payload: unknown): WorkflowResumePay
 async function saveWorkflowResumeState(
 	env: Record<string, string | undefined>,
 	state: WorkflowResumeState,
+	signal?: AbortSignal,
 ) {
 	const stateKey = `workflow_resume_${randomUUID()}`;
-	await writeStateJson({ env, key: stateKey, value: state });
-	return stateKey;
+	try {
+		signal?.throwIfAborted();
+		await writeStateJson({ env, key: stateKey, value: state, signal });
+		signal?.throwIfAborted();
+		return stateKey;
+	} catch (err) {
+		if (signal?.aborted) await discardWorkflowResumeState(env, stateKey);
+		throw err;
+	}
+}
+
+async function discardWorkflowResumeState(
+	env: Record<string, string | undefined>,
+	stateKey: string,
+) {
+	await cleanupApprovalIndexByStateKey({ env, stateKey }).catch(() => {});
+	await deleteStateJson({ env, key: stateKey }).catch(() => {});
 }
 
 export function alternateWorkflowResumeStateKey(stateKey: string): string | null {

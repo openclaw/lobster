@@ -1,7 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { access, chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+	access,
+	chmod,
+	copyFile,
+	mkdtemp,
+	readFile,
+	readdir,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -29,6 +38,15 @@ async function fileExists(path: string) {
 		return true;
 	} catch {
 		return false;
+	}
+}
+
+async function listStateFiles(stateDir: string) {
+	try {
+		return await readdir(stateDir);
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return [];
+		throw err;
 	}
 }
 
@@ -218,6 +236,164 @@ test("pre-aborted workflow shell does not start its process", async () => {
 		assertCancellationEnvelope(envelope);
 		assert.equal(envelope.error?.message, "pre-aborted workflow shell");
 		assert.equal(await fileExists(started), false, "pre-aborted workflow must not spawn a shell");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("pipeline input cancellation after state publication does not return a live resume token", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pipeline-gate-cancel-"));
+	try {
+		const stateDir = join(dir, "state");
+		const controller = new AbortController();
+		const signal = controller.signal;
+		const throwIfAborted = signal.throwIfAborted.bind(signal);
+		let signalChecks = 0;
+		Object.defineProperty(signal, "throwIfAborted", {
+			value() {
+				signalChecks += 1;
+				if (signalChecks === 6) {
+					controller.abort(new Error("abort after pipeline input state publication"));
+				}
+				throwIfAborted();
+			},
+		});
+
+		const envelope = await runToolRequest({
+			pipeline: `ask --emit --prompt Continue? --schema '${JSON.stringify({ type: "object" })}'`,
+			ctx: { env: { ...process.env, LOBSTER_STATE_DIR: stateDir }, signal },
+		});
+
+		assertCancellationEnvelope(envelope);
+		assert.equal(signalChecks, 6);
+		assert.deepEqual(await listStateFiles(stateDir), [], "cancelled input state must be removed");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("pipeline approval cancellation after index publication removes the state and index", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pipeline-approval-cancel-"));
+	try {
+		const stateDir = join(dir, "state");
+		const controller = new AbortController();
+		const signal = controller.signal;
+		const throwIfAborted = signal.throwIfAborted.bind(signal);
+		let signalChecks = 0;
+		Object.defineProperty(signal, "throwIfAborted", {
+			value() {
+				signalChecks += 1;
+				if (signalChecks === 9) {
+					controller.abort(new Error("abort after pipeline approval index publication"));
+				}
+				throwIfAborted();
+			},
+		});
+		const source = {
+			name: "test.gate-source",
+			async run() {
+				return { output: streamOf([{ value: 1 }]) };
+			},
+		};
+
+		const envelope = await runToolRequest({
+			pipeline: "test.gate-source | approve --prompt Continue?",
+			ctx: {
+				env: { ...process.env, LOBSTER_STATE_DIR: stateDir },
+				signal,
+				registry: withCommands(createDefaultRegistry(), source),
+			},
+		});
+
+		assertCancellationEnvelope(envelope);
+		assert.equal(signalChecks, 9);
+		assert.deepEqual(
+			await listStateFiles(stateDir),
+			[],
+			"cancelled approval state must be removed",
+		);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("workflow input cancellation after state publication does not return a live resume token", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-gate-cancel-"));
+	try {
+		const stateDir = join(dir, "state");
+		const filePath = join(dir, "workflow.lobster");
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "answer", input: { prompt: "Continue?", responseSchema: { type: "object" } } },
+				],
+			}),
+			"utf8",
+		);
+		const controller = new AbortController();
+		const signal = controller.signal;
+		const throwIfAborted = signal.throwIfAborted.bind(signal);
+		let signalChecks = 0;
+		Object.defineProperty(signal, "throwIfAborted", {
+			value() {
+				signalChecks += 1;
+				if (signalChecks === 4) {
+					controller.abort(new Error("abort after workflow input state publication"));
+				}
+				throwIfAborted();
+			},
+		});
+
+		const envelope = await runToolRequest({
+			filePath,
+			ctx: { env: { ...process.env, LOBSTER_STATE_DIR: stateDir }, signal },
+		});
+
+		assertCancellationEnvelope(envelope);
+		assert.equal(signalChecks, 4);
+		assert.deepEqual(await listStateFiles(stateDir), [], "cancelled input state must be removed");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("workflow approval cancellation after index publication removes the state and index", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-approval-cancel-"));
+	try {
+		const stateDir = join(dir, "state");
+		const filePath = join(dir, "workflow.lobster");
+		await writeFile(
+			filePath,
+			JSON.stringify({ steps: [{ id: "gate", approval: "Continue?" }] }),
+			"utf8",
+		);
+		const controller = new AbortController();
+		const signal = controller.signal;
+		const throwIfAborted = signal.throwIfAborted.bind(signal);
+		let signalChecks = 0;
+		Object.defineProperty(signal, "throwIfAborted", {
+			value() {
+				signalChecks += 1;
+				if (signalChecks === 5) {
+					controller.abort(new Error("abort after workflow approval index publication"));
+				}
+				throwIfAborted();
+			},
+		});
+
+		const envelope = await runToolRequest({
+			filePath,
+			ctx: { env: { ...process.env, LOBSTER_STATE_DIR: stateDir }, signal },
+		});
+
+		assertCancellationEnvelope(envelope);
+		assert.equal(signalChecks, 5);
+		assert.deepEqual(
+			await listStateFiles(stateDir),
+			[],
+			"cancelled approval state must be removed",
+		);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
@@ -725,6 +901,66 @@ test("exec cancellation terminates descendant processes", async () => {
 		await rm(dir, { recursive: true, force: true });
 	}
 });
+
+test(
+	"CLI SIGINT terminates a detached workflow process tree before exiting",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-cli-sigint-process-tree-"));
+		let cli: ReturnType<typeof spawn> | undefined;
+		try {
+			const repoRoot = join(__dirname, "..", "..");
+			const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+			const workflow = join(dir, "workflow.lobster");
+			const searchStarted = join(dir, "search-started");
+			const descendantStarted = join(dir, "descendant-started");
+			const descendantCompleted = join(dir, "descendant-completed");
+			const command = [process.execPath, mockGog, "gmail", "search"]
+				.map((arg) => JSON.stringify(arg))
+				.join(" ");
+			await writeFile(workflow, JSON.stringify({ steps: [{ id: "shell", run: command }] }), "utf8");
+
+			cli = spawn(
+				process.execPath,
+				[join(repoRoot, "bin", "lobster.js"), "run", "--file", workflow],
+				{
+					cwd: dir,
+					env: {
+						...process.env,
+						MOCK_GOG_SEARCH_STARTED_FILE: searchStarted,
+						MOCK_GOG_DESCENDANT_STARTED_FILE: descendantStarted,
+						MOCK_GOG_DESCENDANT_COMPLETED_FILE: descendantCompleted,
+						MOCK_GOG_TERMINATION_DELAY_MS: "1000",
+					},
+					stdio: "ignore",
+				},
+			);
+			await waitForFile(searchStarted, 5000);
+			await waitForFile(descendantStarted, 5000);
+			const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+			assert.equal(cli.kill("SIGINT"), true);
+			const exited = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+				(resolve, reject) => {
+					cli!.once("error", reject);
+					cli!.once("exit", (code, signal) => resolve({ code, signal }));
+				},
+			);
+
+			assert.equal(exited.signal, null);
+			assert.equal(exited.code, 130, "CLI must retain the conventional SIGINT exit status");
+			await new Promise((resolve) => setTimeout(resolve, 900));
+			assert.equal(processIsRunning(descendantPid), false);
+			assert.equal(
+				await fileExists(descendantCompleted),
+				false,
+				"a detached workflow descendant must not finish after Ctrl+C",
+			);
+		} finally {
+			cli?.kill("SIGKILL");
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
 
 test("cancellation after Gmail search completion stops the next pipeline stage", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-search-handoff-"));

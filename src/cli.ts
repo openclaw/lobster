@@ -19,6 +19,19 @@ import {
 } from "./pipeline_resume_state.js";
 
 export async function runCli(argv) {
+	const cancellation = createCliCancellation();
+	try {
+		await runCliWithSignal(argv, cancellation.signal);
+	} finally {
+		cancellation.dispose();
+	}
+
+	if (cancellation.exitCode !== undefined) {
+		process.exitCode = cancellation.exitCode;
+	}
+}
+
+async function runCliWithSignal(argv, signal: AbortSignal) {
 	const registry = createDefaultRegistry();
 
 	if (argv.length === 0 || argv.includes("-h") || argv.includes("--help")) {
@@ -48,7 +61,7 @@ export async function runCli(argv) {
 	}
 
 	if (argv[0] === "doctor") {
-		await handleDoctor({ argv: argv.slice(1), registry });
+		await handleDoctor({ argv: argv.slice(1), registry, signal });
 		return;
 	}
 
@@ -58,17 +71,43 @@ export async function runCli(argv) {
 	}
 
 	if (argv[0] === "run") {
-		await handleRun({ argv: argv.slice(1), registry });
+		await handleRun({ argv: argv.slice(1), registry, signal });
 		return;
 	}
 
 	if (argv[0] === "resume") {
-		await handleResume({ argv: argv.slice(1), registry });
+		await handleResume({ argv: argv.slice(1), registry, signal });
 		return;
 	}
 
 	// Default: treat argv as a pipeline string.
-	await handleRun({ argv, registry });
+	await handleRun({ argv, registry, signal });
+}
+
+function createCliCancellation() {
+	const controller = new AbortController();
+	let received: NodeJS.Signals | undefined;
+	const abort = (receivedSignal: NodeJS.Signals) => {
+		if (received) return;
+		received = receivedSignal;
+		controller.abort(new Error(`Received ${receivedSignal}`));
+	};
+	const onSigint = () => abort("SIGINT");
+	const onSigterm = () => abort("SIGTERM");
+	process.once("SIGINT", onSigint);
+	process.once("SIGTERM", onSigterm);
+
+	return {
+		signal: controller.signal,
+		get exitCode() {
+			if (!received) return undefined;
+			return received === "SIGINT" ? 130 : 143;
+		},
+		dispose() {
+			process.removeListener("SIGINT", onSigint);
+			process.removeListener("SIGTERM", onSigterm);
+		},
+	};
 }
 
 async function handleGraph({ argv }) {
@@ -132,7 +171,7 @@ function isWorkflowGraphFormat(value: string): value is WorkflowGraphFormat {
 	return value === "mermaid" || value === "dot" || value === "ascii";
 }
 
-async function handleRun({ argv, registry }) {
+async function handleRun({ argv, registry, signal }: { argv; registry; signal: AbortSignal }) {
 	const parsed = parseRunArgs(argv);
 	const { mode, argsJson } = parsed;
 	const normalizedMode = normalizeMode(mode);
@@ -173,6 +212,7 @@ async function handleRun({ argv, registry }) {
 					mode: normalizedMode,
 					registry,
 					dryRun,
+					signal,
 				},
 			});
 
@@ -276,6 +316,7 @@ async function handleRun({ argv, registry }) {
 			env: process.env,
 			mode: normalizedMode,
 			dryRun,
+			signal,
 		});
 
 		if (normalizedMode === "tool") {
@@ -283,6 +324,7 @@ async function handleRun({ argv, registry }) {
 				env: process.env,
 				pipeline,
 				output,
+				signal,
 			});
 			writeToolEnvelope({
 				ok: true,
@@ -504,7 +546,7 @@ async function resolveWorkflowFile(candidate) {
 	return resolved;
 }
 
-async function handleResume({ argv, registry }) {
+async function handleResume({ argv, registry, signal }: { argv; registry; signal: AbortSignal }) {
 	const mode = "tool";
 	let approved: boolean | undefined;
 	let response: unknown = undefined;
@@ -573,6 +615,7 @@ async function handleResume({ argv, registry }) {
 					env: process.env,
 					mode: "tool",
 					registry,
+					signal,
 				},
 				resume: payload,
 				approved,
@@ -737,13 +780,14 @@ async function handleResume({ argv, registry }) {
 			mode,
 			input,
 			requestInputResume,
+			signal,
 		});
-		await cleanupIndex();
 		const finalized = await finalizePipelineToolRun({
 			env: process.env,
 			pipeline: remaining,
 			output,
 			previousStateKey,
+			signal,
 		});
 		writeToolEnvelope({
 			ok: true,
@@ -773,7 +817,7 @@ async function readVersion() {
 	return pkg.version ?? "0.0.0";
 }
 
-async function handleDoctor({ argv, registry }) {
+async function handleDoctor({ argv, registry, signal }: { argv; registry; signal: AbortSignal }) {
 	const mode = "tool";
 	const pipeline = "exec --json --shell 'echo [1]'";
 	const output: any = await (async () => {
@@ -788,6 +832,7 @@ async function handleDoctor({ argv, registry }) {
 				stderr: process.stderr,
 				env: process.env,
 				mode,
+				signal,
 			});
 		} catch (err: any) {
 			return { error: err };
