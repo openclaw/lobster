@@ -27,6 +27,7 @@ import {
 	validateCommandInputState,
 	type CommandInputState,
 } from "../input_request.js";
+import { runAbortableProcess } from "../abortable_process.js";
 
 export type WorkflowFile = {
 	name?: string;
@@ -2785,48 +2786,22 @@ async function runShellCommand({
 	killSignal?: NodeJS.Signals;
 }) {
 	signal?.throwIfAborted();
-	const { spawn } = await import("node:child_process");
 	signal?.throwIfAborted();
-
-	return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-		const shell = resolveInlineShellCommand({ command, env });
-		const child = spawn(shell.command, shell.argv, {
-			env,
-			cwd,
-			signal,
-			killSignal,
-			stdio: ["pipe", "pipe", "pipe"],
-		});
-
-		let stdout = "";
-		let stderr = "";
-
-		child.stdout.setEncoding("utf8");
-		child.stderr.setEncoding("utf8");
-
-		child.stdout.on("data", (d) => {
-			stdout += d;
-		});
-		child.stderr.on("data", (d) => {
-			stderr += d;
-		});
-
-		if (typeof stdin === "string") {
-			child.stdin.setDefaultEncoding("utf8");
-			child.stdin.write(stdin);
-		}
-		child.stdin.end();
-
-		child.on("error", reject);
-		child.on("close", (code) => {
-			if (code === 0) return resolve({ stdout, stderr });
-			reject(
-				new Error(
-					`workflow command failed (${code}): ${stderr.trim() || stdout.trim() || command}`,
-				),
-			);
-		});
+	const shell = resolveInlineShellCommand({ command, env });
+	const { stdout, stderr, code } = await runAbortableProcess({
+		command: shell.command,
+		argv: shell.argv,
+		env,
+		cwd,
+		stdin,
+		signal,
+		killSignal,
+		notFoundMessage: `workflow command not found: ${shell.command}`,
 	});
+	if (code === 0) return { stdout, stderr };
+	throw new Error(
+		`workflow command failed (${code}): ${stderr.trim() || stdout.trim() || command}`,
+	);
 }
 
 function getStepExecution(step: WorkflowStep) {

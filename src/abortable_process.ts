@@ -13,7 +13,9 @@ type RunAbortableProcessOptions = {
 	argv: string[];
 	env: NodeJS.ProcessEnv;
 	cwd?: string;
+	stdin?: string | null;
 	signal?: AbortSignal;
+	killSignal?: NodeJS.Signals;
 	notFoundMessage: string;
 };
 
@@ -54,14 +56,16 @@ export function runAbortableProcess({
 	argv,
 	env,
 	cwd,
+	stdin,
 	signal,
+	killSignal,
 	notFoundMessage,
 }: RunAbortableProcessOptions): Promise<ProcessResult> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(command, argv, {
 			env,
 			cwd,
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: ["pipe", "pipe", "pipe"],
 			// A dedicated POSIX process group lets a cancellation reach helpers
 			// that the CLI spawned and then detached from its own lifecycle.
 			detached: process.platform !== "win32",
@@ -76,6 +80,8 @@ export function runAbortableProcess({
 		let settled = false;
 		child.stdout?.on("data", (data) => (stdout += String(data)));
 		child.stderr?.on("data", (data) => (stderr += String(data)));
+		if (typeof stdin === "string") child.stdin?.write(stdin);
+		child.stdin?.end();
 
 		const cleanup = () => {
 			signal?.removeEventListener("abort", onAbort);
@@ -96,7 +102,15 @@ export function runAbortableProcess({
 		const onAbort = () => {
 			if (settled || cancellation || !signal) return;
 			cancellation = abortError(signal);
-			void terminateProcessTree(child, "SIGTERM");
+			const initialKillSignal = killSignal ?? "SIGTERM";
+			if (initialKillSignal === "SIGKILL") {
+				void terminateProcessTree(child, "SIGKILL").finally(() => {
+					forceKillIssued = true;
+					failCancellationWhenTreeIsStopped();
+				});
+				return;
+			}
+			void terminateProcessTree(child, initialKillSignal);
 			forceKillTimer = setTimeout(() => {
 				forceKillTimer = undefined;
 				void terminateProcessTree(child, "SIGKILL").finally(() => {

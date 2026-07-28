@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { runAbortableProcess } from "../../abortable_process.js";
 import { resolveInlineShellCommand } from "../../shell.js";
 
 export const execCommand = {
@@ -86,40 +86,18 @@ export const execCommand = {
 	},
 };
 
-function runProcess(command, argv, { env, cwd, stdin, signal }) {
-	return new Promise<any>((resolve, reject) => {
-		const child = spawn(command, argv, {
-			env,
-			cwd,
-			signal,
-			stdio: ["pipe", "pipe", "pipe"],
-		});
-
-		let stdout = "";
-		let stderr = "";
-
-		child.stdout.setEncoding("utf8");
-		child.stderr.setEncoding("utf8");
-
-		child.stdout.on("data", (d) => {
-			stdout += d;
-		});
-		child.stderr.on("data", (d) => {
-			stderr += d;
-		});
-
-		if (typeof stdin === "string") {
-			child.stdin.setDefaultEncoding("utf8");
-			child.stdin.write(stdin);
-		}
-		child.stdin.end();
-
-		child.on("error", reject);
-		child.on("close", (code) => {
-			if (code === 0) return resolve({ stdout, stderr });
-			reject(new Error(`exec failed (${code}): ${stderr.trim() || stdout.trim() || command}`));
-		});
+async function runProcess(command, argv, { env, cwd, stdin, signal }) {
+	const { stdout, stderr, code } = await runAbortableProcess({
+		command,
+		argv,
+		env,
+		cwd,
+		stdin,
+		signal,
+		notFoundMessage: `exec command not found: ${command}`,
 	});
+	if (code === 0) return { stdout, stderr };
+	throw new Error(`exec failed (${code}): ${stderr.trim() || stdout.trim() || command}`);
 }
 
 function runShellLine(commandLine, { env, cwd, stdin, signal }) {

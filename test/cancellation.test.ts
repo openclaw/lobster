@@ -633,6 +633,99 @@ test("parent cancellation terminates the gog process tree and skips Gmail sends"
 	}
 });
 
+test("workflow shell cancellation terminates descendant processes", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-workflow-shell-"));
+	try {
+		const repoRoot = join(__dirname, "..", "..");
+		const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+		const filePath = join(dir, "workflow.lobster");
+		const searchStarted = join(dir, "search-started");
+		const descendantStarted = join(dir, "descendant-started");
+		const descendantCompleted = join(dir, "descendant-completed");
+		const controller = new AbortController();
+		const command = [process.execPath, mockGog, "gmail", "search"]
+			.map((arg) => JSON.stringify(arg))
+			.join(" ");
+		await writeFile(filePath, JSON.stringify({ steps: [{ id: "shell", run: command }] }), "utf8");
+
+		const run = runToolRequest({
+			filePath,
+			ctx: {
+				cwd: dir,
+				signal: controller.signal,
+				env: {
+					...process.env,
+					MOCK_GOG_SEARCH_STARTED_FILE: searchStarted,
+					MOCK_GOG_DESCENDANT_STARTED_FILE: descendantStarted,
+					MOCK_GOG_DESCENDANT_COMPLETED_FILE: descendantCompleted,
+					MOCK_GOG_TERMINATION_DELAY_MS: "1000",
+				},
+			},
+		});
+
+		await waitForFile(searchStarted);
+		await waitForFile(descendantStarted);
+		const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+		controller.abort();
+		const immediate = await observeSettlement(run, 50);
+		const envelope = await run;
+
+		assert.equal(immediate.settled, false, "workflow must wait for tree termination");
+		assertCancellationEnvelope(envelope);
+		await new Promise((resolve) => setTimeout(resolve, 900));
+		assert.equal(processIsRunning(descendantPid), false);
+		assert.equal(
+			await fileExists(descendantCompleted),
+			false,
+			"a workflow shell descendant must not complete after cancellation",
+		);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("exec cancellation terminates descendant processes", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-exec-"));
+	try {
+		const repoRoot = join(__dirname, "..", "..");
+		const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+		const searchStarted = join(dir, "search-started");
+		const descendantStarted = join(dir, "descendant-started");
+		const descendantCompleted = join(dir, "descendant-completed");
+		const controller = new AbortController();
+		const run = runToolRequest({
+			pipeline: `exec ${process.execPath} ${mockGog} gmail search`,
+			ctx: {
+				signal: controller.signal,
+				env: {
+					...process.env,
+					MOCK_GOG_SEARCH_STARTED_FILE: searchStarted,
+					MOCK_GOG_DESCENDANT_STARTED_FILE: descendantStarted,
+					MOCK_GOG_DESCENDANT_COMPLETED_FILE: descendantCompleted,
+					MOCK_GOG_TERMINATION_DELAY_MS: "1000",
+				},
+			},
+		});
+
+		await waitForFile(searchStarted);
+		await waitForFile(descendantStarted);
+		const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+		controller.abort();
+		const envelope = await run;
+
+		assertCancellationEnvelope(envelope);
+		await new Promise((resolve) => setTimeout(resolve, 900));
+		assert.equal(processIsRunning(descendantPid), false);
+		assert.equal(
+			await fileExists(descendantCompleted),
+			false,
+			"an exec descendant must not complete after cancellation",
+		);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("cancellation after Gmail search completion stops the next pipeline stage", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-search-handoff-"));
 	try {
