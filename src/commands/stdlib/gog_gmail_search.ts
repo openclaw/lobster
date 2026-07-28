@@ -1,60 +1,4 @@
-import { spawn } from "node:child_process";
-
-const ABORT_FORCE_KILL_AFTER_MS = 250;
-
-function run(
-	cmd: string,
-	argv: string[],
-	env: Record<string, string | undefined>,
-	cwd?: string,
-	signal?: AbortSignal,
-) {
-	return new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
-		const child = spawn(cmd, argv, {
-			env: { ...process.env, ...env },
-			cwd,
-			signal,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-
-		let stdout = "";
-		let stderr = "";
-		let abortError: Error | undefined;
-		let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-		let settled = false;
-		child.stdout?.on("data", (d) => (stdout += String(d)));
-		child.stderr?.on("data", (d) => (stderr += String(d)));
-
-		child.on("error", (err: any) => {
-			if (err?.name === "AbortError") {
-				abortError = err;
-				forceKillTimer = setTimeout(() => {
-					if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-				}, ABORT_FORCE_KILL_AFTER_MS);
-				forceKillTimer.unref();
-				return;
-			}
-			if (err?.code === "ENOENT") {
-				settled = true;
-				reject(new Error("gog not found on PATH (install: https://github.com/steipete/gogcli)"));
-				return;
-			}
-			settled = true;
-			reject(err);
-		});
-
-		child.on("close", (code) => {
-			if (forceKillTimer) clearTimeout(forceKillTimer);
-			if (settled) return;
-			settled = true;
-			if (abortError) {
-				reject(abortError);
-				return;
-			}
-			resolve({ stdout, stderr, code });
-		});
-	});
-}
+import { runAbortableProcess } from "../../abortable_process.js";
 
 export const gogGmailSearchCommand = {
 	name: "gog.gmail.search",
@@ -106,8 +50,14 @@ export const gogGmailSearchCommand = {
 		const gogBin = isScript ? process.execPath : gogBinRaw;
 		const argv = isScript ? [gogBinRaw, ...argvBase] : argvBase;
 
-		const res = await run(gogBin, argv, ctx.env, process.cwd(), ctx.signal);
-		ctx.signal?.throwIfAborted();
+		const res = await runAbortableProcess({
+			command: gogBin,
+			argv,
+			env: { ...process.env, ...ctx.env },
+			cwd: process.cwd(),
+			signal: ctx.signal,
+			notFoundMessage: "gog not found on PATH (install: https://github.com/steipete/gogcli)",
+		});
 		if (res.code !== 0) {
 			throw new Error(`gog.gmail.search failed (${res.code ?? "?"}): ${res.stderr.slice(0, 400)}`);
 		}

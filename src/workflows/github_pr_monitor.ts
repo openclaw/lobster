@@ -1,62 +1,16 @@
-import { spawn } from "node:child_process";
+import { runAbortableProcess } from "../abortable_process.js";
 
-const ABORT_FORCE_KILL_AFTER_MS = 250;
-
-function runProcess(command, argv, { env, cwd, signal }) {
-	return new Promise((resolve, reject) => {
-		const child = spawn(command, argv, {
-			env,
-			cwd,
-			signal,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-
-		let stdout = "";
-		let stderr = "";
-		let abortError;
-		let forceKillTimer;
-		let settled = false;
-
-		child.stdout.setEncoding("utf8");
-		child.stderr.setEncoding("utf8");
-
-		child.stdout.on("data", (d) => {
-			stdout += d;
-		});
-		child.stderr.on("data", (d) => {
-			stderr += d;
-		});
-
-		child.on("error", (err: any) => {
-			if (err?.name === "AbortError") {
-				abortError = err;
-				forceKillTimer = setTimeout(() => {
-					if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-				}, ABORT_FORCE_KILL_AFTER_MS);
-				forceKillTimer.unref();
-				return;
-			}
-			if (err?.code === "ENOENT") {
-				settled = true;
-				reject(new Error("gh not found on PATH (install GitHub CLI)"));
-				return;
-			}
-			settled = true;
-			reject(err);
-		});
-
-		child.on("close", (code) => {
-			if (forceKillTimer) clearTimeout(forceKillTimer);
-			if (settled) return;
-			settled = true;
-			if (abortError) {
-				reject(abortError);
-				return;
-			}
-			if (code === 0) return resolve({ stdout, stderr });
-			reject(new Error(`gh failed (${code}): ${stderr.trim() || stdout.trim()}`));
-		});
+async function runProcess(command, argv, { env, cwd, signal }) {
+	const { stdout, stderr, code } = await runAbortableProcess({
+		command,
+		argv,
+		env,
+		cwd,
+		signal,
+		notFoundMessage: "gh not found on PATH (install GitHub CLI)",
 	});
+	if (code === 0) return { stdout, stderr };
+	throw new Error(`gh failed (${code}): ${stderr.trim() || stdout.trim()}`);
 }
 
 import { diffAndStore } from "../state/store.js";

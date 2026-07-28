@@ -1,10 +1,27 @@
 #!/usr/bin/env node
 import { appendFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 
 const argv = process.argv.slice(2);
 
 function mark(path, value) {
 	if (path) writeFileSync(path, value, "utf8");
+}
+
+function startDescendant() {
+	if (!process.env.MOCK_GOG_DESCENDANT_STARTED_FILE) return;
+	const helper = spawn(
+		process.execPath,
+		[
+			"-e",
+			`const { writeFileSync } = require("node:fs");
+process.once("SIGTERM", () => {});
+writeFileSync(process.env.MOCK_GOG_DESCENDANT_STARTED_FILE, String(process.pid));
+setTimeout(() => writeFileSync(process.env.MOCK_GOG_DESCENDANT_COMPLETED_FILE, "completed"), 650);`,
+		],
+		{ env: process.env, stdio: "ignore" },
+	);
+	helper.unref();
 }
 
 function waitForCompletion({ startedFile, terminatedFile, completedFile, output }) {
@@ -15,6 +32,7 @@ function waitForCompletion({ startedFile, terminatedFile, completedFile, output 
 		setTimeout(() => process.exit(143), terminationDelayMs);
 	});
 	mark(startedFile, String(process.pid));
+	startDescendant();
 	setTimeout(() => {
 		mark(completedFile, "completed");
 		process.stdout.write(JSON.stringify(output));

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { access, chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -49,6 +50,13 @@ async function observeSettlement<T>(promise: Promise<T>, timeoutMs: number) {
 }
 
 function processIsRunning(pid: number) {
+	try {
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
+		if (state === "Z") return false;
+	} catch {
+		// /proc is unavailable on Windows and the process may already be reaped.
+	}
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -552,7 +560,7 @@ test("cancellation while draining lazy input prevents a downstream OpenClaw call
 	}
 });
 
-test("parent cancellation terminates gog.gmail.search and skips gog.gmail.send", async () => {
+test("parent cancellation terminates the gog process tree and skips Gmail sends", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-search-"));
 	try {
 		const repoRoot = join(__dirname, "..", "..");
@@ -560,6 +568,8 @@ test("parent cancellation terminates gog.gmail.search and skips gog.gmail.send",
 		const searchStarted = join(dir, "search-started");
 		const searchTerminated = join(dir, "search-terminated");
 		const searchCompleted = join(dir, "search-completed");
+		const descendantStarted = join(dir, "descendant-started");
+		const descendantCompleted = join(dir, "descendant-completed");
 		const sendStarted = join(dir, "send-started");
 		const sendCompleted = join(dir, "send-completed");
 		const controller = new AbortController();
@@ -573,6 +583,8 @@ test("parent cancellation terminates gog.gmail.search and skips gog.gmail.send",
 					MOCK_GOG_SEARCH_STARTED_FILE: searchStarted,
 					MOCK_GOG_SEARCH_TERMINATED_FILE: searchTerminated,
 					MOCK_GOG_SEARCH_COMPLETED_FILE: searchCompleted,
+					MOCK_GOG_DESCENDANT_STARTED_FILE: descendantStarted,
+					MOCK_GOG_DESCENDANT_COMPLETED_FILE: descendantCompleted,
 					MOCK_GOG_SEND_STARTED_FILE: sendStarted,
 					MOCK_GOG_SEND_COMPLETED_FILE: sendCompleted,
 					MOCK_GOG_TERMINATION_DELAY_MS: "1000",
@@ -581,7 +593,9 @@ test("parent cancellation terminates gog.gmail.search and skips gog.gmail.send",
 		});
 
 		await waitForFile(searchStarted);
+		await waitForFile(descendantStarted);
 		const childPid = Number(await readFile(searchStarted, "utf8"));
+		const descendantPid = Number(await readFile(descendantStarted, "utf8"));
 		const abortedAt = Date.now();
 		controller.abort();
 		const immediate = await observeSettlement(run, 50);
@@ -592,9 +606,20 @@ test("parent cancellation terminates gog.gmail.search and skips gog.gmail.send",
 		assert.equal(observed.settled, true, "workflow should settle promptly after parent abort");
 		assertCancellationEnvelope(envelope);
 		await waitForFile(searchTerminated, 500);
+		await new Promise((resolve) => setTimeout(resolve, 700));
 		assert.equal(processIsRunning(childPid), false);
+		assert.equal(
+			processIsRunning(descendantPid),
+			false,
+			"cancellation must kill child processes too",
+		);
 		assert.equal(await fileExists(searchTerminated), true);
 		assert.equal(await fileExists(searchCompleted), false);
+		assert.equal(
+			await fileExists(descendantCompleted),
+			false,
+			"descendants must not continue after abort",
+		);
 		assert.equal(await fileExists(sendStarted), false);
 		assert.equal(await fileExists(sendCompleted), false);
 		if (observed.settled) assert.ok(observed.settledAt - abortedAt < 500);
