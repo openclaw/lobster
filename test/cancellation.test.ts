@@ -59,6 +59,43 @@ async function waitForFile(path: string, timeoutMs = 2000) {
 	throw new Error(`Timed out waiting for ${path}`);
 }
 
+function startLobsterCli({
+	args,
+	cwd,
+	env,
+}: {
+	args: string[];
+	cwd: string;
+	env: NodeJS.ProcessEnv;
+}) {
+	const repoRoot = join(__dirname, "..", "..");
+	const child = spawn(process.execPath, [join(repoRoot, "bin", "lobster.js"), ...args], {
+		cwd,
+		env,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let stdout = "";
+	let stderr = "";
+	child.stdout?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk) => {
+		stdout += chunk;
+	});
+	child.stderr?.setEncoding("utf8");
+	child.stderr?.on("data", (chunk) => {
+		stderr += chunk;
+	});
+	const result = new Promise<{
+		code: number | null;
+		signal: NodeJS.Signals | null;
+		stdout: string;
+		stderr: string;
+	}>((resolve, reject) => {
+		child.once("error", reject);
+		child.once("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
+	});
+	return { child, result };
+}
+
 async function observeSettlement<T>(promise: Promise<T>, timeoutMs: number) {
 	return Promise.race([
 		promise.then((value) => ({ settled: true as const, value, settledAt: Date.now() })),
@@ -957,6 +994,230 @@ test(
 			);
 		} finally {
 			cli?.kill("SIGKILL");
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
+
+test(
+	"CLI SIGINT prevents later pipeline stages from writing state",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-cli-sigint-pipeline-handoff-"));
+		let cli: ReturnType<typeof startLobsterCli> | undefined;
+		try {
+			const repoRoot = join(__dirname, "..", "..");
+			const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+			const stateDir = join(dir, "state");
+			const sendStarted = join(dir, "send-started");
+			const producer = `printf '${JSON.stringify([
+				{ to: "user@example.com", subject: "Hello", body: "World" },
+			])}'`;
+			const pipeline = `exec --json --shell ${JSON.stringify(producer)} | gog.gmail.send | state.set cli_after_abort`;
+			cli = startLobsterCli({
+				args: [pipeline],
+				cwd: dir,
+				env: {
+					...process.env,
+					LOBSTER_STATE_DIR: stateDir,
+					GOG_BIN: mockGog,
+					MOCK_GOG_SEND_STARTED_FILE: sendStarted,
+					MOCK_GOG_COMPLETION_DELAY_MS: "100",
+				},
+			});
+			await waitForFile(sendStarted, 5000);
+			assert.equal(cli.child.kill("SIGINT"), true);
+			const exited = await cli.result;
+
+			assert.equal(exited.signal, null);
+			assert.equal(exited.code, 130, "CLI must retain the conventional SIGINT exit status");
+			assert.equal(await fileExists(keyToPath(stateDir, "cli_after_abort")), false);
+		} finally {
+			cli?.child.kill("SIGKILL");
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
+
+test(
+	"CLI SIGINT consumes a pipeline approval resume after execution starts",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-cli-sigint-pipeline-resume-"));
+		let resumed: ReturnType<typeof startLobsterCli> | undefined;
+		try {
+			const repoRoot = join(__dirname, "..", "..");
+			const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+			const stateDir = join(dir, "state");
+			const sendInvocations = join(dir, "send-invocations");
+			const sendCompleted = join(dir, "send-completed");
+			const searchStarted = join(dir, "search-started");
+			const searchTerminated = join(dir, "search-terminated");
+			const producer = `printf '${JSON.stringify([
+				{ to: "user@example.com", subject: "Hello", body: "World" },
+			])}'`;
+			const pipeline = `exec --json --shell ${JSON.stringify(producer)} | approve --prompt Send? | gog.gmail.send | gog.gmail.search --query newer_than:1d`;
+			const env = {
+				...process.env,
+				LOBSTER_STATE_DIR: stateDir,
+				GOG_BIN: mockGog,
+				MOCK_GOG_SEND_INVOCATIONS_FILE: sendInvocations,
+				MOCK_GOG_SEND_COMPLETED_FILE: sendCompleted,
+				MOCK_GOG_SEARCH_STARTED_FILE: searchStarted,
+				MOCK_GOG_SEARCH_TERMINATED_FILE: searchTerminated,
+				MOCK_GOG_COMPLETION_DELAY_MS: "100",
+			};
+			const first = startLobsterCli({ args: ["run", "--mode", "tool", pipeline], cwd: dir, env });
+			const initial = await first.result;
+			assert.equal(initial.code, 0, initial.stderr);
+			const approval = JSON.parse(initial.stdout).requiresApproval;
+			assert.ok(approval?.resumeToken);
+			assert.ok(approval?.approvalId);
+
+			resumed = startLobsterCli({
+				args: ["resume", "--token", approval.resumeToken, "--approve", "yes"],
+				cwd: dir,
+				env,
+			});
+			await waitForFile(searchStarted, 5000);
+			assert.equal(resumed.child.kill("SIGINT"), true);
+			const exited = await resumed.result;
+
+			assert.equal(exited.signal, null);
+			assert.equal(exited.code, 130);
+			await waitForFile(sendCompleted, 1000);
+			await waitForFile(searchTerminated, 1000);
+			assert.equal((await readFile(sendInvocations, "utf8")).trim().split(/\r?\n/).length, 1);
+			assert.equal(
+				(await listStateFiles(stateDir)).some((name) => /^(approval_|pipeline_resume_)/.test(name)),
+				false,
+			);
+
+			const replayById = startLobsterCli({
+				args: ["resume", "--id", approval.approvalId, "--approve", "yes"],
+				cwd: dir,
+				env,
+			});
+			const idReplay = await replayById.result;
+			assert.equal(idReplay.code, 2);
+			assert.match(idReplay.stdout, /not found or expired/);
+			const replayByToken = startLobsterCli({
+				args: ["resume", "--token", approval.resumeToken, "--approve", "yes"],
+				cwd: dir,
+				env,
+			});
+			const tokenReplay = await replayByToken.result;
+			assert.equal(tokenReplay.code, 1);
+			assert.match(tokenReplay.stdout, /Pipeline resume state not found/);
+			assert.equal(
+				(await readFile(sendInvocations, "utf8")).trim().split(/\r?\n/).length,
+				1,
+				"retrying an interrupted CLI resume must not resend",
+			);
+		} finally {
+			resumed?.child.kill("SIGKILL");
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
+
+test(
+	"CLI SIGINT consumes a workflow approval resume after execution starts",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-cli-sigint-workflow-resume-"));
+		let resumed: ReturnType<typeof startLobsterCli> | undefined;
+		try {
+			const repoRoot = join(__dirname, "..", "..");
+			const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+			const workflow = join(dir, "workflow.lobster");
+			const stateDir = join(dir, "state");
+			const sendInvocations = join(dir, "send-invocations");
+			const sendCompleted = join(dir, "send-completed");
+			const searchStarted = join(dir, "search-started");
+			const searchTerminated = join(dir, "search-terminated");
+			const producer = `printf '${JSON.stringify([
+				{ to: "user@example.com", subject: "Hello", body: "World" },
+			])}'`;
+			await writeFile(
+				workflow,
+				JSON.stringify({
+					steps: [
+						{ id: "confirm", approval: "Send?" },
+						{
+							id: "send",
+							pipeline: `exec --json --shell ${JSON.stringify(producer)} | gog.gmail.send | gog.gmail.search --query newer_than:1d`,
+							when: "$confirm.approved",
+						},
+					],
+				}),
+				"utf8",
+			);
+			const env = {
+				...process.env,
+				LOBSTER_STATE_DIR: stateDir,
+				GOG_BIN: mockGog,
+				MOCK_GOG_SEND_INVOCATIONS_FILE: sendInvocations,
+				MOCK_GOG_SEND_COMPLETED_FILE: sendCompleted,
+				MOCK_GOG_SEARCH_STARTED_FILE: searchStarted,
+				MOCK_GOG_SEARCH_TERMINATED_FILE: searchTerminated,
+				MOCK_GOG_COMPLETION_DELAY_MS: "100",
+			};
+			const first = startLobsterCli({
+				args: ["run", "--mode", "tool", "--file", workflow],
+				cwd: dir,
+				env,
+			});
+			const initial = await first.result;
+			assert.equal(initial.code, 0, initial.stderr);
+			const approval = JSON.parse(initial.stdout).requiresApproval;
+			assert.ok(approval?.resumeToken);
+			assert.ok(approval?.approvalId);
+
+			resumed = startLobsterCli({
+				args: ["resume", "--token", approval.resumeToken, "--approve", "yes"],
+				cwd: dir,
+				env,
+			});
+			await waitForFile(searchStarted, 5000);
+			assert.equal(resumed.child.kill("SIGINT"), true);
+			const exited = await resumed.result;
+
+			assert.equal(exited.signal, null);
+			assert.equal(exited.code, 130);
+			await waitForFile(sendCompleted, 1000);
+			await waitForFile(searchTerminated, 1000);
+			assert.equal((await readFile(sendInvocations, "utf8")).trim().split(/\r?\n/).length, 1);
+			assert.equal(
+				(await listStateFiles(stateDir)).some((name) =>
+					/^(approval_|workflow[-_]resume_)/.test(name),
+				),
+				false,
+			);
+
+			const replayById = startLobsterCli({
+				args: ["resume", "--id", approval.approvalId, "--approve", "yes"],
+				cwd: dir,
+				env,
+			});
+			const idReplay = await replayById.result;
+			assert.equal(idReplay.code, 2);
+			assert.match(idReplay.stdout, /not found or expired/);
+			const replayByToken = startLobsterCli({
+				args: ["resume", "--token", approval.resumeToken, "--approve", "yes"],
+				cwd: dir,
+				env,
+			});
+			const tokenReplay = await replayByToken.result;
+			assert.equal(tokenReplay.code, 1);
+			assert.match(tokenReplay.stdout, /Workflow resume state not found/);
+			assert.equal(
+				(await readFile(sendInvocations, "utf8")).trim().split(/\r?\n/).length,
+				1,
+				"retrying an interrupted workflow resume must not resend",
+			);
+		} finally {
+			resumed?.child.kill("SIGKILL");
 			await rm(dir, { recursive: true, force: true });
 		}
 	},
