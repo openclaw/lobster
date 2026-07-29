@@ -48,6 +48,30 @@ test("runAbortableProcess preserves UTF-8 characters split across pipe chunks", 
 	assert.equal(result.stdout, "€");
 });
 
+test("runAbortableProcess does not spawn when its signal is already aborted", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-aborted-process-"));
+	try {
+		const marker = join(dir, "spawned");
+		const controller = new AbortController();
+		controller.abort(new Error("abort before spawn"));
+
+		await assert.rejects(
+			runAbortableProcess({
+				command: process.execPath,
+				argv: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'spawned')`],
+				env: process.env,
+				signal: controller.signal,
+				notFoundMessage: "node missing",
+			}),
+			/abort before spawn/,
+		);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(await fileExists(marker), false);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 async function fileExists(path: string) {
 	try {
 		await access(path);
@@ -1130,6 +1154,51 @@ test("pipeline cancellation after side effects does not restore the consumed app
 	}
 });
 
+test("same-stage resumed input consumes its capability before a custom command acts on it", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-resumed-input-side-effect-cancel-"));
+	try {
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const controller = new AbortController();
+		let sideEffects = 0;
+		const sideEffectAfterInput = {
+			name: "test.side-effect-after-input",
+			meta: { resumeSafeBeforeInput: true },
+			async run({ ctx }: any) {
+				await ctx.requestInput({ prompt: "Continue?", responseSchema: { type: "object" } });
+				sideEffects += 1;
+				controller.abort(new Error("abort after resumed input side effect"));
+				return { output: streamOf([]) };
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), sideEffectAfterInput);
+		const first = await runToolRequest({
+			pipeline: "test.side-effect-after-input",
+			ctx: { env, registry },
+		});
+		assert.equal(first.status, "needs_input");
+		assert.ok(first.requiresInput?.resumeToken);
+
+		const aborted = await resumeToolRequest({
+			token: first.requiresInput.resumeToken,
+			response: {},
+			ctx: { env, registry, signal: controller.signal },
+		});
+		assertCancellationEnvelope(aborted);
+		assert.equal(sideEffects, 1);
+
+		const replay = await resumeToolRequest({
+			token: first.requiresInput.resumeToken,
+			response: {},
+			ctx: { env, registry },
+		});
+		assert.equal(replay.ok, false);
+		assert.notEqual(replay.status, "needs_input");
+		assert.equal(sideEffects, 1);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("workflow approval resume restores its original capability after next-input cleanup is cancelled", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-input-gate-cleanup-abort-workflow-resume-"));
 	try {
@@ -1446,6 +1515,123 @@ test("cancellation before a non-terminal lazy handoff does not wait for its next
 	);
 	assert.equal(settled.settled, true, "cancellation must not wait for the stalled lazy handoff");
 	if (settled.settled) assertCancellationEnvelope(settled.value);
+});
+
+test("cancellable lazy output releases a pending read before cancellation returns", async () => {
+	const controller = new AbortController();
+	let readStarted!: () => void;
+	const pendingReadStarted = new Promise<void>((resolve) => {
+		readStarted = resolve;
+	});
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let resolveNext!: (value: IteratorResult<unknown>) => void;
+	let abortCalled = false;
+	const source = {
+		name: "test.cancellable-lazy-output",
+		async run() {
+			return {
+				output: {
+					abort() {
+						abortCalled = true;
+						if (timer) clearTimeout(timer);
+						resolveNext({ done: true, value: undefined });
+					},
+					[Symbol.asyncIterator]() {
+						return {
+							next() {
+								readStarted();
+								return new Promise<IteratorResult<unknown>>((resolve) => {
+									resolveNext = resolve;
+									timer = setTimeout(() => resolve({ done: true, value: undefined }), 2000);
+								});
+							},
+							async return() {
+								return { done: true, value: undefined };
+							},
+						};
+					},
+				},
+			};
+		},
+	};
+	const downstream = {
+		name: "test.cancellable-lazy-downstream",
+		async run({ input }: { input: AsyncIterable<unknown> }) {
+			for await (const _item of input) {
+				// Draining begins the source's pending read.
+			}
+			return { output: streamOf([]) };
+		},
+	};
+
+	try {
+		const run = runToolRequest({
+			pipeline: "test.cancellable-lazy-output | test.cancellable-lazy-downstream",
+			ctx: {
+				registry: withCommands(createDefaultRegistry(), source, downstream),
+				signal: controller.signal,
+			},
+		});
+		await pendingReadStarted;
+		controller.abort(new Error("abort cancellable lazy output"));
+		const settled = await observeSettlement(run, 500);
+		assert.equal(settled.settled, true, "cancellation must release the pending lazy read");
+		if (settled.settled) assertCancellationEnvelope(settled.value);
+		assert.equal(abortCalled, true);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+});
+
+test("native lazy generators finish their pending cleanup before cancellation returns", async () => {
+	const controller = new AbortController();
+	let readStarted!: () => void;
+	const pendingReadStarted = new Promise<void>((resolve) => {
+		readStarted = resolve;
+	});
+	let sourceClosed = false;
+	const source = {
+		name: "test.native-lazy-output",
+		async run() {
+			return {
+				output: (async function* () {
+					try {
+						readStarted();
+						await new Promise((resolve) => setTimeout(resolve, 25));
+					} finally {
+						sourceClosed = true;
+					}
+				})(),
+			};
+		},
+	};
+	const downstream = {
+		name: "test.native-lazy-downstream",
+		async run({ input }: { input: AsyncIterable<unknown> }) {
+			for await (const _item of input) {
+				// Draining begins the source's pending read.
+			}
+			return { output: streamOf([]) };
+		},
+	};
+
+	const run = runToolRequest({
+		pipeline: "test.native-lazy-output | test.native-lazy-downstream",
+		ctx: {
+			registry: withCommands(createDefaultRegistry(), source, downstream),
+			signal: controller.signal,
+		},
+	});
+	await pendingReadStarted;
+	controller.abort(new Error("abort native lazy output"));
+	const settled = await observeSettlement(run, 500);
+	assert.equal(settled.settled, true, "cancellation must wait for native generator cleanup");
+	if (settled.settled) assertCancellationEnvelope(settled.value);
+	assert.equal(
+		sourceClosed,
+		true,
+		"native generator cleanup must finish before cancellation returns",
+	);
 });
 
 test("cancellation during lazy handoff stops yielding items to the downstream stage", async () => {

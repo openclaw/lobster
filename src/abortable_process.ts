@@ -62,6 +62,12 @@ export function runAbortableProcess({
 	notFoundMessage,
 }: RunAbortableProcessOptions): Promise<ProcessResult> {
 	return new Promise((resolve, reject) => {
+		try {
+			signal?.throwIfAborted();
+		} catch (err) {
+			reject(err);
+			return;
+		}
 		const child = spawn(command, argv, {
 			env,
 			cwd,

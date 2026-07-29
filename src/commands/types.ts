@@ -9,6 +9,12 @@ export type CommandMeta = {
 	 * is cancelled: its original capability cannot be replayed after dispatch.
 	 */
 	resumeSafeBeforeInput?: boolean;
+	/**
+	 * The command remains side-effect-free after returning a resumed input until
+	 * the next pipeline stage dispatches. This is intentionally opt-in so a
+	 * command that acts on a resumed response consumes its capability first.
+	 */
+	resumeSafeAfterInput?: boolean;
 };
 
 export type LobsterCommand = {
