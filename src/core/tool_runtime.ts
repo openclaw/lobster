@@ -11,6 +11,7 @@ import {
 	deleteApprovalId,
 	findStateKeyByApprovalId,
 	cleanupApprovalIndexByStateKey,
+	writeStateJson,
 } from "../state/store.js";
 import {
 	WorkflowResumeArgumentError,
@@ -314,6 +315,10 @@ export async function resumeToolRequest({
 		: resumeState.haltType === "input_request"
 			? [response]
 			: resumeState.items;
+	const abortedBeforeResume = runtime.signal?.aborted === true;
+	let pipelineResumeStateRestored = false;
+	let pipelineExecutionStarted = false;
+	let pipelineInputResponseConsumed = false;
 	const requestInputResume = isSameStageInput
 		? {
 				state: resumeState.commandInput!,
@@ -321,12 +326,10 @@ export async function resumeToolRequest({
 				onConsumed: async () => {
 					await cleanupIndex();
 					await deleteStateJson({ env: runtime.env, key: payload.stateKey });
+					pipelineInputResponseConsumed = true;
 				},
 			}
 		: undefined;
-	const abortedBeforeResume = runtime.signal?.aborted === true;
-	let pipelineResumeStateRestored = false;
-	let pipelineExecutionStarted = false;
 
 	try {
 		const output = await runPipeline({
@@ -368,6 +371,18 @@ export async function resumeToolRequest({
 		);
 	} catch (err: any) {
 		const abortedResume = runtime.signal?.aborted === true;
+		if (
+			abortedResume &&
+			!abortedBeforeResume &&
+			!pipelineExecutionStarted &&
+			!pipelineResumeStateRestored &&
+			pipelineInputResponseConsumed
+		) {
+			// A same-stage input response was consumed, but no command dispatch
+			// occurred. Restore the capability so cancellation cannot burn it.
+			await writeStateJson({ env: runtime.env, key: payload.stateKey, value: resumeState });
+			pipelineResumeStateRestored = true;
+		}
 		if (
 			abortedResume &&
 			!abortedBeforeResume &&

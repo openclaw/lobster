@@ -139,7 +139,7 @@ export async function runPipeline({
 		if (Array.isArray(output)) {
 			stream = output;
 			await finishStage();
-		} else if (output && !stageHalted && idx < pipeline.length - 1) {
+		} else if (output && idx < pipeline.length - 1) {
 			commandActive = false;
 			inactiveReason = "requestInput cannot suspend from lazy output before downstream stages";
 			assertRequestInputResumeConsumed(stageResume);

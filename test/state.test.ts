@@ -488,10 +488,12 @@ test("diffAndStore reclaims an old lock after its owner PID is reused", async ()
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-reused-pid-lock-"));
 	const env = { LOBSTER_STATE_DIR: tmp };
 	const lockPath = `${keyToPath(tmp, "snapshot")}.lock`;
+	const ownerPath = path.join(lockPath, "owner");
 	await fsp.mkdir(lockPath);
-	await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}:stale-owner\n`, "utf8");
+	await fsp.writeFile(ownerPath, `${process.pid}:0:stale-owner\n`, "utf8");
 	const staleAt = new Date(Date.now() - 10_000);
 	await fsp.utimes(lockPath, staleAt, staleAt);
+	await fsp.utimes(ownerPath, staleAt, staleAt);
 
 	const controller = new AbortController();
 	const timeout = setTimeout(

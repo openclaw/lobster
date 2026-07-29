@@ -621,6 +621,67 @@ test("pipeline approval resume remains retryable when a resume-safe stage aborts
 	}
 });
 
+test("same-stage ask resume restores its token when cancellation wins before execution", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-same-stage-ask-cancel-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const sideEffect = createCountingSideEffect("test.same-stage-ask-side-effect");
+		const registry = withCommands(createDefaultRegistry(), sideEffect.command);
+		const first = await runToolRequest({
+			pipeline: "ask --prompt First? | test.same-stage-ask-side-effect",
+			ctx: { env, registry },
+		});
+		assert.equal(first.status, "needs_input");
+		assert.ok(first.requiresInput?.resumeToken);
+		const payload = decodeResumeToken(first.requiresInput.resumeToken);
+		const statePath = keyToPath(stateDir, payload.stateKey);
+
+		const controller = new AbortController();
+		const originalUnlink = fsp.unlink;
+		let stateDeleted = false;
+		Object.defineProperty(fsp, "unlink", {
+			configurable: true,
+			writable: true,
+			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
+				const result = await originalUnlink(filePath);
+				if (String(filePath) === statePath && !controller.signal.aborted) {
+					stateDeleted = true;
+					controller.abort(new Error("abort after same-stage ask state cleanup"));
+				}
+				return result;
+			},
+		});
+		let aborted;
+		try {
+			aborted = await resumeToolRequest({
+				token: first.requiresInput.resumeToken,
+				response: { decision: "approve" },
+				ctx: { env, registry, signal: controller.signal },
+			});
+		} finally {
+			Object.defineProperty(fsp, "unlink", {
+				configurable: true,
+				writable: true,
+				value: originalUnlink,
+			});
+		}
+		assertCancellationEnvelope(aborted!);
+		assert.equal(stateDeleted, true);
+		assert.equal(sideEffect.invocations, 0);
+
+		const retried = await resumeToolRequest({
+			token: first.requiresInput.resumeToken,
+			response: { decision: "approve" },
+			ctx: { env, registry },
+		});
+		assert.equal(retried.ok, true);
+		assert.equal(sideEffect.invocations, 1);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("pre-aborted workflow approval resume remains retryable", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-abort-workflow-resume-"));
 	try {
@@ -1311,6 +1372,41 @@ test("cancellation observed before terminal drain is reported after output clean
 	assertCancellationEnvelope(envelope);
 	assert.equal(envelope.error?.message, "abort before terminal drain");
 	assert.equal(outputDrained, true, "terminal output cleanup must complete before cancellation");
+});
+
+test("cancellation before a non-terminal lazy handoff does not wait for its next item", async () => {
+	const controller = new AbortController();
+	const source = {
+		name: "test.abort-before-lazy-handoff",
+		async run() {
+			controller.abort(new Error("abort before lazy handoff"));
+			return {
+				output: {
+					[Symbol.asyncIterator]() {
+						return {
+							next: () => new Promise<IteratorResult<unknown>>(() => {}),
+							async return() {
+								return { done: true, value: undefined };
+							},
+						};
+					},
+				},
+			};
+		},
+	};
+
+	const settled = await observeSettlement(
+		runToolRequest({
+			pipeline: "test.abort-before-lazy-handoff | test.unreached",
+			ctx: {
+				registry: withCommands(createDefaultRegistry(), source),
+				signal: controller.signal,
+			},
+		}),
+		500,
+	);
+	assert.equal(settled.settled, true, "cancellation must not wait for the stalled lazy handoff");
+	if (settled.settled) assertCancellationEnvelope(settled.value);
 });
 
 test("cancellation during lazy handoff stops yielding items to the downstream stage", async () => {
