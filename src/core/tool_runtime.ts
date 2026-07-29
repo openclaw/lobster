@@ -326,6 +326,7 @@ export async function resumeToolRequest({
 		: undefined;
 	const abortedBeforeResume = runtime.signal?.aborted === true;
 	let pipelineResumeStateRestored = false;
+	let pipelineExecutionStarted = false;
 
 	try {
 		const output = await runPipeline({
@@ -342,6 +343,9 @@ export async function resumeToolRequest({
 			haltAfterStageOnAbort: true,
 			input,
 			requestInputResume,
+			onExecutionStart: () => {
+				pipelineExecutionStarted = true;
+			},
 		});
 
 		const finalized = await finalizePipelineToolRun({
@@ -350,7 +354,7 @@ export async function resumeToolRequest({
 			output,
 			previousStateKey: payload.stateKey,
 			previousState: resumeState,
-			restorePreviousStateOnAbort: output.halted === true && output.executionStarted !== true,
+			restorePreviousStateOnAbort: output.halted === true && !pipelineExecutionStarted,
 			onPreviousStateRestored: () => {
 				pipelineResumeStateRestored = true;
 			},
@@ -364,7 +368,12 @@ export async function resumeToolRequest({
 		);
 	} catch (err: any) {
 		const abortedResume = runtime.signal?.aborted === true;
-		if (abortedResume && !abortedBeforeResume && !pipelineResumeStateRestored) {
+		if (
+			abortedResume &&
+			!abortedBeforeResume &&
+			pipelineExecutionStarted &&
+			!pipelineResumeStateRestored
+		) {
 			await cleanupIndex();
 			await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 		}

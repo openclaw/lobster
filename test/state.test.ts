@@ -484,6 +484,35 @@ test("diffAndStore reclaims an old lock with a malformed owner", async () => {
 	await assert.rejects(fsp.access(lockPath));
 });
 
+test("diffAndStore reclaims an old lock after its owner PID is reused", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-reused-pid-lock-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	const lockPath = `${keyToPath(tmp, "snapshot")}.lock`;
+	await fsp.mkdir(lockPath);
+	await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}:stale-owner\n`, "utf8");
+	const staleAt = new Date(Date.now() - 10_000);
+	await fsp.utimes(lockPath, staleAt, staleAt);
+
+	const controller = new AbortController();
+	const timeout = setTimeout(
+		() => controller.abort(new Error("reused lock was not reclaimed")),
+		250,
+	);
+	try {
+		await diffAndStore({
+			env,
+			key: "snapshot",
+			value: { version: "recovered" },
+			signal: controller.signal,
+		});
+	} finally {
+		clearTimeout(timeout);
+	}
+	assert.equal(controller.signal.aborted, false);
+	assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { version: "recovered" });
+	await assert.rejects(fsp.access(lockPath));
+});
+
 test("SDK diff primitives treat corrupt previous state as a miss (#112)", async () => {
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-sdk-diff-corrupt-"));
 	const ctx = { env: { LOBSTER_STATE_DIR: tmp } };

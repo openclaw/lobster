@@ -573,6 +573,54 @@ test("pre-aborted pipeline input resume remains retryable", async () => {
 	}
 });
 
+test("pipeline approval resume remains retryable when a resume-safe stage aborts before input", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-safe-input-setup-abort-"));
+	try {
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const controller = new AbortController();
+		let abortBeforeInput = true;
+		const safeInput = {
+			name: "test.resume-safe-before-input",
+			meta: { resumeSafeBeforeInput: true },
+			async run({ ctx }: any) {
+				if (abortBeforeInput) {
+					abortBeforeInput = false;
+					controller.abort(new Error("abort before resume-safe input"));
+				}
+				await ctx.requestInput({
+					prompt: "Second?",
+					responseSchema: { type: "object" },
+				});
+				return { output: [] };
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), safeInput);
+		const first = await runToolRequest({
+			pipeline: "approve --prompt First? | test.resume-safe-before-input",
+			ctx: { env, registry },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const aborted = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { env, registry, signal: controller.signal },
+		});
+		assertCancellationEnvelope(aborted);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { env, registry },
+		});
+		assert.equal(retried.status, "needs_input");
+		assert.equal(retried.requiresInput?.prompt, "Second?");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("pre-aborted workflow approval resume remains retryable", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-abort-workflow-resume-"));
 	try {
@@ -1067,6 +1115,40 @@ test("workflow approval resume restores its original capability after next-input
 			ctx: { cwd: dir, env },
 		});
 		assert.equal(retried.status, "needs_input");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("workflow gate replacement retires the superseded approval index", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-gate-index-retirement-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "confirm", approval: "Continue?" },
+					{ id: "answer", input: { prompt: "Second?", responseSchema: { type: "object" } } },
+				],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		const oldIndexPath = join(stateDir, `approval_${first.requiresApproval.approvalId}.json`);
+		assert.equal(await fileExists(oldIndexPath), true);
+
+		const resumed = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(resumed.status, "needs_input");
+		assert.equal(await fileExists(oldIndexPath), false);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

@@ -1919,6 +1919,12 @@ async function replaceWorkflowResumeState({
 		await deleteStateJson({ env, key: previousStateKey });
 	}
 	signal?.throwIfAborted();
+	if (previousStateKey && previousStateKey !== replacementStateKey) {
+		// The replacement is committed once its predecessor has been removed.
+		// Do not add another cancellation checkpoint after retiring its old
+		// approval capability: the outer rollback path must be able to restore it.
+		await cleanupApprovalIndexByStateKey({ env, stateKey: previousStateKey }).catch(() => {});
+	}
 }
 
 async function restoreWorkflowResumeState({

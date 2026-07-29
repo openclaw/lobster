@@ -24,6 +24,7 @@ export async function runPipeline({
 	dryRun = false,
 	requestInputResume = undefined,
 	requestInputEnabled = true,
+	onExecutionStart = undefined,
 }: {
 	pipeline: any[];
 	registry: any;
@@ -40,6 +41,7 @@ export async function runPipeline({
 	dryRun?: boolean;
 	requestInputResume?: CommandInputResume | undefined;
 	requestInputEnabled?: boolean;
+	onExecutionStart?: (() => void) | undefined;
 }) {
 	if (dryRun) {
 		return dryRunPipeline({ pipeline, registry, stderr });
@@ -51,6 +53,11 @@ export async function runPipeline({
 	let haltedAt = null;
 	let pipelineOutputStarted = false;
 	let executionStarted = false;
+	const markExecutionStarted = () => {
+		if (executionStarted) return;
+		executionStarted = true;
+		onExecutionStart?.();
+	};
 
 	const baseCtx = {
 		stdin,
@@ -72,7 +79,7 @@ export async function runPipeline({
 			throw new Error(`Unknown command: ${stage.name}`);
 		}
 		if (command.meta?.resumeSafeBeforeInput !== true) {
-			executionStarted = true;
+			markExecutionStarted();
 		}
 
 		const inputTracker = createInputTracker(stream);

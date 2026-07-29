@@ -46,6 +46,7 @@ type AtomicExclusiveWriteOptions = {
 
 const STATE_LOCK_RETRY_MS = 10;
 const STATE_LOCK_ORPHAN_MS = 1_000;
+const STATE_LOCK_HEARTBEAT_MS = 250;
 
 function isDirectorySyncUnsupportedError(err: any): boolean {
 	return [
@@ -136,27 +137,72 @@ function isProcessAlive(pid: number) {
 	}
 }
 
+type StateLockOwner = {
+	pid: number;
+	processStartIdentity: string | null;
+	nonce: string;
+};
+
+function parseStateLockOwner(ownerText: string): StateLockOwner | null {
+	const parts = ownerText.trim().split(":");
+	if (parts.length !== 3) return null;
+	const pid = Number(parts[0]);
+	const processStartIdentity = parts[1] || null;
+	const nonce = parts[2];
+	if (!Number.isInteger(pid) || pid <= 0 || !nonce) return null;
+	return { pid, processStartIdentity, nonce };
+}
+
+async function readProcessStartIdentity(pid: number): Promise<string | null> {
+	if (process.platform !== "linux") return null;
+	try {
+		const stat = await fsp.readFile(`/proc/${pid}/stat`, "utf8");
+		const closeParen = stat.lastIndexOf(")");
+		if (closeParen < 0) return null;
+		// The remainder starts at procfs field 3; starttime is field 22.
+		const fields = stat
+			.slice(closeParen + 1)
+			.trim()
+			.split(/\s+/);
+		return fields[19] || null;
+	} catch {
+		return null;
+	}
+}
+
+async function isStateLockOld(lockPath: string) {
+	try {
+		const stat = await fsp.stat(lockPath);
+		return Date.now() - stat.mtimeMs >= STATE_LOCK_ORPHAN_MS;
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return true;
+		throw err;
+	}
+}
+
 async function reclaimOrphanedStateLock(lockPath: string) {
 	let stale = false;
 	try {
 		const ownerPath = path.join(lockPath, "owner");
 		const ownerText = (await fsp.readFile(ownerPath, "utf8")).trim();
-		const owner = Number(ownerText.split(":", 1)[0]);
-		if (Number.isInteger(owner) && owner > 0) {
-			stale = !isProcessAlive(owner);
+		const owner = parseStateLockOwner(ownerText);
+		if (owner && isProcessAlive(owner.pid)) {
+			const processStartIdentity = await readProcessStartIdentity(owner.pid);
+			if (owner.processStartIdentity && processStartIdentity) {
+				stale = owner.processStartIdentity !== processStartIdentity;
+			} else {
+				// A live PID without a matching process-instance identity may have
+				// been reused. Active writers renew this lease while holding the lock.
+				stale = await isStateLockOld(ownerPath);
+			}
+		} else if (owner) {
+			stale = true;
 		} else {
-			const stat = await fsp.stat(lockPath);
-			stale = Date.now() - stat.mtimeMs >= STATE_LOCK_ORPHAN_MS;
+			stale = await isStateLockOld(lockPath);
 		}
 	} catch (err: any) {
 		if (err?.code === "ENOENT") {
-			try {
-				const stat = await fsp.stat(lockPath);
-				stale = Date.now() - stat.mtimeMs >= STATE_LOCK_ORPHAN_MS;
-			} catch (statErr: any) {
-				if (statErr?.code === "ENOENT") return true;
-				throw statErr;
-			}
+			stale = await isStateLockOld(lockPath);
 		} else {
 			throw err;
 		}
@@ -190,17 +236,24 @@ async function withStateKeyLock<T>({
 	const lockPath = `${keyToPath(stateDir, key)}.lock`;
 	let acquired = false;
 	let owner: string | undefined;
+	let heartbeat: ReturnType<typeof setInterval> | undefined;
 	try {
 		while (!acquired) {
 			signal?.throwIfAborted();
 			try {
 				await fsp.mkdir(lockPath, { mode: 0o700 });
 				acquired = true;
-				owner = `${process.pid}:${randomBytes(6).toString("hex")}\n`;
+				const processStartIdentity = await readProcessStartIdentity(process.pid);
+				owner = `${process.pid}:${processStartIdentity ?? ""}:${randomBytes(6).toString("hex")}\n`;
 				await fsp.writeFile(path.join(lockPath, "owner"), owner, {
 					encoding: "utf8",
 					mode: 0o600,
 				});
+				const ownerPath = path.join(lockPath, "owner");
+				heartbeat = setInterval(() => {
+					void fsp.utimes(ownerPath, new Date(), new Date()).catch(() => {});
+				}, STATE_LOCK_HEARTBEAT_MS);
+				heartbeat.unref?.();
 			} catch (err: any) {
 				if (acquired) throw err;
 				if (err?.code !== "EEXIST") throw err;
@@ -211,6 +264,7 @@ async function withStateKeyLock<T>({
 		}
 		return await task();
 	} finally {
+		if (heartbeat) clearInterval(heartbeat);
 		if (acquired) {
 			const ownerPath = path.join(lockPath, "owner");
 			const currentOwner = await fsp.readFile(ownerPath, "utf8").catch(() => undefined);
