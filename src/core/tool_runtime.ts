@@ -307,7 +307,6 @@ export async function resumeToolRequest({
 	const abortedBeforeResume = runtime.signal?.aborted === true;
 	let pipelineResumeStateRestored = false;
 	let pipelineExecutionStarted = false;
-	let pipelineInputResponseConsumed = false;
 	const requestInputResume = isSameStageInput
 		? {
 				state: resumeState.commandInput!,
@@ -315,7 +314,6 @@ export async function resumeToolRequest({
 				onConsumed: async () => {
 					await cleanupIndex();
 					await deleteStateJson({ env: runtime.env, key: payload.stateKey });
-					pipelineInputResponseConsumed = true;
 				},
 			}
 		: undefined;
@@ -346,12 +344,13 @@ export async function resumeToolRequest({
 			output,
 			previousStateKey: payload.stateKey,
 			previousState: resumeState,
-			restorePreviousStateOnAbort: output.halted === true && !pipelineExecutionStarted,
+			restorePreviousStateOnAbort: !pipelineExecutionStarted,
 			onPreviousStateRestored: () => {
 				pipelineResumeStateRestored = true;
 			},
 			signal: runtime.signal,
 		});
+		if (finalized.status === "ok") await cleanupIndex();
 		return okEnvelope(
 			finalized.status,
 			finalized.output,
@@ -364,11 +363,10 @@ export async function resumeToolRequest({
 			abortedResume &&
 			!abortedBeforeResume &&
 			!pipelineExecutionStarted &&
-			!pipelineResumeStateRestored &&
-			pipelineInputResponseConsumed
+			!pipelineResumeStateRestored
 		) {
-			// A same-stage input response was consumed, but no command dispatch
-			// occurred. Restore the capability so cancellation cannot burn it.
+			// No command dispatch occurred, so cancellation must leave the original
+			// approval or input capability retryable.
 			await writeStateJson({ env: runtime.env, key: payload.stateKey, value: resumeState });
 			pipelineResumeStateRestored = true;
 		}

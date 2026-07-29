@@ -209,10 +209,14 @@ export async function finalizePipelineToolRun(params: {
 
 	params.signal?.throwIfAborted();
 	if (params.previousStateKey) {
-		await cleanupApprovalIndexByStateKey({ env: params.env, stateKey: params.previousStateKey });
-		await deleteStateJson({ env: params.env, key: params.previousStateKey });
+		try {
+			await deleteStateJson({ env: params.env, key: params.previousStateKey });
+			params.signal?.throwIfAborted();
+		} catch (err) {
+			await restorePreviousPipelineResumeState(params);
+			throw err;
+		}
 	}
-	params.signal?.throwIfAborted();
 	return {
 		status: "ok",
 		output: params.output.items,

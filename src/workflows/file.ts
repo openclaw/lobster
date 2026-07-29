@@ -172,7 +172,8 @@ type RunContext = {
 	dryRun?: boolean;
 	_activeWorkflows?: Set<string>;
 	_onResumeStateResolved?: (stateKey: string) => void;
-	_onExecutionCancelled?: () => void;
+	_onExecutionStarted?: () => void;
+	_onExecutionInterrupted?: () => void;
 };
 
 export type WorkflowResumePayload = {
@@ -711,15 +712,16 @@ export async function runWorkflowFile({
 		? await loadWorkflowResumeState(ctx.env, consumedResumeStateKey ?? resume.stateKey)
 		: (resume ?? null);
 	let resumedExecutionStarted = false;
-	let resumedExecutionCancelled = false;
+	let resumedExecutionInterrupted = false;
 	const executionSignalListeners: Array<{ signal: AbortSignal; onAbort: () => void }> = [];
 	const markExecutionStarted = (signal?: AbortSignal) => {
-		if (!consumedResumeStateKey && !ctx._onExecutionCancelled) return;
+		if (!consumedResumeStateKey && !ctx._onExecutionStarted && !ctx._onExecutionInterrupted) return;
 		if (consumedResumeStateKey) resumedExecutionStarted = true;
+		ctx._onExecutionStarted?.();
 		if (!signal) return;
 		const onAbort = () => {
-			if (consumedResumeStateKey) resumedExecutionCancelled = true;
-			ctx._onExecutionCancelled?.();
+			if (consumedResumeStateKey) resumedExecutionInterrupted = true;
+			ctx._onExecutionInterrupted?.();
 		};
 		if (signal.aborted) {
 			onAbort();
@@ -1287,7 +1289,6 @@ export async function runWorkflowFile({
 						childActive.add(canonicalWorkflowPath);
 						const subArgs = resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results);
 						stepSignal?.throwIfAborted();
-						markExecutionStarted(stepSignal);
 						const subResult = await runWorkflowFile({
 							filePath: resolvedWorkflowPath,
 							args: subArgs,
@@ -1297,9 +1298,13 @@ export async function runWorkflowFile({
 								cwd,
 								signal: stepSignal,
 								_activeWorkflows: childActive,
-								_onExecutionCancelled: () => {
-									resumedExecutionCancelled = true;
-									ctx._onExecutionCancelled?.();
+								_onExecutionStarted: () => {
+									resumedExecutionStarted = true;
+									ctx._onExecutionStarted?.();
+								},
+								_onExecutionInterrupted: () => {
+									resumedExecutionInterrupted = true;
+									ctx._onExecutionInterrupted?.();
 								},
 							},
 						});
@@ -1390,9 +1395,8 @@ export async function runWorkflowFile({
 										return false;
 									}
 									const message = error?.message ?? String(error);
-									return (
-										!/halted (for approval inside|before completion at) pipeline/.test(message) &&
-										!resumedExecutionCancelled
+									return !/halted (for approval inside|before completion at) pipeline/.test(
+										message,
 									);
 								},
 								onRetry: (attempt, error, delayMs) => {
@@ -1402,9 +1406,6 @@ export async function runWorkflowFile({
 								},
 							})
 						: await executeStepAttempt();
-				if (resumedExecutionCancelled) {
-					throw new Error(`Workflow step '${step.id}' cancelled after execution started`);
-				}
 				result = attemptResult.result;
 				parallelBranchResults = attemptResult.parallelBranchResults;
 			} catch (err: any) {
@@ -1471,7 +1472,7 @@ export async function runWorkflowFile({
 				if (err instanceof RequestInputResumeError) {
 					throw err;
 				}
-				if (ctx.signal?.aborted || resumedExecutionCancelled) {
+				if (ctx.signal?.aborted) {
 					throw err;
 				}
 				if (
@@ -1620,7 +1621,7 @@ export async function runWorkflowFile({
 		}
 		return runResult;
 	} catch (err) {
-		if (resumedExecutionCancelled && resumedExecutionStarted && consumedResumeStateKey) {
+		if (resumedExecutionInterrupted && resumedExecutionStarted && consumedResumeStateKey) {
 			await cleanupApprovalIndexByStateKey({
 				env: ctx.env,
 				stateKey: consumedResumeStateKey,

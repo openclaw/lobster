@@ -924,12 +924,14 @@ test("workflow approval resume remains retryable when child workflow setup is ca
 		const controller = new AbortController();
 		const originalRealpath = fsp.realpath;
 		let childSetupObserved = false;
+		let childRealpathCalls = 0;
 		Object.defineProperty(fsp, "realpath", {
 			configurable: true,
 			writable: true,
 			async value(filePath: Parameters<typeof fsp.realpath>[0]) {
 				const resolved = await originalRealpath(filePath);
-				if (String(filePath) === childPath && !controller.signal.aborted) {
+				if (String(filePath) === childPath) childRealpathCalls += 1;
+				if (childRealpathCalls === 2 && !controller.signal.aborted) {
 					childSetupObserved = true;
 					controller.abort(new Error("abort during child workflow setup"));
 				}
@@ -952,11 +954,71 @@ test("workflow approval resume remains retryable when child workflow setup is ca
 		}
 		assertCancellationEnvelope(aborted!);
 		assert.equal(childSetupObserved, true);
+		assert.equal(childRealpathCalls, 2);
 
 		const retried = await resumeToolRequest({
 			approvalId: first.requiresApproval.approvalId,
 			approved: true,
 			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.ok, true);
+		assert.equal(retried.status, "ok");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("terminal pipeline approval resume restores its original approval ID when cleanup is cancelled", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-terminal-pipeline-cleanup-abort-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const first = await runToolRequest({
+			pipeline: "approve --prompt First?",
+			ctx: { env },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const previousStatePath = keyToPath(stateDir, payload.stateKey);
+
+		const controller = new AbortController();
+		const originalUnlink = fsp.unlink;
+		let previousStateDeleted = false;
+		Object.defineProperty(fsp, "unlink", {
+			configurable: true,
+			writable: true,
+			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
+				const result = await originalUnlink(filePath);
+				if (String(filePath) === previousStatePath && !controller.signal.aborted) {
+					previousStateDeleted = true;
+					controller.abort(new Error("abort during terminal pipeline approval cleanup"));
+				}
+				return result;
+			},
+		});
+		let aborted;
+		try {
+			aborted = await resumeToolRequest({
+				approvalId: first.requiresApproval.approvalId,
+				approved: true,
+				ctx: { env, signal: controller.signal },
+			});
+		} finally {
+			Object.defineProperty(fsp, "unlink", {
+				configurable: true,
+				writable: true,
+				value: originalUnlink,
+			});
+		}
+		assertCancellationEnvelope(aborted!);
+		assert.equal(previousStateDeleted, true);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { env },
 		});
 		assert.equal(retried.ok, true);
 		assert.equal(retried.status, "ok");
