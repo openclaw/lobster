@@ -247,10 +247,13 @@ export async function resumeToolRequest({
 			});
 
 			if (output.status === "needs_approval") {
-				// Don't clean up index — next gate will issue a new approvalId
+				// The next gate owns its own approval ID. Remove any index for the
+				// state that was just replaced so it cannot become a stale capability.
+				await cleanupIndex(workflowResumeStateKey).catch(() => {});
 				return okEnvelope("needs_approval", [], output.requiresApproval ?? null, null);
 			}
 			if (output.status === "needs_input") {
+				await cleanupIndex(workflowResumeStateKey).catch(() => {});
 				return okEnvelope("needs_input", [], null, output.requiresInput ?? null);
 			}
 			await cleanupIndex(workflowResumeStateKey);

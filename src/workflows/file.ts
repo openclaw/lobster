@@ -905,10 +905,12 @@ export async function runWorkflowFile({
 							ctx.signal,
 						);
 
-						if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
-							await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
-						}
-						ctx.signal?.throwIfAborted();
+						await replaceWorkflowResumeState({
+							env: ctx.env,
+							previousStateKey: consumedResumeStateKey,
+							replacementStateKey: stateKey,
+							signal: ctx.signal,
+						});
 
 						const resumeToken = encodeToken({
 							protocolVersion: 1,
@@ -926,6 +928,11 @@ export async function runWorkflowFile({
 							},
 						};
 					} catch (err) {
+						await restoreWorkflowResumeState({
+							env: ctx.env,
+							stateKey: consumedResumeStateKey,
+							state: resumeState,
+						});
 						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
 						throw err;
 					}
@@ -1388,10 +1395,12 @@ export async function runWorkflowFile({
 							ctx.signal,
 						);
 
-						if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
-							await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
-						}
-						ctx.signal?.throwIfAborted();
+						await replaceWorkflowResumeState({
+							env: ctx.env,
+							previousStateKey: consumedResumeStateKey,
+							replacementStateKey: stateKey,
+							signal: ctx.signal,
+						});
 
 						const resumeToken = encodeToken({
 							protocolVersion: 1,
@@ -1409,6 +1418,11 @@ export async function runWorkflowFile({
 							},
 						};
 					} catch (stateError) {
+						await restoreWorkflowResumeState({
+							env: ctx.env,
+							stateKey: consumedResumeStateKey,
+							state: resumeState,
+						});
 						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
 						throw stateError;
 					}
@@ -1489,10 +1503,12 @@ export async function runWorkflowFile({
 
 						const approvalId = await createApprovalIndex({ env: ctx.env, stateKey });
 						ctx.signal?.throwIfAborted();
-						if (consumedResumeStateKey && consumedResumeStateKey !== stateKey) {
-							await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
-						}
-						ctx.signal?.throwIfAborted();
+						await replaceWorkflowResumeState({
+							env: ctx.env,
+							previousStateKey: consumedResumeStateKey,
+							replacementStateKey: stateKey,
+							signal: ctx.signal,
+						});
 
 						const resumeToken = encodeToken({
 							protocolVersion: 1,
@@ -1511,6 +1527,11 @@ export async function runWorkflowFile({
 							},
 						};
 					} catch (err) {
+						await restoreWorkflowResumeState({
+							env: ctx.env,
+							stateKey: consumedResumeStateKey,
+							state: resumeState,
+						});
 						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
 						throw err;
 					}
@@ -1535,10 +1556,22 @@ export async function runWorkflowFile({
 			}
 		}
 
-		ctx.signal?.throwIfAborted();
 		const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
 		if (consumedResumeStateKey) {
-			await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+			try {
+				ctx.signal?.throwIfAborted();
+				await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+				ctx.signal?.throwIfAborted();
+			} catch (err) {
+				await restoreWorkflowResumeState({
+					env: ctx.env,
+					stateKey: consumedResumeStateKey,
+					state: resumeState,
+				});
+				throw err;
+			}
+		} else {
+			ctx.signal?.throwIfAborted();
 		}
 		const runResult: WorkflowRunResult = { status: "ok", output };
 		if (costTracker.hasUsage()) {
@@ -1867,6 +1900,36 @@ async function saveWorkflowResumeState(
 		if (signal?.aborted) await discardWorkflowResumeState(env, stateKey);
 		throw err;
 	}
+}
+
+async function replaceWorkflowResumeState({
+	env,
+	previousStateKey,
+	replacementStateKey,
+	signal,
+}: {
+	env: Record<string, string | undefined>;
+	previousStateKey: string | null;
+	replacementStateKey: string;
+	signal?: AbortSignal;
+}) {
+	if (previousStateKey && previousStateKey !== replacementStateKey) {
+		await deleteStateJson({ env, key: previousStateKey });
+	}
+	signal?.throwIfAborted();
+}
+
+async function restoreWorkflowResumeState({
+	env,
+	stateKey,
+	state,
+}: {
+	env: Record<string, string | undefined>;
+	stateKey: string | null;
+	state: WorkflowResumeState | WorkflowResumePayload | null;
+}) {
+	if (!stateKey || !state) return;
+	await writeStateJson({ env, key: stateKey, value: state });
 }
 
 async function discardWorkflowResumeState(

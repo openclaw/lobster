@@ -763,6 +763,157 @@ test("workflow approval resume remains retryable when cancellation creates its n
 	}
 });
 
+test("workflow approval resume restores its original capability after next-input cleanup is cancelled", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-input-gate-cleanup-abort-workflow-resume-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "confirm", approval: "Continue?" },
+					{ id: "answer", input: { prompt: "Continue?", responseSchema: { type: "object" } } },
+				],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const controller = new AbortController();
+		const signal = controller.signal;
+		const throwIfAborted = signal.throwIfAborted.bind(signal);
+		let signalChecks = 0;
+		Object.defineProperty(signal, "throwIfAborted", {
+			value() {
+				signalChecks += 1;
+				if (signalChecks === 5) {
+					controller.abort(new Error("abort after next-input state replaced the approval state"));
+				}
+				throwIfAborted();
+			},
+		});
+		const aborted = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, signal, env },
+		});
+		assertCancellationEnvelope(aborted);
+		assert.equal(signalChecks, 5);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.status, "needs_input");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("workflow approval resume restores its original capability after next-approval cleanup is cancelled", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-approval-gate-cleanup-abort-workflow-resume-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "first", approval: "Continue?" },
+					{ id: "second", approval: "Confirm again?" },
+				],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const controller = new AbortController();
+		const signal = controller.signal;
+		const throwIfAborted = signal.throwIfAborted.bind(signal);
+		let signalChecks = 0;
+		Object.defineProperty(signal, "throwIfAborted", {
+			value() {
+				signalChecks += 1;
+				if (signalChecks === 6) {
+					controller.abort(
+						new Error("abort after next-approval state replaced the approval state"),
+					);
+				}
+				throwIfAborted();
+			},
+		});
+		const aborted = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, signal, env },
+		});
+		assertCancellationEnvelope(aborted);
+		assert.equal(signalChecks, 6);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.status, "needs_approval");
+		assert.equal(retried.requiresApproval?.prompt, "Confirm again?");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("terminal workflow approval resume restores its original capability when cleanup is cancelled", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-terminal-cleanup-abort-workflow-resume-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		await writeFile(
+			filePath,
+			JSON.stringify({ steps: [{ id: "confirm", approval: "Continue?" }] }),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const controller = new AbortController();
+		const signal = controller.signal;
+		const throwIfAborted = signal.throwIfAborted.bind(signal);
+		let signalChecks = 0;
+		Object.defineProperty(signal, "throwIfAborted", {
+			value() {
+				signalChecks += 1;
+				if (signalChecks === 2) {
+					controller.abort(new Error("abort during terminal workflow resume cleanup"));
+				}
+				throwIfAborted();
+			},
+		});
+		const aborted = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, signal, env },
+		});
+		assertCancellationEnvelope(aborted);
+		assert.equal(signalChecks, 2);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.ok, true);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("cancellation while draining terminal lazy output returns cancellation", async () => {
 	const controller = new AbortController();
 	let outputDrained = false;
