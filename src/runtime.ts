@@ -134,12 +134,13 @@ export async function runPipeline({
 			rendered = true;
 		}
 
-		let stageHalted = Boolean(result?.halt || (haltAfterStageOnAbort && signal?.aborted));
+		const terminalOutput = Boolean(result?.halt);
+		let stageHalted = Boolean(terminalOutput || (haltAfterStageOnAbort && signal?.aborted));
 		const output = result?.output;
 		if (Array.isArray(output)) {
 			stream = output;
 			await finishStage();
-		} else if (output && idx < pipeline.length - 1) {
+		} else if (output && idx < pipeline.length - 1 && !terminalOutput) {
 			commandActive = false;
 			inactiveReason = "requestInput cannot suspend from lazy output before downstream stages";
 			assertRequestInputResumeConsumed(stageResume);

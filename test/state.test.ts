@@ -444,16 +444,8 @@ test("diffAndStore serializes cancellation rollback before a concurrent snapshot
 	await cancelledSnapshotPublished;
 
 	let successfulSnapshotPublished = false;
-	const successful = writeStateJson({
-		env,
-		key: "snapshot",
-		value: { version: "successful-B" },
-		atomicWriteOptions: {
-			async renameFile(from, to) {
-				await fsp.rename(from, to);
-				successfulSnapshotPublished = true;
-			},
-		},
+	const successful = writeState("snapshot", { version: "successful-B" }, { env }).then(() => {
+		successfulSnapshotPublished = true;
 	});
 	await new Promise((resolve) => setTimeout(resolve, 20));
 	assert.equal(successfulSnapshotPublished, false, "the next writer must wait for rollback");

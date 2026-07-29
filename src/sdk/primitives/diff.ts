@@ -14,56 +14,12 @@
  *   });
  */
 
-import { promises as fsp } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { ensureDirectory, isJsonSyntaxError, writeFileAtomic } from "../../state/store.js";
+import { diffAndStore } from "../../state/store.js";
 
-/**
- * Get the state directory
- * @param {Object} ctx
- * @returns {string}
- */
-function getStateDir(ctx) {
-	return (
-		ctx?.stateDir ||
-		(ctx?.env?.LOBSTER_STATE_DIR && String(ctx.env.LOBSTER_STATE_DIR).trim()) ||
-		path.join(os.homedir(), ".lobster", "state")
-	);
-}
-
-/**
- * Convert a key to a safe file path
- * @param {string} stateDir
- * @param {string} key
- * @returns {string}
- */
-function keyToPath(stateDir, key) {
-	const safe = String(key)
-		.toLowerCase()
-		.replace(/[^a-z0-9._-]+/g, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "");
-	if (!safe) throw new Error("state key is empty/invalid");
-	return path.join(stateDir, `${safe}.json`);
-}
-
-/**
- * Stable JSON stringify for comparison
- * @param {any} value
- * @returns {string}
- */
-function stableStringify(value) {
-	return JSON.stringify(value, (_k, v) => {
-		if (v && typeof v === "object" && !Array.isArray(v)) {
-			return Object.fromEntries(
-				Object.keys(v)
-					.sort()
-					.map((k) => [k, v[k]]),
-			);
-		}
-		return v;
-	});
+function stateEnv(ctx) {
+	return ctx?.stateDir
+		? { ...(ctx?.env ?? process.env), LOBSTER_STATE_DIR: ctx.stateDir }
+		: (ctx?.env ?? process.env);
 }
 
 /**
@@ -95,26 +51,11 @@ export function diffLast(key, options: any = {}) {
 
 			const value = items.length === 1 ? items[0] : items;
 
-			const stateDir = getStateDir(ctx);
-			const filePath = keyToPath(stateDir, key);
-
-			// Read previous value
-			let before = null;
-			try {
-				const text = await fsp.readFile(filePath, "utf8");
-				before = JSON.parse(text);
-			} catch (err) {
-				if (err?.code !== "ENOENT" && !isJsonSyntaxError(err)) {
-					throw err;
-				}
-			}
-
-			// Compare
-			const changed = stableStringify(before) !== stableStringify(value);
-
-			// Store new value
-			await ensureDirectory(stateDir);
-			await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n");
+			const { before, after, changed } = await diffAndStore({
+				env: stateEnv(ctx),
+				key,
+				value,
+			});
 
 			// Build result
 			const result = {
@@ -122,7 +63,7 @@ export function diffLast(key, options: any = {}) {
 				key,
 				changed,
 				before,
-				after: value,
+				after,
 			};
 
 			// If changesOnly and no change, output suppressed marker
@@ -151,26 +92,5 @@ export function diffLast(key, options: any = {}) {
  * @returns {Promise<{before: any, after: any, changed: boolean}>}
  */
 export async function diffAndStoreValue(key, value, ctx = {}) {
-	const stateDir = getStateDir(ctx);
-	const filePath = keyToPath(stateDir, key);
-
-	// Read previous value
-	let before = null;
-	try {
-		const text = await fsp.readFile(filePath, "utf8");
-		before = JSON.parse(text);
-	} catch (err) {
-		if (err?.code !== "ENOENT" && !isJsonSyntaxError(err)) {
-			throw err;
-		}
-	}
-
-	// Compare
-	const changed = stableStringify(before) !== stableStringify(value);
-
-	// Store new value
-	await ensureDirectory(stateDir);
-	await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n");
-
-	return { before, after: value, changed };
+	return diffAndStore({ env: stateEnv(ctx), key, value });
 }

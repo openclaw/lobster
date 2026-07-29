@@ -1374,6 +1374,45 @@ test("cancellation observed before terminal drain is reported after output clean
 	assert.equal(outputDrained, true, "terminal output cleanup must complete before cancellation");
 });
 
+test("cancellation drains a halted lazy output before a later pipeline stage", async () => {
+	const controller = new AbortController();
+	let outputDrained = false;
+	let downstreamRan = false;
+	const terminal = {
+		name: "test.halted-output-before-later-stage",
+		async run() {
+			controller.abort(new Error("abort before halted output drain"));
+			return {
+				halt: true,
+				output: (async function* () {
+					yield { cleanup: true };
+					outputDrained = true;
+				})(),
+			};
+		},
+	};
+	const downstream = {
+		name: "test.halted-output-unreached",
+		async run() {
+			downstreamRan = true;
+			return { output: [] };
+		},
+	};
+
+	const envelope = await runToolRequest({
+		pipeline: "test.halted-output-before-later-stage | test.halted-output-unreached",
+		ctx: {
+			registry: withCommands(createDefaultRegistry(), terminal, downstream),
+			signal: controller.signal,
+		},
+	});
+
+	assertCancellationEnvelope(envelope);
+	assert.equal(envelope.error?.message, "abort before halted output drain");
+	assert.equal(outputDrained, true, "halted output cleanup must complete before cancellation");
+	assert.equal(downstreamRan, false, "a halted stage must not dispatch later pipeline stages");
+});
+
 test("cancellation before a non-terminal lazy handoff does not wait for its next item", async () => {
 	const controller = new AbortController();
 	const source = {
