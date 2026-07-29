@@ -1090,7 +1090,7 @@ export async function runWorkflowFile({
 				parallelBranchResults: Record<string, WorkflowStepResult> | null;
 			}> => {
 				ctx.signal?.throwIfAborted();
-				if (execution.kind !== "none") {
+				if (execution.kind !== "none" && execution.kind !== "workflow") {
 					ctx._onExecutionStart?.();
 				}
 				// Combine external cancellation and optional per-step timeout into one signal.
@@ -1264,6 +1264,8 @@ export async function runWorkflowFile({
 						const childActive = new Set(activeWorkflows);
 						childActive.add(canonicalWorkflowPath);
 						const subArgs = resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results);
+						ctx.signal?.throwIfAborted();
+						ctx._onExecutionStart?.();
 						const subResult = await runWorkflowFile({
 							filePath: resolvedWorkflowPath,
 							args: subArgs,

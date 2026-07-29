@@ -97,6 +97,9 @@ export async function finalizePipelineToolRun(params: {
 	pipeline: PipelineResumeState["pipeline"];
 	output: PipelineRunOutput;
 	previousStateKey?: string;
+	previousState?: PipelineResumeState;
+	restorePreviousStateOnAbort?: boolean;
+	onPreviousStateRestored?: () => void;
 	signal?: AbortSignal;
 }): Promise<PipelineToolRunResolution> {
 	params.signal?.throwIfAborted();
@@ -118,15 +121,12 @@ export async function finalizePipelineToolRun(params: {
 			);
 			let approvalId: string | null;
 			approvalId = await createApprovalIndex({ env: params.env, stateKey: nextStateKey });
-			params.signal?.throwIfAborted();
-			if (params.previousStateKey) {
-				await cleanupApprovalIndexByStateKey({
-					env: params.env,
-					stateKey: params.previousStateKey,
-				});
-				await deleteStateJson({ env: params.env, key: params.previousStateKey });
-			}
-			params.signal?.throwIfAborted();
+			await replacePipelineResumeState({
+				env: params.env,
+				previousStateKey: params.previousStateKey,
+				replacementStateKey: nextStateKey,
+				signal: params.signal,
+			});
 			const resumeToken = encodeToken({
 				protocolVersion: 1,
 				v: 1,
@@ -144,6 +144,7 @@ export async function finalizePipelineToolRun(params: {
 				requiresInput: null,
 			};
 		} catch (err) {
+			await restorePreviousPipelineResumeState(params);
 			if (nextStateKey) await discardPipelineResumeState(params.env, nextStateKey);
 			throw err;
 		}
@@ -171,14 +172,12 @@ export async function finalizePipelineToolRun(params: {
 				},
 				params.signal,
 			);
-			if (params.previousStateKey) {
-				await cleanupApprovalIndexByStateKey({
-					env: params.env,
-					stateKey: params.previousStateKey,
-				});
-				await deleteStateJson({ env: params.env, key: params.previousStateKey });
-			}
-			params.signal?.throwIfAborted();
+			await replacePipelineResumeState({
+				env: params.env,
+				previousStateKey: params.previousStateKey,
+				replacementStateKey: nextStateKey,
+				signal: params.signal,
+			});
 			const resumeToken = encodeToken({
 				protocolVersion: 1,
 				v: 1,
@@ -199,6 +198,7 @@ export async function finalizePipelineToolRun(params: {
 				},
 			};
 		} catch (err) {
+			await restorePreviousPipelineResumeState(params);
 			if (nextStateKey) await discardPipelineResumeState(params.env, nextStateKey);
 			throw err;
 		}
@@ -233,6 +233,45 @@ export async function savePipelineResumeState(
 		if (signal?.aborted) await discardPipelineResumeState(env, stateKey);
 		throw err;
 	}
+}
+
+async function replacePipelineResumeState({
+	env,
+	previousStateKey,
+	replacementStateKey,
+	signal,
+}: {
+	env: Record<string, string | undefined>;
+	previousStateKey?: string;
+	replacementStateKey: string;
+	signal?: AbortSignal;
+}) {
+	if (previousStateKey && previousStateKey !== replacementStateKey) {
+		await deleteStateJson({ env, key: previousStateKey });
+	}
+	signal?.throwIfAborted();
+}
+
+async function restorePreviousPipelineResumeState({
+	env,
+	previousStateKey,
+	previousState,
+	restorePreviousStateOnAbort,
+	onPreviousStateRestored,
+	signal,
+}: {
+	env: Record<string, string | undefined>;
+	previousStateKey?: string;
+	previousState?: PipelineResumeState;
+	restorePreviousStateOnAbort?: boolean;
+	onPreviousStateRestored?: () => void;
+	signal?: AbortSignal;
+}) {
+	if (!signal?.aborted || !restorePreviousStateOnAbort || !previousStateKey || !previousState) {
+		return;
+	}
+	await writeStateJson({ env, key: previousStateKey, value: previousState });
+	onPreviousStateRestored?.();
 }
 
 async function discardPipelineResumeState(

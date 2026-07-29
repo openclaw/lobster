@@ -325,6 +325,7 @@ export async function resumeToolRequest({
 			}
 		: undefined;
 	const abortedBeforeResume = runtime.signal?.aborted === true;
+	let pipelineResumeStateRestored = false;
 
 	try {
 		const output = await runPipeline({
@@ -348,6 +349,11 @@ export async function resumeToolRequest({
 			pipeline: remaining,
 			output,
 			previousStateKey: payload.stateKey,
+			previousState: resumeState,
+			restorePreviousStateOnAbort: output.halted === true && (output.haltedAt?.index ?? -1) === 0,
+			onPreviousStateRestored: () => {
+				pipelineResumeStateRestored = true;
+			},
 			signal: runtime.signal,
 		});
 		return okEnvelope(
@@ -358,7 +364,7 @@ export async function resumeToolRequest({
 		);
 	} catch (err: any) {
 		const abortedResume = runtime.signal?.aborted === true;
-		if (abortedResume && !abortedBeforeResume) {
+		if (abortedResume && !abortedBeforeResume && !pipelineResumeStateRestored) {
 			await cleanupIndex();
 			await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 		}

@@ -413,6 +413,62 @@ test("diffAndStore removes a newly published snapshot when cancellation arrives 
 	assert.deepEqual(leftovers, []);
 });
 
+test("diffAndStore serializes cancellation rollback before a concurrent snapshot update", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-cancel-concurrent-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	await writeStateJson({ env, key: "snapshot", value: { version: "before" } });
+
+	const controller = new AbortController();
+	let publishCancelledSnapshot!: () => void;
+	const cancelledSnapshotPublished = new Promise<void>((resolve) => {
+		publishCancelledSnapshot = resolve;
+	});
+	let allowCancellation!: () => void;
+	const waitForCancellation = new Promise<void>((resolve) => {
+		allowCancellation = resolve;
+	});
+	const cancelled = diffAndStore({
+		env,
+		key: "snapshot",
+		value: { version: "cancelled-A" },
+		signal: controller.signal,
+		atomicWriteOptions: {
+			async renameFile(from, to) {
+				await fsp.rename(from, to);
+				publishCancelledSnapshot();
+				await waitForCancellation;
+			},
+		},
+	});
+	await cancelledSnapshotPublished;
+
+	let successfulSnapshotPublished = false;
+	const successful = diffAndStore({
+		env,
+		key: "snapshot",
+		value: { version: "successful-B" },
+		atomicWriteOptions: {
+			async renameFile(from, to) {
+				await fsp.rename(from, to);
+				successfulSnapshotPublished = true;
+			},
+		},
+	});
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(successfulSnapshotPublished, false, "the next writer must wait for rollback");
+
+	controller.abort(new Error("abort during concurrent atomic rename"));
+	allowCancellation();
+	await assert.rejects(cancelled, /abort during concurrent atomic rename/);
+	await successful;
+	assert.equal(successfulSnapshotPublished, true);
+	assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { version: "successful-B" });
+	const leftovers = (await fsp.readdir(tmp)).filter(
+		(file) => file.includes(".tmp") || file.endsWith(".lock"),
+	);
+	assert.deepEqual(leftovers, []);
+});
+
 test("SDK diff primitives treat corrupt previous state as a miss (#112)", async () => {
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-sdk-diff-corrupt-"));
 	const ctx = { env: { LOBSTER_STATE_DIR: tmp } };

@@ -44,6 +44,9 @@ type AtomicExclusiveWriteOptions = {
 	syncParentDir?: (filePath: string) => Promise<void>;
 };
 
+const STATE_LOCK_RETRY_MS = 10;
+const STATE_LOCK_ORPHAN_MS = 1_000;
+
 function isDirectorySyncUnsupportedError(err: any): boolean {
 	return [
 		"EACCES",
@@ -100,6 +103,108 @@ export async function ensureDirectory(dir: string) {
 
 export function isJsonSyntaxError(err) {
 	return err instanceof SyntaxError;
+}
+
+async function waitForStateLock(signal?: AbortSignal) {
+	await new Promise<void>((resolve, reject) => {
+		const onAbort = () => {
+			clearTimeout(timer);
+			try {
+				signal?.throwIfAborted();
+			} catch (err) {
+				reject(err);
+			}
+		};
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, STATE_LOCK_RETRY_MS);
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+function isProcessAlive(pid: number) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err: any) {
+		return err?.code !== "ESRCH";
+	}
+}
+
+async function reclaimOrphanedStateLock(lockPath: string) {
+	let stale = false;
+	try {
+		const ownerPath = path.join(lockPath, "owner");
+		const owner = Number((await fsp.readFile(ownerPath, "utf8")).trim());
+		stale = Number.isInteger(owner) && owner > 0 && !isProcessAlive(owner);
+	} catch (err: any) {
+		if (err?.code === "ENOENT") {
+			try {
+				const stat = await fsp.stat(lockPath);
+				stale = Date.now() - stat.mtimeMs >= STATE_LOCK_ORPHAN_MS;
+			} catch (statErr: any) {
+				if (statErr?.code === "ENOENT") return true;
+				throw statErr;
+			}
+		} else {
+			throw err;
+		}
+	}
+	if (!stale) return false;
+
+	const orphanPath = `${lockPath}.${randomBytes(6).toString("hex")}.orphan`;
+	try {
+		await fsp.rename(lockPath, orphanPath);
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return true;
+		throw err;
+	}
+	await fsp.rm(orphanPath, { recursive: true, force: true });
+	return true;
+}
+
+async function withStateKeyLock<T>({
+	env,
+	key,
+	signal,
+	task,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	signal?: AbortSignal;
+	task: () => Promise<T>;
+}): Promise<T> {
+	const stateDir = defaultStateDir(env);
+	await ensureDirectory(stateDir);
+	const lockPath = `${keyToPath(stateDir, key)}.lock`;
+	let acquired = false;
+	try {
+		while (!acquired) {
+			signal?.throwIfAborted();
+			try {
+				await fsp.mkdir(lockPath, { mode: 0o700 });
+				acquired = true;
+				await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}\n`, {
+					encoding: "utf8",
+					mode: 0o600,
+				});
+			} catch (err: any) {
+				if (acquired) throw err;
+				if (err?.code !== "EEXIST") throw err;
+				if (!(await reclaimOrphanedStateLock(lockPath))) {
+					await waitForStateLock(signal);
+				}
+			}
+		}
+		return await task();
+	} finally {
+		if (acquired) await fsp.rm(lockPath, { recursive: true, force: true }).catch(() => {});
+	}
 }
 
 function isLinkUnsupportedError(err: any): boolean {
@@ -414,24 +519,31 @@ export async function diffAndStore({
 	signal?: AbortSignal;
 	atomicWriteOptions?: Omit<AtomicWriteOptions, "signal">;
 }) {
-	const before = await readStateJson({ env, key }).catch((err) => {
-		if (isJsonSyntaxError(err)) return null;
-		throw err;
-	});
-	const changed = stableStringify(before) !== stableStringify(value);
-	try {
-		signal?.throwIfAborted();
-		await writeStateJson({ env, key, value, signal, atomicWriteOptions });
-		signal?.throwIfAborted();
-	} catch (err) {
-		if (signal?.aborted) {
-			if (before === null) {
-				await deleteStateJson({ env, key });
-			} else {
-				await writeStateJson({ env, key, value: before });
+	return withStateKeyLock({
+		env,
+		key,
+		signal,
+		task: async () => {
+			const before = await readStateJson({ env, key }).catch((err) => {
+				if (isJsonSyntaxError(err)) return null;
+				throw err;
+			});
+			const changed = stableStringify(before) !== stableStringify(value);
+			try {
+				signal?.throwIfAborted();
+				await writeStateJson({ env, key, value, signal, atomicWriteOptions });
+				signal?.throwIfAborted();
+			} catch (err) {
+				if (signal?.aborted) {
+					if (before === null) {
+						await deleteStateJson({ env, key });
+					} else {
+						await writeStateJson({ env, key, value: before });
+					}
+				}
+				throw err;
 			}
-		}
-		throw err;
-	}
-	return { before, after: value, changed };
+			return { before, after: value, changed };
+		},
+	});
 }

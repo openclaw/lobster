@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { promises as fsp, readFileSync } from "node:fs";
 import {
 	access,
 	chmod,
@@ -758,6 +758,193 @@ test("workflow approval resume remains retryable when cancellation creates its n
 			ctx: { cwd: dir, env },
 		});
 		assert.equal(retried.status, "needs_input");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("workflow approval resume remains retryable when child workflow setup is cancelled", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-child-setup-abort-workflow-resume-"));
+	try {
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const parentPath = join(dir, "parent.lobster");
+		const childPath = join(dir, "child.lobster");
+		await writeFile(
+			parentPath,
+			JSON.stringify({
+				steps: [
+					{ id: "confirm", approval: "Continue?" },
+					{ id: "child", workflow: "child.lobster" },
+				],
+			}),
+			"utf8",
+		);
+		await writeFile(
+			childPath,
+			JSON.stringify({ steps: [{ id: "child-step", run: "true" }] }),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath: parentPath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const controller = new AbortController();
+		const originalRealpath = fsp.realpath;
+		let childSetupObserved = false;
+		Object.defineProperty(fsp, "realpath", {
+			configurable: true,
+			writable: true,
+			async value(filePath: Parameters<typeof fsp.realpath>[0]) {
+				const resolved = await originalRealpath(filePath);
+				if (String(filePath) === childPath && !controller.signal.aborted) {
+					childSetupObserved = true;
+					controller.abort(new Error("abort during child workflow setup"));
+				}
+				return resolved;
+			},
+		});
+		let aborted;
+		try {
+			aborted = await resumeToolRequest({
+				approvalId: first.requiresApproval.approvalId,
+				approved: true,
+				ctx: { cwd: dir, signal: controller.signal, env },
+			});
+		} finally {
+			Object.defineProperty(fsp, "realpath", {
+				configurable: true,
+				writable: true,
+				value: originalRealpath,
+			});
+		}
+		assertCancellationEnvelope(aborted!);
+		assert.equal(childSetupObserved, true);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.ok, true);
+		assert.equal(retried.status, "ok");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("pipeline approval resume restores its original capability after next-approval cleanup is cancelled", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pipeline-approval-cleanup-abort-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const first = await runToolRequest({
+			pipeline: "approve --prompt First? | approve --prompt Second?",
+			ctx: { env },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const previousStatePath = keyToPath(stateDir, payload.stateKey);
+
+		const controller = new AbortController();
+		const originalUnlink = fsp.unlink;
+		let previousStateDeleted = false;
+		Object.defineProperty(fsp, "unlink", {
+			configurable: true,
+			writable: true,
+			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
+				const result = await originalUnlink(filePath);
+				if (String(filePath) === previousStatePath && !controller.signal.aborted) {
+					previousStateDeleted = true;
+					controller.abort(new Error("abort after previous pipeline approval state deletion"));
+				}
+				return result;
+			},
+		});
+		let aborted;
+		try {
+			aborted = await resumeToolRequest({
+				approvalId: first.requiresApproval.approvalId,
+				approved: true,
+				ctx: { env, signal: controller.signal },
+			});
+		} finally {
+			Object.defineProperty(fsp, "unlink", {
+				configurable: true,
+				writable: true,
+				value: originalUnlink,
+			});
+		}
+		assertCancellationEnvelope(aborted!);
+		assert.equal(previousStateDeleted, true);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { env },
+		});
+		assert.equal(retried.status, "needs_approval");
+		assert.equal(retried.requiresApproval?.prompt, "Second?");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("pipeline approval resume restores its original capability after next-input cleanup is cancelled", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pipeline-input-cleanup-abort-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const first = await runToolRequest({
+			pipeline: `approve --prompt First? | ask --emit --prompt Second? --schema '${JSON.stringify({ type: "object" })}'`,
+			ctx: { env },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const previousStatePath = keyToPath(stateDir, payload.stateKey);
+
+		const controller = new AbortController();
+		const originalUnlink = fsp.unlink;
+		let previousStateDeleted = false;
+		Object.defineProperty(fsp, "unlink", {
+			configurable: true,
+			writable: true,
+			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
+				const result = await originalUnlink(filePath);
+				if (String(filePath) === previousStatePath && !controller.signal.aborted) {
+					previousStateDeleted = true;
+					controller.abort(new Error("abort after previous pipeline input state deletion"));
+				}
+				return result;
+			},
+		});
+		let aborted;
+		try {
+			aborted = await resumeToolRequest({
+				approvalId: first.requiresApproval.approvalId,
+				approved: true,
+				ctx: { env, signal: controller.signal },
+			});
+		} finally {
+			Object.defineProperty(fsp, "unlink", {
+				configurable: true,
+				writable: true,
+				value: originalUnlink,
+			});
+		}
+		assertCancellationEnvelope(aborted!);
+		assert.equal(previousStateDeleted, true);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { env },
+		});
+		assert.equal(retried.status, "needs_input");
+		assert.equal(retried.requiresInput?.prompt, "Second?");
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
