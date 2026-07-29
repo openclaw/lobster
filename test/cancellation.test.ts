@@ -1593,13 +1593,13 @@ test("cancellable lazy output releases a pending read before cancellation return
 		async run() {
 			return {
 				output: {
-					abort() {
-						abortCalled = true;
-						if (timer) clearTimeout(timer);
-						resolveNext({ done: true, value: undefined });
-					},
 					[Symbol.asyncIterator]() {
 						return {
+							abort() {
+								abortCalled = true;
+								if (timer) clearTimeout(timer);
+								resolveNext({ done: true, value: undefined });
+							},
 							next() {
 								readStarted();
 								return new Promise<IteratorResult<unknown>>((resolve) => {
@@ -3059,6 +3059,70 @@ test("explicit cancellation consumes an aliased workflow resume state", async ()
 		});
 		assert.equal(replayByToken.ok, false);
 		assert.match(replayByToken.error?.message ?? "", /Workflow resume state not found/);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("explicit cancellation stops waiting for a state lock without orphaning its approval ID", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-explicit-cancel-lock-abort-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const first = await runToolRequest({
+			pipeline: "approve --prompt Continue?",
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const lockPath = `${keyToPath(stateDir, payload.stateKey)}.lock`;
+		const approvalIndexPath = join(stateDir, `approval_${first.requiresApproval.approvalId}.json`);
+		await fsp.mkdir(lockPath);
+		await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+		const controller = new AbortController();
+		const pending = resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			cancel: true,
+			ctx: { cwd: dir, env, signal: controller.signal },
+		});
+		const completion = pending.then(
+			() => ({ kind: "success" as const }),
+			(error) => ({ kind: "error" as const, error }),
+		);
+		await new Promise((resolve) => setImmediate(resolve));
+		controller.abort(new Error("explicit cancellation stopped while waiting for a state lock"));
+		const early = await Promise.race([
+			completion,
+			new Promise<{ kind: "timeout" }>((resolve) =>
+				setTimeout(() => resolve({ kind: "timeout" }), 75),
+			),
+		]);
+		if (early.kind === "timeout") await rm(lockPath, { recursive: true, force: true });
+		const settled = early.kind === "timeout" ? await completion : early;
+
+		assert.notEqual(
+			early.kind,
+			"timeout",
+			"explicit cancellation must not remain blocked on a state lock",
+		);
+		assert.equal(settled.kind, "error");
+		if (settled.kind === "error") {
+			assert.match(
+				settled.error?.message ?? "",
+				/explicit cancellation stopped while waiting for a state lock/,
+			);
+		}
+		assert.equal(
+			await fileExists(approvalIndexPath),
+			true,
+			"the approval ID must remain usable after cancellation",
+		);
+		assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), true);
+		await rm(lockPath, { recursive: true, force: true });
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

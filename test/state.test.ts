@@ -534,6 +534,37 @@ test("diffAndStore does not reclaim a live fallback lock after a short heartbeat
 	assert.equal(await readStateJson({ env, key }), null);
 });
 
+test("diffAndStore reclaims a live lock after its heartbeat lease expires", async () => {
+	if (process.platform !== "linux") return;
+
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-state-lock-expired-heartbeat-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	const key = "snapshot";
+	const lockPath = `${keyToPath(tmp, key)}.lock`;
+	const ownerPath = path.join(lockPath, "owner");
+	const processStat = await fsp.readFile(`/proc/${process.pid}/stat`, "utf8");
+	const closeParen = processStat.lastIndexOf(")");
+	const processStartIdentity = processStat
+		.slice(closeParen + 1)
+		.trim()
+		.split(/\s+/)[19];
+	assert.ok(processStartIdentity);
+
+	await fsp.mkdir(lockPath);
+	await fsp.writeFile(
+		ownerPath,
+		`${process.pid}:${processStartIdentity}:stopped-heartbeat\n`,
+		"utf8",
+	);
+	const staleAt = new Date(Date.now() - 31_000);
+	await fsp.utimes(lockPath, staleAt, staleAt);
+	await fsp.utimes(ownerPath, staleAt, staleAt);
+
+	await diffAndStore({ env, key, value: { version: "recovered" } });
+	assert.deepEqual(await readStateJson({ env, key }), { version: "recovered" });
+	await assert.rejects(fsp.access(lockPath));
+});
+
 test("diffAndStore reclaims an old lock with a malformed owner", async () => {
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-malformed-lock-"));
 	const env = { LOBSTER_STATE_DIR: tmp };

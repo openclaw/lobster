@@ -209,7 +209,9 @@ async function reclaimOrphanedStateLock(lockPath: string) {
 		if (owner && isProcessAlive(owner.pid)) {
 			const processStartIdentity = await readProcessStartIdentity(owner.pid);
 			if (owner.processStartIdentity && processStartIdentity) {
-				stale = owner.processStartIdentity !== processStartIdentity;
+				stale =
+					owner.processStartIdentity !== processStartIdentity ||
+					(await hasExpiredStateLockLease(ownerPath));
 			} else {
 				// A live PID without a matching process-instance identity may have
 				// been reused. Require a conservative expired lease and a second
@@ -241,6 +243,18 @@ async function reclaimOrphanedStateLock(lockPath: string) {
 	return true;
 }
 
+async function stillOwnsStateLock(ownerPath: string, owner: string) {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			return (await fsp.readFile(ownerPath, "utf8")) === owner;
+		} catch (err: any) {
+			if (err?.code === "ENOENT" || attempt === 1) return false;
+			await new Promise<void>((resolve) => setTimeout(resolve, STATE_LOCK_RETRY_MS));
+		}
+	}
+	return false;
+}
+
 async function withStateKeyLock<T>({
 	env,
 	key,
@@ -257,6 +271,7 @@ async function withStateKeyLock<T>({
 	const lockPath = `${keyToPath(stateDir, key)}.lock`;
 	let acquired = false;
 	let owner: string | undefined;
+	let ownerWritten = false;
 	let heartbeat: ReturnType<typeof setInterval> | undefined;
 	try {
 		while (!acquired) {
@@ -270,6 +285,7 @@ async function withStateKeyLock<T>({
 					encoding: "utf8",
 					mode: 0o600,
 				});
+				ownerWritten = true;
 				const ownerPath = path.join(lockPath, "owner");
 				heartbeat = setInterval(() => {
 					void fsp.utimes(ownerPath, new Date(), new Date()).catch(() => {});
@@ -288,8 +304,7 @@ async function withStateKeyLock<T>({
 		if (heartbeat) clearInterval(heartbeat);
 		if (acquired) {
 			const ownerPath = path.join(lockPath, "owner");
-			const currentOwner = await fsp.readFile(ownerPath, "utf8").catch(() => undefined);
-			if (!owner || currentOwner === owner) {
+			if (!ownerWritten || !owner || (await stillOwnsStateLock(ownerPath, owner))) {
 				await fsp.rm(lockPath, { recursive: true, force: true }).catch(() => {});
 			}
 		}
@@ -470,13 +485,16 @@ async function deleteStateJsonUnlocked({ env, key }) {
 export async function deleteStateJson({
 	env,
 	key,
+	signal = undefined,
 }: {
 	env: Record<string, string | undefined>;
 	key: string;
+	signal?: AbortSignal;
 }) {
 	return withStateKeyLock({
 		env,
 		key,
+		signal,
 		task: () => deleteStateJsonUnlocked({ env, key }),
 	});
 }

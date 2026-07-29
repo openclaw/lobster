@@ -215,13 +215,16 @@ export async function resumeToolRequest({
 			const alternateStateKey = alternateWorkflowResumeStateKey(payload.stateKey);
 			if (alternateStateKey) stateKeys.add(alternateStateKey);
 		}
+		// Keep the capability indexed until every state deletion succeeds. A
+		// cancelled request must not orphan a resume state by dropping its
+		// approval ID while waiting on another writer's state lock.
+		for (const stateKey of stateKeys) {
+			await deleteStateJson({ env: runtime.env, key: stateKey, signal: runtime.signal });
+		}
 		if (resolvedApprovalId) {
 			await cleanupIndex();
 		} else {
 			for (const stateKey of stateKeys) await cleanupIndex(stateKey);
-		}
-		for (const stateKey of stateKeys) {
-			await deleteStateJson({ env: runtime.env, key: stateKey });
 		}
 		return okEnvelope("cancelled", [], null, null);
 	}

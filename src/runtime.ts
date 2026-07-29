@@ -347,13 +347,27 @@ function trackCommandOutput(
 		suppressCloseErrors?: boolean;
 	}) => Promise<void>,
 ) {
+	const source = output as AsyncIterable<unknown> & CancellableLazyOutput & AsyncIterator<unknown>;
+	const sourceIterator =
+		typeof source[Symbol.asyncIterator] === "function" ? source[Symbol.asyncIterator]() : undefined;
 	const tracked = (async function* () {
 		let completed = false;
 		try {
-			for await (const item of output) {
-				assertResumeConsumed();
-				markOutput();
-				yield item;
+			if (sourceIterator) {
+				const iteratorInput: AsyncIterable<unknown> = {
+					[Symbol.asyncIterator]: () => sourceIterator,
+				};
+				for await (const item of iteratorInput) {
+					assertResumeConsumed();
+					markOutput();
+					yield item;
+				}
+			} else {
+				for (const item of output as Iterable<unknown>) {
+					assertResumeConsumed();
+					markOutput();
+					yield item;
+				}
 			}
 			completed = true;
 		} catch (err) {
@@ -364,9 +378,10 @@ function trackCommandOutput(
 			await finishStage({ assertResume: completed });
 		}
 	})();
-	const source = output as AsyncIterable<unknown> & CancellableLazyOutput & AsyncIterator<unknown>;
+	const cancellationOwner = (sourceIterator ?? source) as CancellableLazyOutput;
+	const abort = cancellationOwner.abort;
 	const cancellation = {
-		...(source.abort ? { abort: (reason?: unknown) => source.abort?.call(output, reason) } : null),
+		...(abort ? { abort: (reason?: unknown) => abort.call(cancellationOwner, reason) } : null),
 	};
 	if (Object.keys(cancellation).length > 0) {
 		Object.assign(tracked, cancellation);
