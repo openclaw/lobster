@@ -1,4 +1,9 @@
 const unreadInput = new WeakMap<NodeJS.ReadableStream, string>();
+type ObservableReadableStream = NodeJS.ReadableStream & {
+	readableEnded?: boolean;
+	destroyed?: boolean;
+	closed?: boolean;
+};
 
 export function readLineFromStream(
 	stream: NodeJS.ReadableStream,
@@ -6,6 +11,7 @@ export function readLineFromStream(
 ) {
 	const timeoutMs = Number(opts?.timeoutMs ?? 0);
 	const signal = opts?.signal;
+	const observableStream = stream as ObservableReadableStream;
 
 	return new Promise<string>((resolve, reject) => {
 		let settled = false;
@@ -81,6 +87,10 @@ export function readLineFromStream(
 		stream.on("close", onClose);
 		stream.on("error", onError);
 		signal?.addEventListener("abort", onAbort, { once: true });
-		if (!consumeLine()) stream.resume();
+		if (!consumeLine()) {
+			if (observableStream.readableEnded || observableStream.destroyed || observableStream.closed)
+				onEnd();
+			else stream.resume();
+		}
 	});
 }

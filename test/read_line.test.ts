@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { PassThrough } from "node:stream";
 
 import { readLineFromStream } from "../src/read_line.js";
@@ -32,6 +34,18 @@ test("readLineFromStream preserves the next line from a combined input chunk", a
 	input.end("yes\nno\n");
 	assert.equal(await first, "yes");
 	assert.equal(await readLineFromStream(input), "no");
+});
+
+test("readLineFromStream returns buffered input after a child pipe reaches EOF", async () => {
+	const child = spawn(process.execPath, ["-e", "process.stdout.write('yes\\npartial')"], {
+		stdio: ["ignore", "pipe", "inherit"],
+	});
+	assert.ok(child.stdout);
+
+	const first = readLineFromStream(child.stdout);
+	assert.equal(await first, "yes");
+	await once(child, "close");
+	assert.equal(await readLineFromStream(child.stdout, { timeoutMs: 50 }), "partial");
 });
 
 test("readLineFromStream resolves on end without newline", async () => {
