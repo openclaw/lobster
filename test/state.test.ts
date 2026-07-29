@@ -360,6 +360,59 @@ test("diffAndStore does not publish a snapshot after cancellation before atomic 
 	assert.deepEqual(leftovers, []);
 });
 
+test("diffAndStore restores the previous snapshot when cancellation arrives during atomic rename", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-cancel-rename-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	await writeStateJson({ env, key: "snapshot", value: { version: "before" } });
+
+	const controller = new AbortController();
+	await assert.rejects(
+		() =>
+			diffAndStore({
+				env,
+				key: "snapshot",
+				value: { version: "after" },
+				signal: controller.signal,
+				atomicWriteOptions: {
+					async renameFile(from, to) {
+						await fsp.rename(from, to);
+						controller.abort(new Error("abort during atomic rename"));
+					},
+				},
+			}),
+		/abort during atomic rename/,
+	);
+	assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { version: "before" });
+	const leftovers = (await fsp.readdir(tmp)).filter((file) => file.includes(".tmp"));
+	assert.deepEqual(leftovers, []);
+});
+
+test("diffAndStore removes a newly published snapshot when cancellation arrives during atomic rename", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-cancel-new-rename-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	const controller = new AbortController();
+
+	await assert.rejects(
+		() =>
+			diffAndStore({
+				env,
+				key: "snapshot",
+				value: { version: "after" },
+				signal: controller.signal,
+				atomicWriteOptions: {
+					async renameFile(from, to) {
+						await fsp.rename(from, to);
+						controller.abort(new Error("abort during initial atomic rename"));
+					},
+				},
+			}),
+		/abort during initial atomic rename/,
+	);
+	assert.equal(await readStateJson({ env, key: "snapshot" }), null);
+	const leftovers = (await fsp.readdir(tmp)).filter((file) => file.includes(".tmp"));
+	assert.deepEqual(leftovers, []);
+});
+
 test("SDK diff primitives treat corrupt previous state as a miss (#112)", async () => {
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-sdk-diff-corrupt-"));
 	const ctx = { env: { LOBSTER_STATE_DIR: tmp } };

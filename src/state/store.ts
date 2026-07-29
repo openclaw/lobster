@@ -151,6 +151,7 @@ export async function writeFileAtomic(filePath, data, options: AtomicWriteOption
 		handle = undefined;
 		options.signal?.throwIfAborted();
 		await renameFile(tmpPath, filePath);
+		options.signal?.throwIfAborted();
 		await syncDir(filePath);
 		cleanup = false;
 	} finally {
@@ -217,12 +218,27 @@ export async function readStateJson({ env, key }) {
 	}
 }
 
-export async function writeStateJson({ env, key, value, signal = undefined }) {
+export async function writeStateJson({
+	env,
+	key,
+	value,
+	signal = undefined,
+	atomicWriteOptions = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	value: unknown;
+	signal?: AbortSignal;
+	atomicWriteOptions?: Omit<AtomicWriteOptions, "signal">;
+}) {
 	const stateDir = defaultStateDir(env);
 	const filePath = keyToPath(stateDir, key);
 
 	await ensureDirectory(stateDir);
-	await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n", { signal });
+	await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n", {
+		...atomicWriteOptions,
+		signal,
+	});
 }
 
 export async function deleteStateJson({ env, key }) {
@@ -385,13 +401,37 @@ export async function cleanupApprovalIndexByStateKey({
 	}
 }
 
-export async function diffAndStore({ env, key, value, signal = undefined }) {
+export async function diffAndStore({
+	env,
+	key,
+	value,
+	signal = undefined,
+	atomicWriteOptions = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	value: unknown;
+	signal?: AbortSignal;
+	atomicWriteOptions?: Omit<AtomicWriteOptions, "signal">;
+}) {
 	const before = await readStateJson({ env, key }).catch((err) => {
 		if (isJsonSyntaxError(err)) return null;
 		throw err;
 	});
 	const changed = stableStringify(before) !== stableStringify(value);
-	signal?.throwIfAborted();
-	await writeStateJson({ env, key, value, signal });
+	try {
+		signal?.throwIfAborted();
+		await writeStateJson({ env, key, value, signal, atomicWriteOptions });
+		signal?.throwIfAborted();
+	} catch (err) {
+		if (signal?.aborted) {
+			if (before === null) {
+				await deleteStateJson({ env, key });
+			} else {
+				await writeStateJson({ env, key, value: before });
+			}
+		}
+		throw err;
+	}
 	return { before, after: value, changed };
 }
