@@ -19,6 +19,7 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
+import { runAbortableProcess } from "../src/abortable_process.js";
 import { resumeToolRequest, runToolRequest } from "../src/core/tool_runtime.js";
 import { decodeResumeToken } from "../src/resume.js";
 import { runPipeline } from "../src/runtime.js";
@@ -33,6 +34,19 @@ function streamOf(items: unknown[]) {
 		for (const item of items) yield item;
 	})();
 }
+
+test("runAbortableProcess preserves UTF-8 characters split across pipe chunks", async () => {
+	const result = await runAbortableProcess({
+		command: process.execPath,
+		argv: [
+			"-e",
+			"process.stdout.write(Buffer.from([0xe2])); setTimeout(() => process.stdout.write(Buffer.from([0x82, 0xac])), 20)",
+		],
+		env: process.env,
+		notFoundMessage: "node missing",
+	});
+	assert.equal(result.stdout, "€");
+});
 
 async function fileExists(path: string) {
 	try {

@@ -78,8 +78,10 @@ export function runAbortableProcess({
 		let processClosed = false;
 		let forceKillIssued = false;
 		let settled = false;
-		child.stdout?.on("data", (data) => (stdout += String(data)));
-		child.stderr?.on("data", (data) => (stderr += String(data)));
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		child.stdout?.on("data", (data) => (stdout += data));
+		child.stderr?.on("data", (data) => (stderr += data));
 		if (typeof stdin === "string") child.stdin?.write(stdin);
 		child.stdin?.end();
 
