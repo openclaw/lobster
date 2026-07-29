@@ -862,7 +862,6 @@ export async function runWorkflowFile({
 
 		for (let idx = startIndex; idx < steps.length; idx++) {
 			ctx.signal?.throwIfAborted();
-			ctx._onExecutionStart?.();
 			const step = steps[idx];
 
 			if (!evaluateCondition(step.when ?? step.condition, results)) {
@@ -1008,6 +1007,7 @@ export async function runWorkflowFile({
 
 						let subResult: WorkflowStepResult;
 						if (subExecution.kind === "shell") {
+							ctx._onExecutionStart?.();
 							const command = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
 							const stdinValue = resolveShellStdin(subStep.stdin, resolvedArgs, scopedResults);
 							const { stdout } = await runShellCommand({
@@ -1024,6 +1024,7 @@ export async function runWorkflowFile({
 									`Workflow step ${step.id} for_each sub-step ${subStep.id} requires a command registry for pipeline execution`,
 								);
 							}
+							ctx._onExecutionStart?.();
 							const pipelineText = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
 							const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
 							subResult = await runPipelineStep({
@@ -1082,6 +1083,9 @@ export async function runWorkflowFile({
 				parallelBranchResults: Record<string, WorkflowStepResult> | null;
 			}> => {
 				ctx.signal?.throwIfAborted();
+				if (execution.kind !== "none") {
+					ctx._onExecutionStart?.();
+				}
 				// Combine external cancellation and optional per-step timeout into one signal.
 				let stepSignal: AbortSignal | undefined = ctx.signal;
 				let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -1531,6 +1535,7 @@ export async function runWorkflowFile({
 			}
 		}
 
+		ctx.signal?.throwIfAborted();
 		const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
 		if (consumedResumeStateKey) {
 			await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });

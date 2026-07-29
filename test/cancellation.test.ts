@@ -678,6 +678,91 @@ test("workflow approval resume remains retryable when cancellation occurs during
 	}
 });
 
+test("pre-aborted terminal workflow approval resume remains retryable", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-abort-terminal-workflow-resume-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		await writeFile(
+			filePath,
+			JSON.stringify({ steps: [{ id: "confirm", approval: "Continue?" }] }),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const controller = new AbortController();
+		controller.abort(new Error("pre-aborted terminal workflow resume"));
+		const aborted = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, signal: controller.signal, env },
+		});
+		assertCancellationEnvelope(aborted);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.ok, true);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("workflow approval resume remains retryable when cancellation creates its next input gate", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-input-gate-abort-workflow-resume-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "confirm", approval: "Continue?" },
+					{ id: "answer", input: { prompt: "Continue?", responseSchema: { type: "object" } } },
+				],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const controller = new AbortController();
+		const signal = controller.signal;
+		const throwIfAborted = signal.throwIfAborted.bind(signal);
+		let signalChecks = 0;
+		Object.defineProperty(signal, "throwIfAborted", {
+			value() {
+				signalChecks += 1;
+				if (signalChecks === 3) {
+					controller.abort(new Error("abort while creating next workflow input gate"));
+				}
+				throwIfAborted();
+			},
+		});
+		const aborted = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, signal, env },
+		});
+		assertCancellationEnvelope(aborted);
+		assert.equal(signalChecks, 3);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.status, "needs_input");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("cancellation while draining terminal lazy output returns cancellation", async () => {
 	const controller = new AbortController();
 	let outputDrained = false;
@@ -1728,7 +1813,7 @@ test("workflow pipeline halts after an in-flight send completes under cancellati
 				steps: [
 					{
 						id: "draft",
-						run: "node -e \"process.stdout.write(JSON.stringify({to:'user@example.com',subject:'Hello',body:'World'}))\"",
+						run: `${JSON.stringify(process.execPath)} -e "process.stdout.write(JSON.stringify({to:'user@example.com',subject:'Hello',body:'World'}))"`,
 					},
 					{
 						id: "send",
@@ -2436,7 +2521,7 @@ test("workflow approval resume cannot replay a send after downstream cancellatio
 				steps: [
 					{
 						id: "draft",
-						run: "node -e \"process.stdout.write(JSON.stringify({to:'user@example.com',subject:'Hello',body:'World'}))\"",
+						run: `${JSON.stringify(process.execPath)} -e "process.stdout.write(JSON.stringify({to:'user@example.com',subject:'Hello',body:'World'}))"`,
 					},
 					{ id: "confirm", approval: "Send?", stdin: "$draft.json" },
 					{
