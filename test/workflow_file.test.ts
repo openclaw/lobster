@@ -245,6 +245,169 @@ test("direct workflow resume consumes its capability after cancellation starts a
 	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
 });
 
+test("workflow resume consumes its capability after a step timeout starts an effect", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-step-timeout-"));
+	const stateDir = path.join(tmpDir, "state");
+	const effectPath = path.join(tmpDir, "effects.log");
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{
+					id: "approve",
+					command:
+						"node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?',items:[{id:1}]}}))\"",
+					approval: "required",
+				},
+				{
+					id: "effect",
+					run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+					condition: "$approve.approved",
+					timeout_ms: 300,
+				},
+			],
+		}),
+		"utf8",
+	);
+	const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+	const first = await runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		},
+	});
+	assert.equal(first.status, "needs_approval");
+	const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+	assert.equal(payload.kind, "workflow-file");
+	assert.ok(payload.stateKey);
+
+	await assert.rejects(
+		() =>
+			runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			}),
+		/timed out|timeout|abort|cancel/i,
+	);
+	assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+	await assert.rejects(
+		() =>
+			runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			}),
+		/Workflow resume state not found/,
+	);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+});
+
+test("workflow resume consumes its capability after a parallel timeout starts an effect", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-parallel-timeout-"));
+	const stateDir = path.join(tmpDir, "state");
+	const effectPath = path.join(tmpDir, "effects.log");
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{
+					id: "approve",
+					command:
+						"node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?',items:[{id:1}]}}))\"",
+					approval: "required",
+				},
+				{
+					id: "effect",
+					condition: "$approve.approved",
+					parallel: {
+						timeout_ms: 300,
+						branches: [
+							{
+								id: "side-effect",
+								run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+							},
+						],
+					},
+				},
+			],
+		}),
+		"utf8",
+	);
+	const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+	const first = await runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		},
+	});
+	assert.equal(first.status, "needs_approval");
+	const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+	assert.equal(payload.kind, "workflow-file");
+	assert.ok(payload.stateKey);
+
+	await assert.rejects(
+		() =>
+			runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			}),
+		/timed out|timeout|abort|cancel/i,
+	);
+	assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+	await assert.rejects(
+		() =>
+			runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			}),
+		/Workflow resume state not found/,
+	);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+});
+
 test("workflow resume accepts workflow-resume_ state key aliases and cleans up state", async () => {
 	const workflow = {
 		steps: [

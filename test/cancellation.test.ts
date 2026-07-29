@@ -1583,7 +1583,7 @@ test("cancellable lazy output releases a pending read before cancellation return
 	}
 });
 
-test("native lazy generators finish their pending cleanup before cancellation returns", async () => {
+test("a permanently stalled native lazy generator does not block cancellation", async () => {
 	const controller = new AbortController();
 	let readStarted!: () => void;
 	const pendingReadStarted = new Promise<void>((resolve) => {
@@ -1597,7 +1597,7 @@ test("native lazy generators finish their pending cleanup before cancellation re
 				output: (async function* () {
 					try {
 						readStarted();
-						await new Promise((resolve) => setTimeout(resolve, 25));
+						await new Promise<void>(() => {});
 					} finally {
 						sourceClosed = true;
 					}
@@ -1625,12 +1625,12 @@ test("native lazy generators finish their pending cleanup before cancellation re
 	await pendingReadStarted;
 	controller.abort(new Error("abort native lazy output"));
 	const settled = await observeSettlement(run, 500);
-	assert.equal(settled.settled, true, "cancellation must wait for native generator cleanup");
+	assert.equal(settled.settled, true, "cancellation must not wait for native generator cleanup");
 	if (settled.settled) assertCancellationEnvelope(settled.value);
 	assert.equal(
 		sourceClosed,
-		true,
-		"native generator cleanup must finish before cancellation returns",
+		false,
+		"a native generator without an abort hook cannot guarantee prompt cleanup",
 	);
 });
 

@@ -172,6 +172,7 @@ type RunContext = {
 	dryRun?: boolean;
 	_activeWorkflows?: Set<string>;
 	_onResumeStateResolved?: (stateKey: string) => void;
+	_onExecutionCancelled?: () => void;
 };
 
 export type WorkflowResumePayload = {
@@ -710,8 +711,22 @@ export async function runWorkflowFile({
 		? await loadWorkflowResumeState(ctx.env, consumedResumeStateKey ?? resume.stateKey)
 		: (resume ?? null);
 	let resumedExecutionStarted = false;
-	const markExecutionStarted = () => {
+	let resumedExecutionCancelled = false;
+	const executionSignalListeners: Array<{ signal: AbortSignal; onAbort: () => void }> = [];
+	const markExecutionStarted = (signal?: AbortSignal) => {
+		if (!consumedResumeStateKey && !ctx._onExecutionCancelled) return;
 		if (consumedResumeStateKey) resumedExecutionStarted = true;
+		if (!signal) return;
+		const onAbort = () => {
+			if (consumedResumeStateKey) resumedExecutionCancelled = true;
+			ctx._onExecutionCancelled?.();
+		};
+		if (signal.aborted) {
+			onAbort();
+			return;
+		}
+		signal.addEventListener("abort", onAbort, { once: true });
+		executionSignalListeners.push({ signal, onAbort });
 	};
 	if (resumeState?.approvalStepId && resumeState?.inputStepId) {
 		throw new Error("Invalid workflow resume state");
@@ -1017,7 +1032,7 @@ export async function runWorkflowFile({
 
 						let subResult: WorkflowStepResult;
 						if (subExecution.kind === "shell") {
-							markExecutionStarted();
+							markExecutionStarted(ctx.signal);
 							const command = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
 							const stdinValue = resolveShellStdin(subStep.stdin, resolvedArgs, scopedResults);
 							const { stdout } = await runShellCommand({
@@ -1034,7 +1049,7 @@ export async function runWorkflowFile({
 									`Workflow step ${step.id} for_each sub-step ${subStep.id} requires a command registry for pipeline execution`,
 								);
 							}
-							markExecutionStarted();
+							markExecutionStarted(ctx.signal);
 							const pipelineText = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
 							const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
 							subResult = await runPipelineStep({
@@ -1093,9 +1108,6 @@ export async function runWorkflowFile({
 				parallelBranchResults: Record<string, WorkflowStepResult> | null;
 			}> => {
 				ctx.signal?.throwIfAborted();
-				if (execution.kind !== "none" && execution.kind !== "workflow") {
-					markExecutionStarted();
-				}
 				// Combine external cancellation and optional per-step timeout into one signal.
 				let stepSignal: AbortSignal | undefined = ctx.signal;
 				let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -1120,9 +1132,12 @@ export async function runWorkflowFile({
 						const parallel = execution.value;
 						const wait = parallel.wait ?? "all";
 						const branchAbortController = new AbortController();
-						const branchSignal = stepSignal
-							? AbortSignal.any([stepSignal, branchAbortController.signal])
-							: branchAbortController.signal;
+						const parallelTimeoutController = new AbortController();
+						const parallelSignal = stepSignal
+							? AbortSignal.any([stepSignal, parallelTimeoutController.signal])
+							: parallelTimeoutController.signal;
+						const branchSignal = AbortSignal.any([parallelSignal, branchAbortController.signal]);
+						markExecutionStarted(parallelSignal);
 						const shouldForceKill = Boolean(step.timeout_ms || parallel.timeout_ms);
 						const runBranch = async (
 							branch: ParallelBranch,
@@ -1189,7 +1204,11 @@ export async function runWorkflowFile({
 						const timeoutPromise = parallel.timeout_ms
 							? new Promise<never>((_resolve, reject) => {
 									parallelTimeoutId = setTimeout(() => {
-										branchAbortController.abort();
+										parallelTimeoutController.abort(
+											new Error(
+												`Parallel step ${step.id} timed out after ${parallel.timeout_ms}ms`,
+											),
+										);
 										reject(
 											new Error(
 												`Parallel step ${step.id} timed out after ${parallel.timeout_ms}ms`,
@@ -1267,12 +1286,22 @@ export async function runWorkflowFile({
 						const childActive = new Set(activeWorkflows);
 						childActive.add(canonicalWorkflowPath);
 						const subArgs = resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results);
-						ctx.signal?.throwIfAborted();
-						markExecutionStarted();
+						stepSignal?.throwIfAborted();
+						markExecutionStarted(stepSignal);
 						const subResult = await runWorkflowFile({
 							filePath: resolvedWorkflowPath,
 							args: subArgs,
-							ctx: { ...ctx, env, cwd, _activeWorkflows: childActive },
+							ctx: {
+								...ctx,
+								env,
+								cwd,
+								signal: stepSignal,
+								_activeWorkflows: childActive,
+								_onExecutionCancelled: () => {
+									resumedExecutionCancelled = true;
+									ctx._onExecutionCancelled?.();
+								},
+							},
 						});
 						if (subResult.status === "needs_approval" || subResult.status === "needs_input") {
 							const resumeToken =
@@ -1297,6 +1326,7 @@ export async function runWorkflowFile({
 						const stdout = subResult.output.length ? serializeValueForStdout(json) : "";
 						result = { id: step.id, stdout, json };
 					} else if (execution.kind === "shell") {
+						markExecutionStarted(stepSignal);
 						const command = resolveTemplate(execution.value, resolvedArgs, results);
 						const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
 						const { stdout } = await runShellCommand({
@@ -1314,6 +1344,7 @@ export async function runWorkflowFile({
 								`Workflow step ${step.id} requires a command registry for pipeline execution`,
 							);
 						}
+						markExecutionStarted(stepSignal);
 						const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
 						const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
 						result = await runPipelineStep({
@@ -1333,6 +1364,7 @@ export async function runWorkflowFile({
 									: undefined,
 						});
 					} else {
+						if (execution.kind !== "none") markExecutionStarted(stepSignal);
 						const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
 						result = createSyntheticStepResult(step.id, inputValue);
 					}
@@ -1358,8 +1390,9 @@ export async function runWorkflowFile({
 										return false;
 									}
 									const message = error?.message ?? String(error);
-									return !/halted (for approval inside|before completion at) pipeline/.test(
-										message,
+									return (
+										!/halted (for approval inside|before completion at) pipeline/.test(message) &&
+										!resumedExecutionCancelled
 									);
 								},
 								onRetry: (attempt, error, delayMs) => {
@@ -1369,6 +1402,9 @@ export async function runWorkflowFile({
 								},
 							})
 						: await executeStepAttempt();
+				if (resumedExecutionCancelled) {
+					throw new Error(`Workflow step '${step.id}' cancelled after execution started`);
+				}
 				result = attemptResult.result;
 				parallelBranchResults = attemptResult.parallelBranchResults;
 			} catch (err: any) {
@@ -1435,7 +1471,7 @@ export async function runWorkflowFile({
 				if (err instanceof RequestInputResumeError) {
 					throw err;
 				}
-				if (ctx.signal?.aborted) {
+				if (ctx.signal?.aborted || resumedExecutionCancelled) {
 					throw err;
 				}
 				if (
@@ -1584,7 +1620,7 @@ export async function runWorkflowFile({
 		}
 		return runResult;
 	} catch (err) {
-		if (ctx.signal?.aborted && resumedExecutionStarted && consumedResumeStateKey) {
+		if (resumedExecutionCancelled && resumedExecutionStarted && consumedResumeStateKey) {
 			await cleanupApprovalIndexByStateKey({
 				env: ctx.env,
 				stateKey: consumedResumeStateKey,
@@ -1593,6 +1629,9 @@ export async function runWorkflowFile({
 		}
 		throw err;
 	} finally {
+		for (const { signal, onAbort } of executionSignalListeners) {
+			signal.removeEventListener("abort", onAbort);
+		}
 		ctx._activeWorkflows?.delete(canonicalFilePath);
 	}
 }

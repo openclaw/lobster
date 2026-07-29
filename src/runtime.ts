@@ -284,7 +284,6 @@ function throwIfAbortedAfterDrain(input: AsyncIterable<unknown>, signal?: AbortS
 
 type CancellableLazyOutput = {
 	abort?: (reason?: unknown) => void | Promise<void>;
-	awaitReturnOnAbort?: boolean;
 };
 
 async function closeAfterAbortedRead(
@@ -295,15 +294,13 @@ async function closeAfterAbortedRead(
 	const cancellable = iterator as AsyncIterator<unknown> & CancellableLazyOutput;
 	const inputCancellable = input as AsyncIterable<unknown> & CancellableLazyOutput;
 	const abort = cancellable.abort ?? inputCancellable.abort;
-	const awaitReturnOnAbort =
-		cancellable.awaitReturnOnAbort === true || inputCancellable.awaitReturnOnAbort === true;
 	try {
 		// A source that owns a pending timer, socket, or process can expose this
 		// small cancellation hook. It must release the pending next() operation.
 		if (signal?.aborted && abort) await abort(signal.reason);
 		if (typeof iterator.return !== "function") return;
 		const close = iterator.return();
-		if (signal?.aborted && !abort && !awaitReturnOnAbort) {
+		if (signal?.aborted && !abort) {
 			// Legacy iterators cannot interrupt an in-flight next(). Keep the
 			// existing prompt cancellation behavior, while resource-owning sources
 			// opt into the abort hook above so their cleanup is awaited.
@@ -370,7 +367,6 @@ function trackCommandOutput(
 	const source = output as AsyncIterable<unknown> & CancellableLazyOutput & AsyncIterator<unknown>;
 	const cancellation = {
 		...(source.abort ? { abort: (reason?: unknown) => source.abort?.call(output, reason) } : null),
-		...(typeof source.return === "function" ? { awaitReturnOnAbort: true } : null),
 	};
 	if (Object.keys(cancellation).length > 0) {
 		Object.assign(tracked, cancellation);
