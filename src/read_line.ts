@@ -1,3 +1,5 @@
+const unreadInput = new WeakMap<NodeJS.ReadableStream, string>();
+
 export function readLineFromStream(
 	stream: NodeJS.ReadableStream,
 	opts?: { timeoutMs?: number; signal?: AbortSignal },
@@ -7,15 +9,16 @@ export function readLineFromStream(
 
 	return new Promise<string>((resolve, reject) => {
 		let settled = false;
-		let buf = "";
+		let buf = unreadInput.get(stream) ?? "";
+		unreadInput.delete(stream);
 		let timer: NodeJS.Timeout | null = null;
 
-		const cleanup = ({ pauseStream = false } = {}) => {
+		const cleanup = () => {
 			stream.off("data", onData);
 			stream.off("end", onEnd);
 			stream.off("close", onClose);
 			stream.off("error", onError);
-			if (pauseStream) stream.pause();
+			stream.pause();
 			signal?.removeEventListener("abort", onAbort);
 			if (timer) clearTimeout(timer);
 		};
@@ -27,29 +30,39 @@ export function readLineFromStream(
 			resolve(value);
 		};
 
-		const fail = (err: Error, { pauseStream = false } = {}) => {
+		const fail = (err: Error) => {
 			if (settled) return;
 			settled = true;
-			cleanup({ pauseStream });
+			unreadInput.delete(stream);
+			cleanup();
 			reject(err);
+		};
+
+		const consumeLine = () => {
+			const idx = buf.indexOf("\n");
+			if (idx === -1) return false;
+			unreadInput.set(stream, buf.slice(idx + 1));
+			finish(buf.slice(0, idx));
+			return true;
 		};
 
 		const onData = (chunk: Buffer | string) => {
 			buf += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-			const idx = buf.indexOf("\n");
-			if (idx !== -1) {
-				finish(buf.slice(0, idx));
-			}
+			consumeLine();
 		};
 
-		const onEnd = () => finish(buf);
-		const onClose = () => finish(buf);
+		const onEnd = () => {
+			unreadInput.delete(stream);
+			finish(buf);
+		};
+		const onClose = () => {
+			unreadInput.delete(stream);
+			finish(buf);
+		};
 		const onError = (err: Error) => fail(err);
 		const onAbort = () => {
 			const reason = signal?.reason;
-			fail(reason instanceof Error ? reason : new Error("Input read aborted"), {
-				pauseStream: true,
-			});
+			fail(reason instanceof Error ? reason : new Error("Input read aborted"));
 		};
 
 		if (signal?.aborted) {
@@ -68,5 +81,6 @@ export function readLineFromStream(
 		stream.on("close", onClose);
 		stream.on("error", onError);
 		signal?.addEventListener("abort", onAbort, { once: true });
+		if (!consumeLine()) stream.resume();
 	});
 }

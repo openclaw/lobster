@@ -26,6 +26,14 @@ test("readLineFromStream accepts sequential reads from one stream", async () => 
 	input.end();
 });
 
+test("readLineFromStream preserves the next line from a combined input chunk", async () => {
+	const input = new PassThrough();
+	const first = readLineFromStream(input);
+	input.end("yes\nno\n");
+	assert.equal(await first, "yes");
+	assert.equal(await readLineFromStream(input), "no");
+});
+
 test("readLineFromStream resolves on end without newline", async () => {
 	const input = new PassThrough();
 	const promise = readLineFromStream(input);
