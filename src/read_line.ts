@@ -10,12 +10,12 @@ export function readLineFromStream(
 		let buf = "";
 		let timer: NodeJS.Timeout | null = null;
 
-		const cleanup = () => {
+		const cleanup = ({ pauseStream = false } = {}) => {
 			stream.off("data", onData);
 			stream.off("end", onEnd);
 			stream.off("close", onClose);
 			stream.off("error", onError);
-			stream.pause();
+			if (pauseStream) stream.pause();
 			signal?.removeEventListener("abort", onAbort);
 			if (timer) clearTimeout(timer);
 		};
@@ -27,10 +27,10 @@ export function readLineFromStream(
 			resolve(value);
 		};
 
-		const fail = (err: Error) => {
+		const fail = (err: Error, { pauseStream = false } = {}) => {
 			if (settled) return;
 			settled = true;
-			cleanup();
+			cleanup({ pauseStream });
 			reject(err);
 		};
 
@@ -47,7 +47,9 @@ export function readLineFromStream(
 		const onError = (err: Error) => fail(err);
 		const onAbort = () => {
 			const reason = signal?.reason;
-			fail(reason instanceof Error ? reason : new Error("Input read aborted"));
+			fail(reason instanceof Error ? reason : new Error("Input read aborted"), {
+				pauseStream: true,
+			});
 		};
 
 		if (signal?.aborted) {
