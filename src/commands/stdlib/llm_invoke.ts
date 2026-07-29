@@ -178,6 +178,7 @@ type Adapter = {
 		env: any;
 		args: any;
 		payload: Record<string, any>;
+		signal?: AbortSignal;
 	}) => Promise<LlmResponseEnvelope>;
 };
 
@@ -187,6 +188,7 @@ type DirectAdapter =
 			args: any;
 			payload: Record<string, any>;
 			ctx: any;
+			signal?: AbortSignal;
 	  }) => Promise<LlmResponseEnvelope>)
 	| {
 			source?: string;
@@ -195,6 +197,7 @@ type DirectAdapter =
 				args: any;
 				payload: Record<string, any>;
 				ctx: any;
+				signal?: AbortSignal;
 			}) => Promise<LlmResponseEnvelope>;
 	  };
 
@@ -438,7 +441,7 @@ async function runLlmInvoke({
 
 		let responseEnvelope: LlmResponseEnvelope;
 		try {
-			responseEnvelope = await adapter.invoke({ env, args, payload });
+			responseEnvelope = await adapter.invoke({ env, args, payload, signal: ctx.signal });
 		} catch (err: any) {
 			throw new Error(`${config.name} request failed: ${err?.message ?? String(err)}`);
 		}
@@ -547,8 +550,8 @@ function resolveAdapter({
 		return {
 			provider,
 			source: typeof direct === "function" ? provider : (direct.source ?? provider),
-			async invoke({ payload }) {
-				return invoke({ env, args, payload, ctx });
+			async invoke({ payload, signal }) {
+				return invoke({ env, args, payload, ctx, signal });
 			},
 		};
 	}
@@ -563,8 +566,8 @@ function resolveAdapter({
 		return {
 			provider,
 			source: config.sourceForProvider?.(provider) ?? "openclaw",
-			async invoke({ payload }) {
-				return invokeOpenClawAdapter({ endpoint, token, payload });
+			async invoke({ payload, signal }) {
+				return invokeOpenClawAdapter({ endpoint, token, payload, signal });
 			},
 		};
 	}
@@ -578,8 +581,13 @@ function resolveAdapter({
 		return {
 			provider,
 			source: config.sourceForProvider?.(provider) ?? "pi",
-			async invoke({ payload }) {
-				return invokeHttpAdapter({ endpoint: buildAdapterEndpoint(adapterUrl), token, payload });
+			async invoke({ payload, signal }) {
+				return invokeHttpAdapter({
+					endpoint: buildAdapterEndpoint(adapterUrl),
+					token,
+					payload,
+					signal,
+				});
 			},
 		};
 	}
@@ -592,8 +600,13 @@ function resolveAdapter({
 	return {
 		provider,
 		source: config.sourceForProvider?.(provider) ?? "http",
-		async invoke({ payload }) {
-			return invokeHttpAdapter({ endpoint: buildAdapterEndpoint(adapterUrl), token, payload });
+		async invoke({ payload, signal }) {
+			return invokeHttpAdapter({
+				endpoint: buildAdapterEndpoint(adapterUrl),
+				token,
+				payload,
+				signal,
+			});
 		},
 	};
 }
@@ -621,13 +634,16 @@ async function invokeOpenClawAdapter({
 	endpoint,
 	token,
 	payload,
+	signal,
 }: {
 	endpoint: URL;
 	token: string;
 	payload: any;
+	signal?: AbortSignal;
 }) {
 	const res = await fetch(endpoint, {
 		method: "POST",
+		signal,
 		headers: {
 			"content-type": "application/json",
 			...(token ? { authorization: `Bearer ${token}` } : null),
@@ -670,13 +686,16 @@ async function invokeHttpAdapter({
 	endpoint,
 	token,
 	payload,
+	signal,
 }: {
 	endpoint: URL;
 	token: string;
 	payload: any;
+	signal?: AbortSignal;
 }) {
 	const res = await fetch(endpoint, {
 		method: "POST",
+		signal,
 		headers: {
 			"content-type": "application/json",
 			...(token ? { authorization: `Bearer ${token}` } : null),

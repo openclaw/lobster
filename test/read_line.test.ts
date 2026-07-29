@@ -31,3 +31,13 @@ test("readLineFromStream times out when no input arrives", async () => {
 		/Timed out waiting for input/,
 	);
 });
+
+test("readLineFromStream rejects when its signal is aborted", async () => {
+	const input = new PassThrough();
+	const controller = new AbortController();
+	const promise = readLineFromStream(input, { signal: controller.signal });
+	controller.abort(new Error("input cancelled"));
+
+	await assert.rejects(() => promise, /input cancelled/);
+	input.end();
+});

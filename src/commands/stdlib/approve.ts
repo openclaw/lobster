@@ -53,6 +53,7 @@ export const approveCommand = {
 		ctx.stdout.write(`${prompt} [y/N] `);
 		const answer = await readLineFromStream(ctx.stdin, {
 			timeoutMs: parseApprovalTimeoutMs(ctx.env),
+			signal: ctx.signal,
 		});
 
 		if (!/^y(es)?$/i.test(String(answer).trim())) {

@@ -154,7 +154,7 @@ export const askCommand = {
 
 		ctx.stdout.write(`${prompt}\n> `);
 		const { readLineFromStream } = await import("../../read_line.js");
-		const raw = await readLineFromStream(ctx.stdin, { timeoutMs: 0 });
+		const raw = await readLineFromStream(ctx.stdin, { timeoutMs: 0, signal: ctx.signal });
 		const text = String(raw ?? "").trim();
 
 		let lastError;

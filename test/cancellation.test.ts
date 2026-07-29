@@ -1040,6 +1040,59 @@ test(
 );
 
 test(
+	"CLI SIGINT aborts a stalled OpenClaw HTTP call",
+	{ skip: process.platform === "win32" },
+	async () => {
+		let requestReceived!: () => void;
+		const requestStarted = new Promise<void>((resolve) => {
+			requestReceived = resolve;
+		});
+		const server = createServer((request) => {
+			request.resume();
+			requestReceived();
+			// Intentionally leave the response open so cancellation must abort fetch.
+		});
+		let cli: ReturnType<typeof startLobsterCli> | undefined;
+		try {
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(0, "127.0.0.1", resolve);
+			});
+			const address = server.address();
+			assert.ok(address && typeof address !== "string");
+			cli = startLobsterCli({
+				args: [
+					"openclaw.invoke",
+					"--url",
+					`http://127.0.0.1:${address.port}`,
+					"--tool",
+					"test",
+					"--action",
+					"wait",
+				],
+				cwd: tmpdir(),
+				env: process.env,
+			});
+
+			const requestObserved = await observeSettlement(requestStarted, 5000);
+			assert.equal(requestObserved.settled, true, "OpenClaw request must reach the server");
+			assert.equal(cli.child.kill("SIGINT"), true);
+			const exited = await observeSettlement(cli.result, 5000);
+			assert.equal(exited.settled, true, "CLI must exit after one SIGINT");
+			if (!exited.settled) return;
+			assert.equal(exited.value.signal, null);
+			assert.equal(exited.value.code, 130);
+		} finally {
+			cli?.child.kill("SIGKILL");
+			(server as any).closeAllConnections?.();
+			if (server.listening) {
+				await new Promise<void>((resolve) => server.close(() => resolve()));
+			}
+		}
+	},
+);
+
+test(
 	"CLI SIGINT consumes a pipeline approval resume after execution starts",
 	{ skip: process.platform === "win32" },
 	async () => {

@@ -1,5 +1,9 @@
-export function readLineFromStream(stream: NodeJS.ReadableStream, opts?: { timeoutMs?: number }) {
+export function readLineFromStream(
+	stream: NodeJS.ReadableStream,
+	opts?: { timeoutMs?: number; signal?: AbortSignal },
+) {
 	const timeoutMs = Number(opts?.timeoutMs ?? 0);
+	const signal = opts?.signal;
 
 	return new Promise<string>((resolve, reject) => {
 		let settled = false;
@@ -11,6 +15,7 @@ export function readLineFromStream(stream: NodeJS.ReadableStream, opts?: { timeo
 			stream.off("end", onEnd);
 			stream.off("close", onClose);
 			stream.off("error", onError);
+			signal?.removeEventListener("abort", onAbort);
 			if (timer) clearTimeout(timer);
 		};
 
@@ -39,6 +44,15 @@ export function readLineFromStream(stream: NodeJS.ReadableStream, opts?: { timeo
 		const onEnd = () => finish(buf);
 		const onClose = () => finish(buf);
 		const onError = (err: Error) => fail(err);
+		const onAbort = () => {
+			const reason = signal?.reason;
+			fail(reason instanceof Error ? reason : new Error("Input read aborted"));
+		};
+
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
 
 		if (timeoutMs > 0) {
 			timer = setTimeout(() => {
@@ -50,5 +64,6 @@ export function readLineFromStream(stream: NodeJS.ReadableStream, opts?: { timeo
 		stream.on("end", onEnd);
 		stream.on("close", onClose);
 		stream.on("error", onError);
+		signal?.addEventListener("abort", onAbort, { once: true });
 	});
 }
