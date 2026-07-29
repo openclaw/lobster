@@ -171,7 +171,6 @@ type RunContext = {
 	llmAdapters?: Record<string, any>;
 	dryRun?: boolean;
 	_activeWorkflows?: Set<string>;
-	_onExecutionStart?: () => void;
 	_onResumeStateResolved?: (stateKey: string) => void;
 };
 
@@ -710,6 +709,10 @@ export async function runWorkflowFile({
 	const resumeState = resume?.stateKey
 		? await loadWorkflowResumeState(ctx.env, consumedResumeStateKey ?? resume.stateKey)
 		: (resume ?? null);
+	let resumedExecutionStarted = false;
+	const markExecutionStarted = () => {
+		if (consumedResumeStateKey) resumedExecutionStarted = true;
+	};
 	if (resumeState?.approvalStepId && resumeState?.inputStepId) {
 		throw new Error("Invalid workflow resume state");
 	}
@@ -1014,7 +1017,7 @@ export async function runWorkflowFile({
 
 						let subResult: WorkflowStepResult;
 						if (subExecution.kind === "shell") {
-							ctx._onExecutionStart?.();
+							markExecutionStarted();
 							const command = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
 							const stdinValue = resolveShellStdin(subStep.stdin, resolvedArgs, scopedResults);
 							const { stdout } = await runShellCommand({
@@ -1031,7 +1034,7 @@ export async function runWorkflowFile({
 									`Workflow step ${step.id} for_each sub-step ${subStep.id} requires a command registry for pipeline execution`,
 								);
 							}
-							ctx._onExecutionStart?.();
+							markExecutionStarted();
 							const pipelineText = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
 							const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
 							subResult = await runPipelineStep({
@@ -1091,7 +1094,7 @@ export async function runWorkflowFile({
 			}> => {
 				ctx.signal?.throwIfAborted();
 				if (execution.kind !== "none" && execution.kind !== "workflow") {
-					ctx._onExecutionStart?.();
+					markExecutionStarted();
 				}
 				// Combine external cancellation and optional per-step timeout into one signal.
 				let stepSignal: AbortSignal | undefined = ctx.signal;
@@ -1265,7 +1268,7 @@ export async function runWorkflowFile({
 						childActive.add(canonicalWorkflowPath);
 						const subArgs = resolveWorkflowStepArgs(step.workflow_args, resolvedArgs, results);
 						ctx.signal?.throwIfAborted();
-						ctx._onExecutionStart?.();
+						markExecutionStarted();
 						const subResult = await runWorkflowFile({
 							filePath: resolvedWorkflowPath,
 							args: subArgs,
@@ -1580,6 +1583,15 @@ export async function runWorkflowFile({
 			runResult._meta = { cost: costTracker.getSummary() };
 		}
 		return runResult;
+	} catch (err) {
+		if (ctx.signal?.aborted && resumedExecutionStarted && consumedResumeStateKey) {
+			await cleanupApprovalIndexByStateKey({
+				env: ctx.env,
+				stateKey: consumedResumeStateKey,
+			}).catch(() => {});
+			await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey }).catch(() => {});
+		}
+		throw err;
 	} finally {
 		ctx._activeWorkflows?.delete(canonicalFilePath);
 	}

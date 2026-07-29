@@ -75,7 +75,7 @@ export function stateSet(key) {
 
 			const value = items.length === 1 ? items[0] : items;
 
-			await writeStateJson({ env: stateEnv(ctx), key, value });
+			await writeStateJson({ env: stateEnv(ctx), key, value, signal: ctx?.signal });
 
 			// Pass through the value
 			return {
@@ -119,6 +119,6 @@ export async function readState(key, ctx = {}) {
  * @param {Object} [ctx]
  * @returns {Promise<void>}
  */
-export async function writeState(key, value, ctx = {}) {
-	await writeStateJson({ env: stateEnv(ctx), key, value });
+export async function writeState(key, value, ctx: any = {}) {
+	await writeStateJson({ env: stateEnv(ctx), key, value, signal: ctx?.signal });
 }

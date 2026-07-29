@@ -154,6 +154,97 @@ test("workflow resume cancellation cleans up resume state", async () => {
 	assert.deepEqual(resumeStateFiles, []);
 });
 
+test("direct workflow resume consumes its capability after cancellation starts an effect", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-direct-cancel-"));
+	const stateDir = path.join(tmpDir, "state");
+	const effectPath = path.join(tmpDir, "effects.log");
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{
+					id: "approve",
+					command:
+						"node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?',items:[{id:1}]}}))\"",
+					approval: "required",
+				},
+				{
+					id: "effect",
+					run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+					condition: "$approve.approved",
+				},
+			],
+		}),
+		"utf8",
+	);
+	const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+	const first = await runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		},
+	});
+	assert.equal(first.status, "needs_approval");
+	const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+	assert.equal(payload.kind, "workflow-file");
+	assert.ok(payload.stateKey);
+
+	const controller = new AbortController();
+	const resumed = runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+			signal: controller.signal,
+		},
+		resume: payload,
+		approved: true,
+	});
+	for (let attempt = 0; attempt < 100; attempt++) {
+		try {
+			await fsp.access(effectPath);
+			break;
+		} catch {
+			if (attempt === 99) throw new Error("workflow effect did not start");
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	controller.abort(new Error("cancel after dispatch"));
+	await assert.rejects(() => resumed, /cancel after dispatch/);
+	assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+	const stateFiles = await fsp.readdir(stateDir);
+	assert.equal(
+		stateFiles.some((file) => file.startsWith("approval_")),
+		false,
+	);
+
+	await assert.rejects(
+		() =>
+			runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			}),
+		/Workflow resume state not found/,
+	);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+});
+
 test("workflow resume accepts workflow-resume_ state key aliases and cleans up state", async () => {
 	const workflow = {
 		steps: [

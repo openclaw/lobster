@@ -56,12 +56,20 @@ export function readLineFromStream(
 			buf += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
 			consumeLine();
 		};
+		const drainBuffered = () => {
+			let chunk: Buffer | string | null;
+			while (!settled && (chunk = stream.read()) !== null) onData(chunk);
+		};
 
 		const onEnd = () => {
+			drainBuffered();
+			if (settled) return;
 			unreadInput.delete(stream);
 			finish(buf);
 		};
 		const onClose = () => {
+			drainBuffered();
+			if (settled) return;
 			unreadInput.delete(stream);
 			finish(buf);
 		};
@@ -87,7 +95,8 @@ export function readLineFromStream(
 		stream.on("close", onClose);
 		stream.on("error", onError);
 		signal?.addEventListener("abort", onAbort, { once: true });
-		if (!consumeLine()) {
+		drainBuffered();
+		if (!settled && !consumeLine()) {
 			if (observableStream.readableEnded || observableStream.destroyed || observableStream.closed)
 				onEnd();
 			else stream.resume();

@@ -55,6 +55,7 @@ export function diffLast(key, options: any = {}) {
 				env: stateEnv(ctx),
 				key,
 				value,
+				signal: ctx?.signal,
 			});
 
 			// Build result
@@ -91,6 +92,6 @@ export function diffLast(key, options: any = {}) {
  * @param {Object} [ctx]
  * @returns {Promise<{before: any, after: any, changed: boolean}>}
  */
-export async function diffAndStoreValue(key, value, ctx = {}) {
-	return diffAndStore({ env: stateEnv(ctx), key, value });
+export async function diffAndStoreValue(key, value, ctx: any = {}) {
+	return diffAndStore({ env: stateEnv(ctx), key, value, signal: ctx?.signal });
 }

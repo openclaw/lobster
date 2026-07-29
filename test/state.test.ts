@@ -462,6 +462,78 @@ test("diffAndStore serializes cancellation rollback before a concurrent snapshot
 	assert.deepEqual(leftovers, []);
 });
 
+test("state.set stops waiting for a live state lock when its signal is aborted", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-state-lock-abort-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	const key = "blocked";
+	const lockPath = `${keyToPath(tmp, key)}.lock`;
+	await fsp.mkdir(lockPath);
+	await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+	const controller = new AbortController();
+	const stateSet = createDefaultRegistry().get("state.set");
+	const pending = stateSet.run({
+		input: streamOf([{ value: true }]),
+		args: { _: [key] },
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			signal: controller.signal,
+		},
+	});
+	const completion = pending.then(
+		() => ({ kind: "success" as const }),
+		(error) => ({ kind: "error" as const, error }),
+	);
+
+	await new Promise((resolve) => setImmediate(resolve));
+	controller.abort(new Error("state lock cancelled"));
+	const early = await Promise.race([
+		completion,
+		new Promise<{ kind: "timeout" }>((resolve) =>
+			setTimeout(() => resolve({ kind: "timeout" }), 75),
+		),
+	]);
+	if (early.kind === "timeout") await fsp.rm(lockPath, { recursive: true, force: true });
+	const settled = early.kind === "timeout" ? await completion : early;
+
+	assert.notEqual(early.kind, "timeout", "state.set must not remain blocked after cancellation");
+	assert.equal(settled.kind, "error");
+	if (settled.kind === "error") assert.match(settled.error?.message ?? "", /state lock cancelled/);
+	await fsp.rm(lockPath, { recursive: true, force: true });
+});
+
+test("diffAndStore does not reclaim a live fallback lock after a short heartbeat gap", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-state-lock-lease-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	const key = "snapshot";
+	const lockPath = `${keyToPath(tmp, key)}.lock`;
+	const ownerPath = path.join(lockPath, "owner");
+	await fsp.mkdir(lockPath);
+	await fsp.writeFile(ownerPath, `${process.pid}::live-writer\n`, "utf8");
+	const briefGap = new Date(Date.now() - 2_000);
+	await fsp.utimes(lockPath, briefGap, briefGap);
+	await fsp.utimes(ownerPath, briefGap, briefGap);
+
+	const controller = new AbortController();
+	const abort = setTimeout(
+		() => controller.abort(new Error("live fallback lock remained held")),
+		100,
+	);
+	try {
+		await assert.rejects(
+			() => diffAndStore({ env, key, value: { version: "new" }, signal: controller.signal }),
+			/live fallback lock remained held/,
+		);
+	} finally {
+		clearTimeout(abort);
+		await fsp.rm(lockPath, { recursive: true, force: true });
+	}
+	assert.equal(await readStateJson({ env, key }), null);
+});
+
 test("diffAndStore reclaims an old lock with a malformed owner", async () => {
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-malformed-lock-"));
 	const env = { LOBSTER_STATE_DIR: tmp };

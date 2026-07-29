@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
 import { readLineFromStream } from "../src/read_line.js";
@@ -46,6 +47,23 @@ test("readLineFromStream returns buffered input after a child pipe reaches EOF",
 	assert.equal(await first, "yes");
 	await once(child, "close");
 	assert.equal(await readLineFromStream(child.stdout, { timeoutMs: 50 }), "partial");
+});
+
+test("readLineFromStream drains a buffer that remains readable after EOF", async () => {
+	let buffered: Buffer | null = Buffer.from("partial");
+	const input = Object.assign(new EventEmitter(), {
+		readableEnded: true,
+		closed: true,
+		read() {
+			const value = buffered;
+			buffered = null;
+			return value;
+		},
+		pause() {},
+		resume() {},
+	}) as unknown as NodeJS.ReadableStream;
+
+	assert.equal(await readLineFromStream(input), "partial");
 });
 
 test("readLineFromStream resolves on end without newline", async () => {

@@ -227,16 +227,12 @@ export async function resumeToolRequest({
 	}
 
 	if (payload.kind === "workflow-file") {
-		let workflowExecutionStarted = false;
 		let workflowResumeStateKey = payload.stateKey;
 		try {
 			const output = await runWorkflowFile({
 				filePath: payload.filePath,
 				ctx: {
 					...runtime,
-					_onExecutionStart: () => {
-						workflowExecutionStarted = true;
-					},
 					_onResumeStateResolved: (stateKey) => {
 						workflowResumeStateKey = stateKey;
 					},
@@ -261,13 +257,6 @@ export async function resumeToolRequest({
 		} catch (err: any) {
 			if (err instanceof WorkflowResumeArgumentError) {
 				return errorEnvelope("parse_error", err.message);
-			}
-			const abortedResume = runtime.signal?.aborted === true;
-			if (abortedResume && workflowExecutionStarted) {
-				await cleanupIndex(workflowResumeStateKey);
-				if (workflowResumeStateKey) {
-					await deleteStateJson({ env: runtime.env, key: workflowResumeStateKey });
-				}
 			}
 			// Non-abort failures and cancellations before step execution remain retryable.
 			return errorEnvelope("runtime_error", err?.message ?? String(err));

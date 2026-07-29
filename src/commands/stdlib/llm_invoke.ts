@@ -472,6 +472,7 @@ async function runLlmInvoke({
 				cacheKey,
 				items: normalized,
 				stateType: config.stateType,
+				signal: ctx.signal,
 			});
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
 			return { output: streamOf(normalized) };
@@ -485,6 +486,7 @@ async function runLlmInvoke({
 				cacheKey,
 				items: normalized,
 				stateType: config.stateType,
+				signal: ctx.signal,
 			});
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
 			return { output: streamOf(normalized) };
@@ -895,12 +897,14 @@ async function persistOutputs({
 	cacheKey,
 	items,
 	stateType,
+	signal,
 }: {
 	env: any;
 	stateKey: string | null;
 	cacheKey: string;
 	items: NormalizedInvocationItem[];
 	stateType: string;
+	signal?: AbortSignal;
 }) {
 	if (!stateKey) return;
 	const record = {
@@ -910,7 +914,7 @@ async function persistOutputs({
 		items,
 		storedAt: new Date().toISOString(),
 	};
-	await writeStateJson({ env, key: stateKey, value: record });
+	await writeStateJson({ env, key: stateKey, value: record, signal });
 }
 
 async function readReusableLlmState(env: any, stateKey: string) {

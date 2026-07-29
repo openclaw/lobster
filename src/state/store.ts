@@ -45,7 +45,7 @@ type AtomicExclusiveWriteOptions = {
 };
 
 const STATE_LOCK_RETRY_MS = 10;
-const STATE_LOCK_ORPHAN_MS = 1_000;
+const STATE_LOCK_ORPHAN_MS = 30_000;
 const STATE_LOCK_HEARTBEAT_MS = 250;
 
 function isDirectorySyncUnsupportedError(err: any): boolean {
@@ -180,6 +180,26 @@ async function isStateLockOld(lockPath: string) {
 	}
 }
 
+async function hasExpiredStateLockLease(lockPath: string) {
+	let first;
+	try {
+		first = await fsp.stat(lockPath);
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return true;
+		throw err;
+	}
+	if (Date.now() - first.mtimeMs < STATE_LOCK_ORPHAN_MS) return false;
+
+	await new Promise<void>((resolve) => setTimeout(resolve, STATE_LOCK_HEARTBEAT_MS));
+	try {
+		const second = await fsp.stat(lockPath);
+		return second.mtimeMs === first.mtimeMs && Date.now() - second.mtimeMs >= STATE_LOCK_ORPHAN_MS;
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return true;
+		throw err;
+	}
+}
+
 async function reclaimOrphanedStateLock(lockPath: string) {
 	let stale = false;
 	try {
@@ -192,8 +212,9 @@ async function reclaimOrphanedStateLock(lockPath: string) {
 				stale = owner.processStartIdentity !== processStartIdentity;
 			} else {
 				// A live PID without a matching process-instance identity may have
-				// been reused. Active writers renew this lease while holding the lock.
-				stale = await isStateLockOld(ownerPath);
+				// been reused. Require a conservative expired lease and a second
+				// unchanged observation before reclaiming it.
+				stale = await hasExpiredStateLockLease(ownerPath);
 			}
 		} else if (owner) {
 			stale = true;

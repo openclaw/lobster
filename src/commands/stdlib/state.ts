@@ -66,7 +66,7 @@ export const stateSetCommand = {
 
 		const value = items.length === 1 ? items[0] : items;
 
-		await writeStateJson({ env: ctx.env, key, value });
+		await writeStateJson({ env: ctx.env, key, value, signal: ctx.signal });
 
 		return { output: asStream([value]) };
 	},
