@@ -936,6 +936,7 @@ export async function runWorkflowFile({
 				ctx.stdout.write("Enter JSON response: ");
 				const raw = await readLineFromStream(ctx.stdin, {
 					timeoutMs: parseApprovalTimeoutMs(ctx.env),
+					signal: ctx.signal,
 				});
 				const parsed = parseResponseJson(String(raw ?? "").trim());
 				validateInputResponse({
@@ -1514,6 +1515,7 @@ export async function runWorkflowFile({
 				ctx.stdout.write(`${approval.prompt} [y/N] `);
 				const answer = await readLineFromStream(ctx.stdin, {
 					timeoutMs: parseApprovalTimeoutMs(ctx.env),
+					signal: ctx.signal,
 				});
 				if (!/^y(es)?$/i.test(String(answer).trim())) {
 					throw new Error("Not approved");

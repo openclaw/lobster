@@ -15,11 +15,13 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { resumeToolRequest, runToolRequest } from "../src/core/tool_runtime.js";
 import { decodeResumeToken } from "../src/resume.js";
+import { runPipeline } from "../src/runtime.js";
 import { keyToPath } from "../src/state/store.js";
 import { encodeToken } from "../src/token.js";
 
@@ -59,21 +61,49 @@ async function waitForFile(path: string, timeoutMs = 2000) {
 	throw new Error(`Timed out waiting for ${path}`);
 }
 
+async function waitForChildProcess(parentPid: number, timeoutMs = 5000) {
+	const childrenPath = `/proc/${parentPid}/task/${parentPid}/children`;
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		try {
+			const children = (await readFile(childrenPath, "utf8"))
+				.trim()
+				.split(/\s+/)
+				.map(Number)
+				.filter(Number.isInteger);
+			if (children.length === 1) return children[0];
+		} catch {
+			// The pseudo-terminal process may not have spawned the CLI yet.
+		}
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(`Timed out waiting for a child process of ${parentPid}`);
+}
+
 function startLobsterCli({
 	args,
 	cwd,
 	env,
+	interactive = false,
 }: {
 	args: string[];
 	cwd: string;
 	env: NodeJS.ProcessEnv;
+	interactive?: boolean;
 }) {
 	const repoRoot = join(__dirname, "..", "..");
-	const child = spawn(process.execPath, [join(repoRoot, "bin", "lobster.js"), ...args], {
-		cwd,
-		env,
-		stdio: ["ignore", "pipe", "pipe"],
-	});
+	const entry = join(repoRoot, "bin", "lobster.js");
+	const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+	const command = `exec ${[process.execPath, entry, ...args].map(shellQuote).join(" ")}`;
+	const child = spawn(
+		interactive ? "script" : process.execPath,
+		interactive ? ["-qefc", command, "/dev/null"] : [entry, ...args],
+		{
+			cwd,
+			env,
+			stdio: [interactive ? "pipe" : "ignore", "pipe", "pipe"],
+		},
+	);
 	let stdout = "";
 	let stderr = "";
 	child.stdout?.setEncoding("utf8");
@@ -93,7 +123,16 @@ function startLobsterCli({
 		child.once("error", reject);
 		child.once("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
 	});
-	return { child, result };
+	return { child, result, getStdout: () => stdout };
+}
+
+async function waitForCliOutput(getStdout: () => string, pattern: RegExp, timeoutMs = 5000) {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (pattern.test(getStdout())) return;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(`Timed out waiting for CLI output matching ${pattern}`);
 }
 
 async function observeSettlement<T>(promise: Promise<T>, timeoutMs: number) {
@@ -1088,6 +1127,100 @@ test(
 			if (server.listening) {
 				await new Promise<void>((resolve) => server.close(() => resolve()));
 			}
+		}
+	},
+);
+
+test("interactive ctx.requestInput aborts its input read", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-request-input-abort-"));
+	try {
+		const stdin = new PassThrough() as PassThrough & { isTTY?: boolean };
+		Object.defineProperty(stdin, "isTTY", { value: true });
+		const stdout = new PassThrough();
+		let promptSeen!: () => void;
+		const prompt = new Promise<void>((resolve) => {
+			promptSeen = resolve;
+		});
+		stdout.once("data", () => promptSeen());
+		const controller = new AbortController();
+		const choose = {
+			name: "test.interactive-input",
+			async run({ ctx }: any) {
+				await ctx.requestInput({
+					prompt: "Choose a value",
+					responseSchema: { type: "object" },
+				});
+				return { output: streamOf([]) };
+			},
+		};
+		const run = runPipeline({
+			pipeline: [{ name: "test.interactive-input", args: { _: [] } }],
+			registry: withCommands(createDefaultRegistry(), choose),
+			input: [],
+			stdin,
+			stdout,
+			stderr: new PassThrough(),
+			env: { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") },
+			mode: "human",
+			signal: controller.signal,
+		});
+
+		await prompt;
+		controller.abort(new Error("input cancelled"));
+		await assert.rejects(run, /input cancelled/);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test(
+	"CLI SIGINT aborts interactive workflow input and approval prompts",
+	{ skip: process.platform !== "linux" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-cli-sigint-workflow-prompts-"));
+		try {
+			for (const scenario of [
+				{
+					name: "input",
+					prompt: /Enter JSON response:/,
+					workflow: {
+						steps: [
+							{
+								id: "answer",
+								input: { prompt: "Continue?", responseSchema: { type: "object" } },
+							},
+						],
+					},
+				},
+				{
+					name: "approval",
+					prompt: /Continue\? \[y\/N\]/,
+					workflow: { steps: [{ id: "approve", approval: "Continue?" }] },
+				},
+			]) {
+				const workflowPath = join(dir, `${scenario.name}.lobster`);
+				await writeFile(workflowPath, JSON.stringify(scenario.workflow), "utf8");
+				const cli = startLobsterCli({
+					args: ["run", "--mode", "human", "--file", workflowPath],
+					cwd: dir,
+					env: process.env,
+					interactive: true,
+				});
+				try {
+					await waitForCliOutput(cli.getStdout, scenario.prompt);
+					const cliPid = await waitForChildProcess(cli.child.pid!);
+					process.kill(cliPid, "SIGINT");
+					const exited = await observeSettlement(cli.result, 5000);
+					assert.equal(exited.settled, true, `${scenario.name} prompt must exit after one SIGINT`);
+					if (!exited.settled) continue;
+					assert.equal(exited.value.signal, null);
+					assert.equal(exited.value.code, 130);
+				} finally {
+					cli.child.kill("SIGKILL");
+				}
+			}
+		} finally {
+			await rm(dir, { recursive: true, force: true });
 		}
 	},
 );

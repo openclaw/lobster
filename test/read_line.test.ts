@@ -39,5 +39,6 @@ test("readLineFromStream rejects when its signal is aborted", async () => {
 	controller.abort(new Error("input cancelled"));
 
 	await assert.rejects(() => promise, /input cancelled/);
+	assert.equal(input.readableFlowing, false);
 	input.end();
 });

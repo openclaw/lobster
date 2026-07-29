@@ -15,6 +15,7 @@ export function readLineFromStream(
 			stream.off("end", onEnd);
 			stream.off("close", onClose);
 			stream.off("error", onError);
+			stream.pause();
 			signal?.removeEventListener("abort", onAbort);
 			if (timer) clearTimeout(timer);
 		};
