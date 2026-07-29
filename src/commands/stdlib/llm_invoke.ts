@@ -106,7 +106,13 @@ const validateResponseEnvelope = ajv.compile(responseSchema);
 const DEFAULT_MAX_VALIDATION_RETRIES = 1;
 const STATE_VERSION = 1;
 
-type BuiltInProvider = "openclaw" | "pi" | "http";
+type BuiltInProvider = "openclaw" | "pi" | "http" | "minimax";
+
+const MINIMAX_DEFAULT_MODEL = "MiniMax-M3";
+const MINIMAX_REGION_BASE_URLS: Record<string, string> = {
+	global_en: "https://api.minimax.io/v1",
+	cn_zh: "https://api.minimaxi.com/v1",
+};
 type SupportedProvider = BuiltInProvider | string;
 
 type LlmResponseEnvelope = {
@@ -208,10 +214,11 @@ export const llmInvokeCommand = createLlmInvokeCommand({
 	helpTitle: "llm.invoke — call a configured LLM adapter with caching and schema validation",
 	helpConfig: [
 		"Provider resolution order: --provider, LOBSTER_LLM_PROVIDER, then environment auto-detect.",
-		"Built-in providers: openclaw, pi, http.",
+		"Built-in providers: openclaw, pi, http, minimax.",
 		"OpenClaw provider uses OPENCLAW_URL (CLAWD_URL also supported) and OPENCLAW_TOKEN.",
 		"Pi provider uses LOBSTER_PI_LLM_ADAPTER_URL and is intended to be supplied by a Pi extension.",
 		"Generic http provider uses LOBSTER_LLM_ADAPTER_URL and optional LOBSTER_LLM_ADAPTER_TOKEN.",
+		"MiniMax provider uses MINIMAX_API_KEY with --region global_en (default) or cn_zh; models default to MiniMax-M3 (also MiniMax-M2.7).",
 	],
 	helpExamples: [
 		"llm.invoke --prompt 'Write summary'",
@@ -258,7 +265,8 @@ export function createLlmInvokeCommand(config: CommandConfig): LobsterCommand {
 				properties: {
 					provider: {
 						type: "string",
-						description: "LLM adapter provider (openclaw, pi, http). Optional if auto-detected.",
+						description:
+							"LLM adapter provider (openclaw, pi, http, minimax). Optional if auto-detected.",
 					},
 					token: {
 						type: "string",
@@ -268,6 +276,14 @@ export function createLlmInvokeCommand(config: CommandConfig): LobsterCommand {
 					model: {
 						type: "string",
 						description: "Model identifier. Optional; adapter defaults may apply if omitted.",
+					},
+					region: {
+						type: "string",
+						description: "MiniMax region selector: global_en (default) or cn_zh.",
+					},
+					"base-url": {
+						type: "string",
+						description: "Override the provider base URL (MiniMax OpenAI-compatible endpoint).",
 					},
 					"artifacts-json": { type: "string", description: "JSON array of artifacts to send" },
 					"metadata-json": { type: "string", description: "JSON object of metadata to include" },
@@ -506,7 +522,12 @@ function resolveProvider(
 		.trim()
 		.toLowerCase();
 	if (explicit) {
-		if (explicit === "openclaw" || explicit === "pi" || explicit === "http") {
+		if (
+			explicit === "openclaw" ||
+			explicit === "pi" ||
+			explicit === "http" ||
+			explicit === "minimax"
+		) {
 			return explicit;
 		}
 		if (getDirectAdapter(ctx, explicit)) {
@@ -523,6 +544,7 @@ function resolveProvider(
 	if (String(env.LOBSTER_PI_LLM_ADAPTER_URL ?? "").trim()) return "pi";
 	if (String(env.OPENCLAW_URL ?? env.CLAWD_URL ?? "").trim()) return "openclaw";
 	if (String(env.LOBSTER_LLM_ADAPTER_URL ?? "").trim()) return "http";
+	if (String(env.MINIMAX_API_KEY ?? env.LOBSTER_MINIMAX_API_KEY ?? "").trim()) return "minimax";
 	throw new Error(
 		"llm.invoke could not resolve a provider. Set --provider or LOBSTER_LLM_PROVIDER",
 	);
@@ -580,6 +602,23 @@ function resolveAdapter({
 			source: config.sourceForProvider?.(provider) ?? "pi",
 			async invoke({ payload }) {
 				return invokeHttpAdapter({ endpoint: buildAdapterEndpoint(adapterUrl), token, payload });
+			},
+		};
+	}
+
+	if (provider === "minimax") {
+		const token = String(
+			args.token ?? env.MINIMAX_API_KEY ?? env.LOBSTER_MINIMAX_API_KEY ?? "",
+		).trim();
+		if (!token) {
+			throw new Error(`${config.name} requires MINIMAX_API_KEY for provider=minimax`);
+		}
+		const endpoint = buildMinimaxEndpoint(resolveMinimaxBaseUrl(args, env));
+		return {
+			provider,
+			source: config.sourceForProvider?.(provider) ?? "minimax",
+			async invoke({ payload }) {
+				return invokeMinimaxAdapter({ endpoint, token, payload });
 			},
 		};
 	}
@@ -700,6 +739,129 @@ async function invokeHttpAdapter({
 		return parsed as LlmResponseEnvelope;
 	}
 	return { ok: true, result: parsed } as LlmResponseEnvelope;
+}
+
+function resolveMinimaxRegion(args: any, env: any): "global_en" | "cn_zh" {
+	const raw = String(args.region ?? env.MINIMAX_REGION ?? "")
+		.trim()
+		.toLowerCase();
+	if (["cn", "cn_zh", "china", "zh"].includes(raw)) return "cn_zh";
+	return "global_en";
+}
+
+export function resolveMinimaxBaseUrl(args: any, env: any) {
+	const explicit = String(args["base-url"] ?? env.MINIMAX_BASE_URL ?? "").trim();
+	if (explicit) return explicit;
+	return MINIMAX_REGION_BASE_URLS[resolveMinimaxRegion(args, env)];
+}
+
+export function buildMinimaxEndpoint(rawUrl: string) {
+	const endpoint = new URL(rawUrl);
+	const normalizedPath = endpoint.pathname.replace(/\/+$/, "");
+	if (!normalizedPath.endsWith("/chat/completions")) {
+		endpoint.pathname = `${normalizedPath}/chat/completions`;
+	}
+	return endpoint;
+}
+
+function buildMinimaxMessages(payload: Record<string, any>) {
+	const parts: string[] = [];
+	if (payload.prompt) parts.push(String(payload.prompt));
+	const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
+	for (const artifact of artifacts) {
+		if (artifact && typeof artifact === "object") {
+			if (typeof artifact.text === "string" && artifact.text.trim()) {
+				parts.push(artifact.text);
+			} else if (artifact.data !== undefined && artifact.data !== null) {
+				parts.push(stableStringify(artifact.data));
+			}
+		}
+	}
+	return [{ role: "user", content: parts.join("\n\n") }];
+}
+
+async function invokeMinimaxAdapter({
+	endpoint,
+	token,
+	payload,
+}: {
+	endpoint: URL;
+	token: string;
+	payload: any;
+}): Promise<LlmResponseEnvelope> {
+	const body: Record<string, any> = {
+		model: payload.model || MINIMAX_DEFAULT_MODEL,
+		messages: buildMinimaxMessages(payload),
+	};
+	if (Number.isFinite(payload.temperature)) body.temperature = Number(payload.temperature);
+	if (Number.isFinite(payload.maxOutputTokens)) body.max_tokens = Number(payload.maxOutputTokens);
+	if (payload.outputSchema) body.response_format = { type: "json_object" };
+
+	const res = await fetch(endpoint, {
+		method: "POST",
+		headers: {
+			"content-type": "application/json",
+			authorization: `Bearer ${token}`,
+		},
+		body: JSON.stringify(body),
+	});
+
+	const text = await res.text();
+	if (!res.ok) {
+		throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 400)}`);
+	}
+
+	let parsed: any;
+	try {
+		parsed = text ? JSON.parse(text) : null;
+	} catch {
+		throw new Error("Response was not JSON");
+	}
+
+	const baseResp = parsed?.base_resp;
+	if (baseResp && Number(baseResp.status_code) !== 0) {
+		throw new Error(
+			`minimax adapter error: ${baseResp.status_msg ?? `status_code ${baseResp.status_code}`}`,
+		);
+	}
+
+	const choice = Array.isArray(parsed?.choices) ? parsed.choices[0] : null;
+	const content = typeof choice?.message?.content === "string" ? choice.message.content : null;
+
+	let data: any = null;
+	let format = "text";
+	if (content && content.trim()) {
+		try {
+			const structured = JSON.parse(content);
+			if (structured && typeof structured === "object") {
+				data = structured;
+				format = "json";
+			}
+		} catch {
+			// leave content as plain text
+		}
+	}
+
+	const usage = parsed?.usage ?? {};
+	const usageOut: Record<string, number> = {};
+	const inputTokens = Number(usage.prompt_tokens);
+	if (Number.isFinite(inputTokens)) usageOut.inputTokens = inputTokens;
+	const outputTokens = Number(usage.completion_tokens);
+	if (Number.isFinite(outputTokens)) usageOut.outputTokens = outputTokens;
+	const totalTokens = Number(usage.total_tokens);
+	if (Number.isFinite(totalTokens)) usageOut.totalTokens = totalTokens;
+
+	const output: Record<string, any> = { format, data };
+	if (typeof content === "string") output.text = content;
+
+	const result: Record<string, any> = { output };
+	if (typeof parsed?.id === "string") result.runId = parsed.id;
+	if (typeof parsed?.model === "string") result.model = parsed.model;
+	if (typeof payload.prompt === "string") result.prompt = payload.prompt;
+	result.status = String(choice?.finish_reason ?? "completed");
+	if (Object.keys(usageOut).length) result.usage = usageOut;
+
+	return { ok: true, result: result as LlmResponse };
 }
 
 function resolveModel(args: any, env: any, legacyEnvCompat: boolean | undefined) {
@@ -864,7 +1026,8 @@ function normalizeResult({
 			source !== "openclaw" &&
 			source !== "clawd" &&
 			source !== "pi" &&
-			source !== "http",
+			source !== "http" &&
+			source !== "minimax",
 		attemptCount: attempt,
 	};
 	return [item];

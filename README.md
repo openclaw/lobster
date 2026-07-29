@@ -257,6 +257,7 @@ Use `llm.invoke` from a native `pipeline:` step for model-backed work:
 llm.invoke --prompt 'Summarize this diff'
 llm.invoke --provider openclaw --prompt 'Summarize this diff'
 llm.invoke --provider pi --prompt 'Summarize this diff'
+llm.invoke --provider minimax --prompt 'Summarize this diff'
 ```
 
 Provider resolution order:
@@ -270,6 +271,7 @@ Built-in providers today:
 - `openclaw` via `OPENCLAW_URL` / `OPENCLAW_TOKEN`
 - `pi` via `LOBSTER_PI_LLM_ADAPTER_URL` (typically supplied by the Pi extension)
 - `http` via `LOBSTER_LLM_ADAPTER_URL`
+- `minimax` via `MINIMAX_API_KEY`, calling the OpenAI-compatible endpoint. Select the endpoint with `--region global_en` (default) or `--region cn_zh`, or override with `--base-url`. Models default to `MiniMax-M3` (also `MiniMax-M2.7`).
 
 Workflow `_meta.cost` and `cost_limit` use a static pricing table plus optional overrides from `LOBSTER_LLM_PRICING_JSON`, for example `{"my-model":{"input":1.0,"output":2.0}}` in USD per million tokens. Unknown or missing model IDs still record token counts with zero estimated cost, but Lobster warns on stderr so stale or missing pricing does not fail silently.
 

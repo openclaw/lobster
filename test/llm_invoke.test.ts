@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
+import { buildMinimaxEndpoint, resolveMinimaxBaseUrl } from "../src/commands/stdlib/llm_invoke.js";
 
 function streamOf(items: any[]) {
 	return (async function* () {
@@ -165,6 +166,103 @@ test("llm.invoke uses Pi adapter over local HTTP bridge", async () => {
 		await rm(cacheDir, { recursive: true, force: true });
 		await closeServer(server);
 	}
+});
+
+test("llm.invoke uses the MiniMax adapter and normalizes OpenAI-compatible output", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+
+	const requestLog: any[] = [];
+	const server = http.createServer((req, res) => {
+		if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
+			res.writeHead(404);
+			res.end("nope");
+			return;
+		}
+		let buf = "";
+		req.setEncoding("utf8");
+		req.on("data", (d) => (buf += d));
+		req.on("end", () => {
+			const parsed = JSON.parse(buf || "{}");
+			requestLog.push({ headers: req.headers, body: parsed });
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					id: "mm_1",
+					model: parsed.model,
+					choices: [
+						{
+							finish_reason: "stop",
+							message: { role: "assistant", content: '{"decision":"reply"}' },
+						},
+					],
+					usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 },
+					base_resp: { status_code: 0, status_msg: "success" },
+				}),
+			);
+		});
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+
+	try {
+		const result = await cmd.run({
+			input: streamOf([{ kind: "text", text: "context" }]),
+			args: {
+				_: [],
+				provider: "minimax",
+				prompt: "Decide",
+				"base-url": `http://127.0.0.1:${port}/v1`,
+				"output-schema": '{"type":"object","required":["decision"]}',
+			},
+			ctx: baseCtx({ MINIMAX_API_KEY: "test-key", LOBSTER_CACHE_DIR: cacheDir }, registry),
+		} as any);
+
+		const items = await collect(result.output!);
+		assert.equal(items.length, 1);
+		assert.equal(items[0].kind, "llm.invoke");
+		assert.equal(items[0].source, "minimax");
+		assert.equal(items[0].cached, false);
+		assert.equal(items[0].runId, "mm_1");
+		assert.equal(items[0].model, "MiniMax-M3");
+		assert.equal(items[0].output.format, "json");
+		assert.equal(items[0].output.data.decision, "reply");
+		assert.equal(items[0].usage.inputTokens, 12);
+		assert.equal(items[0].usage.outputTokens, 5);
+		assert.equal(requestLog.length, 1);
+		assert.equal(requestLog[0].headers.authorization, "Bearer test-key");
+		assert.equal(requestLog[0].body.model, "MiniMax-M3");
+		assert.equal(requestLog[0].body.messages[0].role, "user");
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
+		await closeServer(server);
+	}
+});
+
+test("MiniMax region selection maps to global and China endpoints", () => {
+	assert.equal(resolveMinimaxBaseUrl({}, {}), "https://api.minimax.io/v1");
+	assert.equal(resolveMinimaxBaseUrl({ region: "global_en" }, {}), "https://api.minimax.io/v1");
+	assert.equal(resolveMinimaxBaseUrl({ region: "cn_zh" }, {}), "https://api.minimaxi.com/v1");
+	assert.equal(
+		resolveMinimaxBaseUrl({}, { MINIMAX_REGION: "cn_zh" }),
+		"https://api.minimaxi.com/v1",
+	);
+	assert.equal(
+		resolveMinimaxBaseUrl({ "base-url": "https://proxy.example/v1" }, { MINIMAX_REGION: "cn_zh" }),
+		"https://proxy.example/v1",
+	);
+	assert.equal(
+		buildMinimaxEndpoint("https://api.minimaxi.com/v1").toString(),
+		"https://api.minimaxi.com/v1/chat/completions",
+	);
+	assert.equal(
+		buildMinimaxEndpoint("https://api.minimax.io/v1/chat/completions").toString(),
+		"https://api.minimax.io/v1/chat/completions",
+	);
 });
 
 function baseCtx(envOverrides: Record<string, string>, registry?: any) {

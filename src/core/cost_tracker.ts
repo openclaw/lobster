@@ -28,6 +28,8 @@ const DEFAULT_PRICING: Record<string, { input: number; output: number }> = {
 	"claude-haiku-3-5": { input: 0.8, output: 4.0 },
 	"gemini-1.5-pro": { input: 1.25, output: 5.0 },
 	"gemini-1.5-flash": { input: 0.075, output: 0.3 },
+	"MiniMax-M3": { input: 0.6, output: 2.4 },
+	"MiniMax-M2.7": { input: 0.3, output: 1.2 },
 };
 
 const INVALID_PRICING_JSON_WARNING =
