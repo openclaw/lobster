@@ -50,6 +50,7 @@ export async function runPipeline({
 	let halted = false;
 	let haltedAt = null;
 	let pipelineOutputStarted = false;
+	let executionStarted = false;
 
 	const baseCtx = {
 		stdin,
@@ -69,6 +70,9 @@ export async function runPipeline({
 		const command = registry.get(stage.name);
 		if (!command) {
 			throw new Error(`Unknown command: ${stage.name}`);
+		}
+		if (command.meta?.resumeSafeBeforeInput !== true) {
+			executionStarted = true;
 		}
 
 		const inputTracker = createInputTracker(stream);
@@ -181,7 +185,7 @@ export async function runPipeline({
 	if (haltAfterStageOnAbort) signal?.throwIfAborted();
 	assertRequestInputResumeConsumed(requestInputResume);
 
-	return { items, rendered, halted, haltedAt };
+	return { items, rendered, halted, haltedAt, executionStarted };
 
 	function haltForInputRequest(err: unknown) {
 		if (!(err instanceof InputRequestSuspension)) return false;
@@ -223,7 +227,7 @@ function dryRunPipeline({
 	lines.push("");
 	stderr.write(lines.join("\n"));
 	// Return rendered:true so the CLI does not print an empty JSON array to stdout.
-	return { items: [], rendered: true, halted: false, haltedAt: null };
+	return { items: [], rendered: true, halted: false, haltedAt: null, executionStarted: false };
 }
 
 function formatStageArgs(args: Record<string, unknown>) {

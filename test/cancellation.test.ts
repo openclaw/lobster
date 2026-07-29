@@ -950,6 +950,77 @@ test("pipeline approval resume restores its original capability after next-input
 	}
 });
 
+test("pipeline cancellation after side effects does not restore the consumed approval capability", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pipeline-side-effect-gate-cancel-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		let sideEffects = 0;
+		const sideEffectThenInput = {
+			name: "test.side-effect-then-input",
+			async run({ ctx }: any) {
+				sideEffects += 1;
+				await ctx.requestInput({
+					prompt: "Second?",
+					responseSchema: { type: "object" },
+				});
+				return { output: streamOf([]) };
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), sideEffectThenInput);
+		const first = await runToolRequest({
+			pipeline: "approve --prompt First? | test.side-effect-then-input",
+			ctx: { env, registry },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const previousStatePath = keyToPath(stateDir, payload.stateKey);
+
+		const controller = new AbortController();
+		const originalUnlink = fsp.unlink;
+		Object.defineProperty(fsp, "unlink", {
+			configurable: true,
+			writable: true,
+			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
+				const result = await originalUnlink(filePath);
+				if (String(filePath) === previousStatePath && !controller.signal.aborted) {
+					controller.abort(new Error("abort after side-effecting pipeline state deletion"));
+				}
+				return result;
+			},
+		});
+		let aborted;
+		try {
+			aborted = await resumeToolRequest({
+				approvalId: first.requiresApproval.approvalId,
+				approved: true,
+				ctx: { env, registry, signal: controller.signal },
+			});
+		} finally {
+			Object.defineProperty(fsp, "unlink", {
+				configurable: true,
+				writable: true,
+				value: originalUnlink,
+			});
+		}
+		assertCancellationEnvelope(aborted!);
+		assert.equal(sideEffects, 1);
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { env, registry },
+		});
+		assert.equal(retried.ok, false);
+		assert.equal(retried.error?.type, "parse_error");
+		assert.equal(sideEffects, 1);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("workflow approval resume restores its original capability after next-input cleanup is cancelled", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-input-gate-cleanup-abort-workflow-resume-"));
 	try {

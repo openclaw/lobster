@@ -44,6 +44,7 @@ export type PipelineRunOutput = {
 	items: unknown[];
 	halted?: boolean;
 	haltedAt?: { index: number } | null;
+	executionStarted?: boolean;
 };
 
 export type PipelineToolRunResolution =
@@ -133,6 +134,7 @@ export async function finalizePipelineToolRun(params: {
 				kind: "pipeline-resume",
 				stateKey: nextStateKey,
 			});
+			await retirePreviousPipelineApprovalIndex(params.env, params.previousStateKey, nextStateKey);
 			return {
 				status: "needs_approval",
 				output: [],
@@ -184,6 +186,7 @@ export async function finalizePipelineToolRun(params: {
 				kind: "pipeline-resume",
 				stateKey: nextStateKey,
 			});
+			await retirePreviousPipelineApprovalIndex(params.env, params.previousStateKey, nextStateKey);
 			return {
 				status: "needs_input",
 				output: [],
@@ -272,6 +275,18 @@ async function restorePreviousPipelineResumeState({
 	}
 	await writeStateJson({ env, key: previousStateKey, value: previousState });
 	onPreviousStateRestored?.();
+}
+
+async function retirePreviousPipelineApprovalIndex(
+	env: Record<string, string | undefined>,
+	previousStateKey: string | undefined,
+	replacementStateKey: string,
+) {
+	if (!previousStateKey || previousStateKey === replacementStateKey) return;
+	// This runs only after replacement deletion has passed its cancellation
+	// checkpoint. Do not add a later cancellation check: the transition is
+	// committed once the old approval capability is retired.
+	await cleanupApprovalIndexByStateKey({ env, stateKey: previousStateKey }).catch(() => {});
 }
 
 async function discardPipelineResumeState(

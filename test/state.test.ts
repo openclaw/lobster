@@ -10,6 +10,7 @@ import { stateSet, readState, writeState } from "../src/sdk/primitives/state.js"
 import {
 	createApprovalIndex,
 	diffAndStore,
+	keyToPath,
 	writeStateJson,
 	readStateJson,
 	writeFileAtomic,
@@ -443,7 +444,7 @@ test("diffAndStore serializes cancellation rollback before a concurrent snapshot
 	await cancelledSnapshotPublished;
 
 	let successfulSnapshotPublished = false;
-	const successful = diffAndStore({
+	const successful = writeStateJson({
 		env,
 		key: "snapshot",
 		value: { version: "successful-B" },
@@ -467,6 +468,20 @@ test("diffAndStore serializes cancellation rollback before a concurrent snapshot
 		(file) => file.includes(".tmp") || file.endsWith(".lock"),
 	);
 	assert.deepEqual(leftovers, []);
+});
+
+test("diffAndStore reclaims an old lock with a malformed owner", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-malformed-lock-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	const lockPath = `${keyToPath(tmp, "snapshot")}.lock`;
+	await fsp.mkdir(lockPath);
+	await fsp.writeFile(path.join(lockPath, "owner"), "\n", "utf8");
+	const staleAt = new Date(Date.now() - 10_000);
+	await fsp.utimes(lockPath, staleAt, staleAt);
+
+	await diffAndStore({ env, key: "snapshot", value: { version: "recovered" } });
+	assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { version: "recovered" });
+	await assert.rejects(fsp.access(lockPath));
 });
 
 test("SDK diff primitives treat corrupt previous state as a miss (#112)", async () => {

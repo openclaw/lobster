@@ -18,6 +18,7 @@ export const approveCommand = {
 			required: [],
 		},
 		sideEffects: [],
+		resumeSafeBeforeInput: true,
 	},
 	help() {
 		return `approve — require confirmation to continue\n\nUsage:\n  ... | approve --prompt "Send these emails?"\n  ... | approve --emit --prompt "Send these emails?"\n  ... | approve --emit --preview-from-stdin --limit 5 --prompt "Proceed?"\n\nModes:\n  - Interactive (default): prompts on TTY and passes items through if approved.\n  - Emit (--emit): returns an approval request object and stops the pipeline.\n\nNotes:\n  - In tool mode (or non-interactive), this emits an approval request and halts.\n`;

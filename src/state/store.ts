@@ -140,8 +140,14 @@ async function reclaimOrphanedStateLock(lockPath: string) {
 	let stale = false;
 	try {
 		const ownerPath = path.join(lockPath, "owner");
-		const owner = Number((await fsp.readFile(ownerPath, "utf8")).trim());
-		stale = Number.isInteger(owner) && owner > 0 && !isProcessAlive(owner);
+		const ownerText = (await fsp.readFile(ownerPath, "utf8")).trim();
+		const owner = Number(ownerText.split(":", 1)[0]);
+		if (Number.isInteger(owner) && owner > 0) {
+			stale = !isProcessAlive(owner);
+		} else {
+			const stat = await fsp.stat(lockPath);
+			stale = Date.now() - stat.mtimeMs >= STATE_LOCK_ORPHAN_MS;
+		}
 	} catch (err: any) {
 		if (err?.code === "ENOENT") {
 			try {
@@ -183,13 +189,15 @@ async function withStateKeyLock<T>({
 	await ensureDirectory(stateDir);
 	const lockPath = `${keyToPath(stateDir, key)}.lock`;
 	let acquired = false;
+	let owner: string | undefined;
 	try {
 		while (!acquired) {
 			signal?.throwIfAborted();
 			try {
 				await fsp.mkdir(lockPath, { mode: 0o700 });
 				acquired = true;
-				await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}\n`, {
+				owner = `${process.pid}:${randomBytes(6).toString("hex")}\n`;
+				await fsp.writeFile(path.join(lockPath, "owner"), owner, {
 					encoding: "utf8",
 					mode: 0o600,
 				});
@@ -203,7 +211,13 @@ async function withStateKeyLock<T>({
 		}
 		return await task();
 	} finally {
-		if (acquired) await fsp.rm(lockPath, { recursive: true, force: true }).catch(() => {});
+		if (acquired) {
+			const ownerPath = path.join(lockPath, "owner");
+			const currentOwner = await fsp.readFile(ownerPath, "utf8").catch(() => undefined);
+			if (!owner || currentOwner === owner) {
+				await fsp.rm(lockPath, { recursive: true, force: true }).catch(() => {});
+			}
+		}
 	}
 }
 
@@ -323,7 +337,7 @@ export async function readStateJson({ env, key }) {
 	}
 }
 
-export async function writeStateJson({
+async function writeStateJsonUnlocked({
 	env,
 	key,
 	value,
@@ -346,7 +360,28 @@ export async function writeStateJson({
 	});
 }
 
-export async function deleteStateJson({ env, key }) {
+export async function writeStateJson({
+	env,
+	key,
+	value,
+	signal = undefined,
+	atomicWriteOptions = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	value: unknown;
+	signal?: AbortSignal;
+	atomicWriteOptions?: Omit<AtomicWriteOptions, "signal">;
+}) {
+	return withStateKeyLock({
+		env,
+		key,
+		signal,
+		task: () => writeStateJsonUnlocked({ env, key, value, signal, atomicWriteOptions }),
+	});
+}
+
+async function deleteStateJsonUnlocked({ env, key }) {
 	const stateDir = defaultStateDir(env);
 	const filePath = keyToPath(stateDir, key);
 	try {
@@ -355,6 +390,20 @@ export async function deleteStateJson({ env, key }) {
 		if (err?.code === "ENOENT") return;
 		throw err;
 	}
+}
+
+export async function deleteStateJson({
+	env,
+	key,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+}) {
+	return withStateKeyLock({
+		env,
+		key,
+		task: () => deleteStateJsonUnlocked({ env, key }),
+	});
 }
 
 function sanitizeApprovalId(approvalId: string): string {
@@ -531,14 +580,14 @@ export async function diffAndStore({
 			const changed = stableStringify(before) !== stableStringify(value);
 			try {
 				signal?.throwIfAborted();
-				await writeStateJson({ env, key, value, signal, atomicWriteOptions });
+				await writeStateJsonUnlocked({ env, key, value, signal, atomicWriteOptions });
 				signal?.throwIfAborted();
 			} catch (err) {
 				if (signal?.aborted) {
 					if (before === null) {
-						await deleteStateJson({ env, key });
+						await deleteStateJsonUnlocked({ env, key });
 					} else {
-						await writeStateJson({ env, key, value: before });
+						await writeStateJsonUnlocked({ env, key, value: before });
 					}
 				}
 				throw err;

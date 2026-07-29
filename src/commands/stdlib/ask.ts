@@ -57,6 +57,7 @@ export const askCommand = {
 			required: [],
 		},
 		sideEffects: [],
+		resumeSafeBeforeInput: true,
 	},
 	help() {
 		return [

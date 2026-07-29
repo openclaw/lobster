@@ -350,7 +350,7 @@ export async function resumeToolRequest({
 			output,
 			previousStateKey: payload.stateKey,
 			previousState: resumeState,
-			restorePreviousStateOnAbort: output.halted === true && (output.haltedAt?.index ?? -1) === 0,
+			restorePreviousStateOnAbort: output.halted === true && output.executionStarted !== true,
 			onPreviousStateRestored: () => {
 				pipelineResumeStateRestored = true;
 			},
