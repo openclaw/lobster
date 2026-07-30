@@ -706,6 +706,150 @@ test("same-stage ask resume restores its token when cancellation wins before exe
 	}
 });
 
+test("same-stage input resumes stop waiting on a held state lock", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-same-stage-input-lock-abort-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const workflowPath = join(dir, "workflow.lobster");
+		await writeFile(
+			workflowPath,
+			JSON.stringify({ steps: [{ id: "review", pipeline: "ask --prompt Review?" }] }),
+			"utf8",
+		);
+
+		for (const run of [
+			() => runToolRequest({ pipeline: "ask --prompt Review?", ctx: { cwd: dir, env } }),
+			() => runToolRequest({ filePath: workflowPath, ctx: { cwd: dir, env } }),
+		]) {
+			const first = await run();
+			assert.equal(first.status, "needs_input");
+			assert.ok(first.requiresInput?.resumeToken);
+			const payload = decodeResumeToken(first.requiresInput.resumeToken);
+			const lockPath = `${keyToPath(stateDir, payload.stateKey)}.lock`;
+			await fsp.mkdir(lockPath);
+			await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+			const controller = new AbortController();
+			const originalMkdir = fsp.mkdir;
+			let signalLockAttempt: (() => void) | undefined;
+			const lockAttempted = new Promise<void>((resolve) => {
+				signalLockAttempt = resolve;
+			});
+			Object.defineProperty(fsp, "mkdir", {
+				configurable: true,
+				writable: true,
+				async value(
+					filePath: Parameters<typeof fsp.mkdir>[0],
+					options?: Parameters<typeof fsp.mkdir>[1],
+				) {
+					if (String(filePath) === lockPath) signalLockAttempt?.();
+					return originalMkdir(filePath, options);
+				},
+			});
+
+			let resumed;
+			try {
+				const pending = resumeToolRequest({
+					token: first.requiresInput.resumeToken,
+					response: { decision: "approve" },
+					ctx: { cwd: dir, env, signal: controller.signal },
+				});
+				await lockAttempted;
+				controller.abort(
+					new Error("same-stage input cleanup stopped while waiting for a state lock"),
+				);
+				resumed = await observeSettlement(pending, 1500);
+			} finally {
+				Object.defineProperty(fsp, "mkdir", {
+					configurable: true,
+					writable: true,
+					value: originalMkdir,
+				});
+			}
+
+			assert.equal(
+				resumed.settled,
+				true,
+				"same-stage cleanup must not remain blocked on a state lock",
+			);
+			if (resumed.settled) {
+				assert.equal(resumed.value.ok, false);
+				assert.equal(resumed.value.error?.type, "runtime_error");
+			}
+			assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), true);
+			await rm(lockPath, { recursive: true, force: true });
+
+			const retried = await resumeToolRequest({
+				token: first.requiresInput.resumeToken,
+				response: { decision: "approve" },
+				ctx: { cwd: dir, env },
+			});
+			assert.equal(retried.status, "ok");
+		}
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("workflow pipeline input resume restores its capability before execution starts", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-pipeline-safe-input-cancel-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const filePath = join(dir, "workflow.lobster");
+		await writeFile(
+			filePath,
+			JSON.stringify({ steps: [{ id: "review", pipeline: "ask --prompt Review?" }] }),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_input");
+		assert.ok(first.requiresInput?.resumeToken);
+		const payload = decodeResumeToken(first.requiresInput.resumeToken);
+		const statePath = keyToPath(stateDir, payload.stateKey);
+
+		const controller = new AbortController();
+		const originalUnlink = fsp.unlink;
+		Object.defineProperty(fsp, "unlink", {
+			configurable: true,
+			writable: true,
+			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
+				const result = await originalUnlink(filePath);
+				if (String(filePath) === statePath && !controller.signal.aborted) {
+					controller.abort(new Error("abort after safe workflow pipeline input cleanup"));
+				}
+				return result;
+			},
+		});
+		let aborted;
+		try {
+			aborted = await resumeToolRequest({
+				token: first.requiresInput.resumeToken,
+				response: { decision: "approve" },
+				ctx: { cwd: dir, env, signal: controller.signal },
+			});
+		} finally {
+			Object.defineProperty(fsp, "unlink", {
+				configurable: true,
+				writable: true,
+				value: originalUnlink,
+			});
+		}
+		assertCancellationEnvelope(aborted!);
+		assert.equal(await fileExists(statePath), true);
+
+		const retried = await resumeToolRequest({
+			token: first.requiresInput.resumeToken,
+			response: { decision: "approve" },
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.status, "ok");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("pre-aborted workflow approval resume remains retryable", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-abort-workflow-resume-"));
 	try {

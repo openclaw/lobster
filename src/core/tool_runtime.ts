@@ -11,6 +11,7 @@ import {
 	deleteApprovalId,
 	findStateKeyByApprovalId,
 	cleanupApprovalIndexByStateKey,
+	readStateJson,
 	writeStateJson,
 } from "../state/store.js";
 import {
@@ -323,7 +324,11 @@ export async function resumeToolRequest({
 				response,
 				onConsumed: async () => {
 					await cleanupIndex();
-					await deleteStateJson({ env: runtime.env, key: payload.stateKey });
+					await deleteStateJson({
+						env: runtime.env,
+						key: payload.stateKey,
+						signal: runtime.signal,
+					});
 				},
 			}
 		: undefined;
@@ -376,8 +381,12 @@ export async function resumeToolRequest({
 			!pipelineResumeStateRestored
 		) {
 			// No command dispatch occurred, so cancellation must leave the original
-			// approval or input capability retryable.
-			await writeStateJson({ env: runtime.env, key: payload.stateKey, value: resumeState });
+			// approval or input capability retryable. If cancellation interrupted
+			// the delete while another writer held the state lock, the old state is
+			// already intact; do not immediately contend for that same lock again.
+			if ((await readStateJson({ env: runtime.env, key: payload.stateKey })) === null) {
+				await writeStateJson({ env: runtime.env, key: payload.stateKey, value: resumeState });
+			}
 			pipelineResumeStateRestored = true;
 		}
 		if (

@@ -264,7 +264,7 @@ test("workflow resume consumes its capability after a step timeout starts an eff
 					id: "effect",
 					run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
 					condition: "$approve.approved",
-					timeout_ms: 300,
+					timeout_ms: 1500,
 				},
 			],
 		}),
@@ -342,7 +342,7 @@ test("workflow resume applies on_error after a timed-out effect", async () => {
 					id: "effect",
 					run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
 					condition: "$approve.approved",
-					timeout_ms: 300,
+					timeout_ms: 1500,
 					on_error: "continue",
 				},
 				{ id: "after", run: "echo continued" },
@@ -463,7 +463,7 @@ test("workflow resume consumes its capability after a parallel timeout starts an
 					id: "effect",
 					condition: "$approve.approved",
 					parallel: {
-						timeout_ms: 300,
+						timeout_ms: 1500,
 						branches: [
 							{
 								id: "side-effect",

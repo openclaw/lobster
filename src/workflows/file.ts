@@ -851,7 +851,11 @@ export async function runWorkflowFile({
 					pipelineInput: resumeState.pipelineInput!,
 					onConsumed: consumedResumeStateKey
 						? async () => {
-								await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+								await deleteStateJson({
+									env: ctx.env,
+									key: consumedResumeStateKey,
+									signal: ctx.signal,
+								});
 							}
 						: undefined,
 				};
@@ -1358,7 +1362,6 @@ export async function runWorkflowFile({
 								`Workflow step ${step.id} requires a command registry for pipeline execution`,
 							);
 						}
-						markExecutionStarted(stepSignal);
 						const pipelineText = resolveTemplate(execution.value, resolvedArgs, results);
 						const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
 						result = await runPipelineStep({
@@ -1376,6 +1379,7 @@ export async function runWorkflowFile({
 											onConsumed: resumedPipelineInput.onConsumed,
 										}
 									: undefined,
+							onExecutionStart: () => markExecutionStarted(stepSignal),
 						});
 					} else {
 						if (execution.kind !== "none") markExecutionStarted(stepSignal);
@@ -1634,7 +1638,13 @@ export async function runWorkflowFile({
 		}
 		return runResult;
 	} catch (err) {
-		if (resumedExecutionInterrupted && resumedExecutionStarted && consumedResumeStateKey) {
+		if (ctx.signal?.aborted && !resumedExecutionStarted && consumedResumeStateKey) {
+			await restoreWorkflowResumeState({
+				env: ctx.env,
+				stateKey: consumedResumeStateKey,
+				state: resumeState,
+			});
+		} else if (resumedExecutionInterrupted && resumedExecutionStarted && consumedResumeStateKey) {
 			await cleanupApprovalIndexByStateKey({
 				env: ctx.env,
 				stateKey: consumedResumeStateKey,
@@ -3022,6 +3032,7 @@ async function runPipelineStep({
 	cwd,
 	resume,
 	requestInputEnabled = true,
+	onExecutionStart,
 }: {
 	stepId: string;
 	pipelineText: string;
@@ -3035,6 +3046,7 @@ async function runPipelineStep({
 		onConsumed?: () => Promise<void>;
 	};
 	requestInputEnabled?: boolean;
+	onExecutionStart?: () => void;
 }) {
 	let pipeline;
 	try {
@@ -3084,6 +3096,7 @@ async function runPipelineStep({
 					onConsumed: resume.onConsumed,
 				}
 			: undefined,
+		onExecutionStart,
 	});
 	stdout.end();
 	ctx.signal?.throwIfAborted();
