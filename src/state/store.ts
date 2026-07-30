@@ -209,9 +209,7 @@ async function reclaimOrphanedStateLock(lockPath: string) {
 		if (owner && isProcessAlive(owner.pid)) {
 			const processStartIdentity = await readProcessStartIdentity(owner.pid);
 			if (owner.processStartIdentity && processStartIdentity) {
-				stale =
-					owner.processStartIdentity !== processStartIdentity ||
-					(await hasExpiredStateLockLease(ownerPath));
+				stale = owner.processStartIdentity !== processStartIdentity;
 			} else {
 				// A live PID without a matching process-instance identity may have
 				// been reused. Require a conservative expired lease and a second
@@ -666,6 +664,14 @@ export async function diffAndStore({
 		key,
 		signal,
 		task: async () => {
+			const filePath = keyToPath(defaultStateDir(env), key);
+			let beforeExists = true;
+			try {
+				await fsp.access(filePath);
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") throw err;
+				beforeExists = false;
+			}
 			const before = await readStateJson({ env, key }).catch((err) => {
 				if (isJsonSyntaxError(err)) return null;
 				throw err;
@@ -677,7 +683,7 @@ export async function diffAndStore({
 				signal?.throwIfAborted();
 			} catch (err) {
 				if (signal?.aborted) {
-					if (before === null) {
+					if (!beforeExists) {
 						await deleteStateJsonUnlocked({ env, key });
 					} else {
 						await writeStateJsonUnlocked({ env, key, value: before });

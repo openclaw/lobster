@@ -747,7 +747,11 @@ export async function runWorkflowFile({
 		}
 		if (cancel === true || approved === false) {
 			if (consumedResumeStateKey) {
-				await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+				await deleteStateJson({
+					env: ctx.env,
+					key: consumedResumeStateKey,
+					signal: ctx.signal,
+				});
 			}
 			return { status: "cancelled", output: [] };
 		}
@@ -755,7 +759,11 @@ export async function runWorkflowFile({
 
 	if (resumeState?.inputStepId && cancel === true) {
 		if (consumedResumeStateKey) {
-			await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+			await deleteStateJson({
+				env: ctx.env,
+				key: consumedResumeStateKey,
+				signal: ctx.signal,
+			});
 		}
 		return { status: "cancelled", output: [] };
 	}

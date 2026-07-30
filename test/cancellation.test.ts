@@ -1579,6 +1579,57 @@ test("cancellation before a non-terminal lazy handoff does not wait for its next
 	if (settled.settled) assertCancellationEnvelope(settled.value);
 });
 
+test("cancellation before a terminal lazy read invokes its iterator abort hook", async () => {
+	const controller = new AbortController();
+	let readStarted!: () => void;
+	const pendingReadStarted = new Promise<void>((resolve) => {
+		readStarted = resolve;
+	});
+	let resolveNext!: (value: IteratorResult<unknown>) => void;
+	let abortCalled = false;
+	const terminal = {
+		name: "test.cancellable-terminal-lazy-output",
+		async run() {
+			return {
+				halt: true,
+				output: {
+					[Symbol.asyncIterator]() {
+						return {
+							abort() {
+								abortCalled = true;
+								resolveNext({ done: true, value: undefined });
+							},
+							next() {
+								readStarted();
+								return new Promise<IteratorResult<unknown>>((resolve) => {
+									resolveNext = resolve;
+								});
+							},
+							async return() {
+								return { done: true, value: undefined };
+							},
+						};
+					},
+				},
+			};
+		},
+	};
+
+	const run = runToolRequest({
+		pipeline: "test.cancellable-terminal-lazy-output",
+		ctx: {
+			registry: withCommands(createDefaultRegistry(), terminal),
+			signal: controller.signal,
+		},
+	});
+	await pendingReadStarted;
+	controller.abort(new Error("abort cancellable terminal lazy output"));
+	const settled = await observeSettlement(run, 500);
+	assert.equal(settled.settled, true, "cancellation must release the terminal lazy read");
+	if (settled.settled) assertCancellationEnvelope(settled.value);
+	assert.equal(abortCalled, true);
+});
+
 test("cancellable lazy output releases a pending read before cancellation returns", async () => {
 	const controller = new AbortController();
 	let readStarted!: () => void;
@@ -3126,6 +3177,161 @@ test("explicit cancellation stops waiting for a state lock without orphaning its
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
+});
+
+test("approval rejection stops waiting for a state lock without orphaning its approval ID", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-approval-rejection-lock-abort-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const first = await runToolRequest({
+			pipeline: "approve --prompt Continue?",
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const lockPath = `${keyToPath(stateDir, payload.stateKey)}.lock`;
+		const approvalIndexPath = join(stateDir, `approval_${first.requiresApproval.approvalId}.json`);
+		await fsp.mkdir(lockPath);
+		await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+		const controller = new AbortController();
+		const pending = resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: false,
+			ctx: { cwd: dir, env, signal: controller.signal },
+		});
+		const completion = pending.then(
+			() => ({ kind: "success" as const }),
+			(error) => ({ kind: "error" as const, error }),
+		);
+		await new Promise((resolve) => setImmediate(resolve));
+		controller.abort(new Error("approval rejection stopped while waiting for a state lock"));
+		const early = await Promise.race([
+			completion,
+			new Promise<{ kind: "timeout" }>((resolve) =>
+				setTimeout(() => resolve({ kind: "timeout" }), 75),
+			),
+		]);
+		if (early.kind === "timeout") await rm(lockPath, { recursive: true, force: true });
+		const settled = early.kind === "timeout" ? await completion : early;
+
+		assert.notEqual(
+			early.kind,
+			"timeout",
+			"approval rejection must not remain blocked on a state lock",
+		);
+		assert.equal(settled.kind, "error");
+		if (settled.kind === "error") {
+			assert.match(
+				settled.error?.message ?? "",
+				/approval rejection stopped while waiting for a state lock/,
+			);
+		}
+		assert.equal(
+			await fileExists(approvalIndexPath),
+			true,
+			"the approval ID must remain usable after cancelled rejection cleanup",
+		);
+		assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), true);
+		await rm(lockPath, { recursive: true, force: true });
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("workflow approval rejection keeps its approval ID when state cleanup is cancelled", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-approval-rejection-lock-abort-"));
+	try {
+		const filePath = join(dir, "workflow.lobster");
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		await writeFile(
+			filePath,
+			JSON.stringify({ steps: [{ id: "confirm", approval: "Continue?" }] }),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const lockPath = `${keyToPath(stateDir, payload.stateKey)}.lock`;
+		const approvalIndexPath = join(stateDir, `approval_${first.requiresApproval.approvalId}.json`);
+		await fsp.mkdir(lockPath);
+		await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+		const controller = new AbortController();
+		const pending = resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: false,
+			ctx: { cwd: dir, env, signal: controller.signal },
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		controller.abort(new Error("workflow rejection stopped while waiting for a state lock"));
+		const result = await observeSettlement(pending, 500);
+		assert.equal(result.settled, true, "workflow rejection must stop waiting for the state lock");
+		if (result.settled) {
+			assert.equal(result.value.ok, false);
+			assert.match(
+				result.value.error?.message ?? "",
+				/workflow rejection stopped while waiting for a state lock/,
+			);
+		}
+		assert.equal(await fileExists(approvalIndexPath), true);
+		assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), true);
+		await rm(lockPath, { recursive: true, force: true });
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("lazy output iterator acquisition failure closes the active stage", async () => {
+	let inputClosed = false;
+	const input = {
+		[Symbol.asyncIterator]() {
+			return {
+				async next() {
+					return { done: false, value: { item: 1 } };
+				},
+				async return() {
+					inputClosed = true;
+					return { done: true, value: undefined };
+				},
+			};
+		},
+	};
+	const command = {
+		name: "test.throw-on-iterator-acquisition",
+		async run({ input: stageInput }: { input: AsyncIterable<unknown> }) {
+			await stageInput[Symbol.asyncIterator]().next();
+			return {
+				output: {
+					[Symbol.asyncIterator]() {
+						throw new Error("iterator acquisition failed");
+					},
+				},
+			};
+		},
+	};
+
+	await assert.rejects(
+		runPipeline({
+			pipeline: [{ name: command.name, args: {} }],
+			registry: withCommands(createDefaultRegistry(), command),
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env: process.env,
+			input,
+		}),
+		/iterator acquisition failed/,
+	);
+	assert.equal(inputClosed, true, "iterator acquisition failure must finish and close the stage");
 });
 
 test("explicit cancellation removes a corrupt workflow state through an aliased token", async () => {

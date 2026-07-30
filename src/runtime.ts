@@ -159,18 +159,26 @@ export async function runPipeline({
 				? throwIfAbortedAfterDrain(trackedOutput, signal)
 				: trackedOutput;
 		} else {
-			stream = output
-				? trackCommandOutput(
-						output,
-						() => {
-							commandOutputStarted = true;
-						},
-						() => assertRequestInputResumeConsumed(stageResume),
-						(err) => assertNoUnconsumedResumeAfterError(stageResume, err),
-						finishStage,
-					)
-				: [];
-			if (!output) await finishStage();
+			if (output) {
+				const trackedOutput = trackCommandOutput(
+					output,
+					() => {
+						commandOutputStarted = true;
+					},
+					() => assertRequestInputResumeConsumed(stageResume),
+					(err) => assertNoUnconsumedResumeAfterError(stageResume, err),
+					finishStage,
+				);
+				// Terminal output is drained after the stage loop as well. It needs the
+				// same abort-aware read as a handoff, otherwise a stalled final iterator
+				// can prevent the tool cancellation from settling forever.
+				stream = haltAfterStageOnAbort
+					? throwIfAbortedAfterDrain(trackedOutput, signal)
+					: trackedOutput;
+			} else {
+				stream = [];
+				await finishStage();
+			}
 		}
 
 		stageHalted ||= Boolean(haltAfterStageOnAbort && signal?.aborted);
@@ -272,8 +280,10 @@ function throwIfAbortedAfterDrain(input: AsyncIterable<unknown>, signal?: AbortS
 					completed = true;
 					break;
 				}
-				signal?.throwIfAborted();
-				yield next.value;
+				// Once cancellation begins, keep draining values which are already
+				// immediately available so generator cleanup runs, but never expose
+				// them as tool output. A stalled read is interrupted by nextWithAbort.
+				if (!signal?.aborted) yield next.value;
 			}
 			signal?.throwIfAborted();
 		} finally {
@@ -302,9 +312,9 @@ async function closeAfterAbortedRead(
 		const close = iterator.return();
 		if (signal?.aborted && !abort) {
 			// Legacy iterators cannot interrupt an in-flight next(). Keep the
-			// existing prompt cancellation behavior, while resource-owning sources
-			// opt into the abort hook above so their cleanup is awaited.
-			void Promise.resolve(close).catch(() => {});
+			// existing prompt cancellation behavior, while still giving a normally
+			// settling generator one event-loop turn to run its finally cleanup.
+			await settleBeforeNextTurn(close);
 			return;
 		}
 		await close;
@@ -315,16 +325,21 @@ async function closeAfterAbortedRead(
 
 async function nextWithAbort(iterator: AsyncIterator<unknown>, signal?: AbortSignal) {
 	if (!signal) return iterator.next();
-	signal.throwIfAborted();
 
 	let onAbort!: () => void;
+	let abortTimer: ReturnType<typeof setTimeout> | undefined;
 	const aborted = new Promise<never>((_resolve, reject) => {
 		onAbort = () => {
-			try {
-				signal.throwIfAborted();
-			} catch (err) {
-				reject(err);
-			}
+			// Give a synchronous or microtask-ready iterator a chance to finish its
+			// cleanup path. A genuinely stalled read is still interrupted on the
+			// next event-loop turn.
+			abortTimer = setTimeout(() => {
+				try {
+					signal.throwIfAborted();
+				} catch (err) {
+					reject(err);
+				}
+			}, 0);
 		};
 		signal.addEventListener("abort", onAbort, { once: true });
 	});
@@ -333,7 +348,22 @@ async function nextWithAbort(iterator: AsyncIterator<unknown>, signal?: AbortSig
 	try {
 		return await Promise.race([iterator.next(), aborted]);
 	} finally {
+		if (abortTimer) clearTimeout(abortTimer);
 		signal.removeEventListener("abort", onAbort);
+	}
+}
+
+async function settleBeforeNextTurn(promise: Promise<unknown>) {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			Promise.resolve(promise).catch(() => {}),
+			new Promise<void>((resolve) => {
+				timer = setTimeout(resolve, 0);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
 	}
 }
 
@@ -348,14 +378,14 @@ function trackCommandOutput(
 	}) => Promise<void>,
 ) {
 	const source = output as AsyncIterable<unknown> & CancellableLazyOutput & AsyncIterator<unknown>;
-	const sourceIterator =
-		typeof source[Symbol.asyncIterator] === "function" ? source[Symbol.asyncIterator]() : undefined;
+	let sourceIterator: AsyncIterator<unknown> | undefined;
 	const tracked = (async function* () {
 		let completed = false;
 		try {
-			if (sourceIterator) {
+			if (typeof source[Symbol.asyncIterator] === "function") {
+				sourceIterator = source[Symbol.asyncIterator]();
 				const iteratorInput: AsyncIterable<unknown> = {
-					[Symbol.asyncIterator]: () => sourceIterator,
+					[Symbol.asyncIterator]: () => sourceIterator!,
 				};
 				for await (const item of iteratorInput) {
 					assertResumeConsumed();
@@ -378,14 +408,19 @@ function trackCommandOutput(
 			await finishStage({ assertResume: completed });
 		}
 	})();
-	const cancellationOwner = (sourceIterator ?? source) as CancellableLazyOutput;
-	const abort = cancellationOwner.abort;
-	const cancellation = {
-		...(abort ? { abort: (reason?: unknown) => abort.call(cancellationOwner, reason) } : null),
-	};
-	if (Object.keys(cancellation).length > 0) {
-		Object.assign(tracked, cancellation);
-	}
+	// Iterator-owned abort hooks are only discoverable after iterator acquisition.
+	// A getter lets the abort-aware wrapper find that hook once a read is pending,
+	// without performing acquisition outside the generator's guarded cleanup path.
+	Object.defineProperty(tracked, "abort", {
+		configurable: true,
+		get() {
+			const cancellationOwner = (sourceIterator ?? source) as CancellableLazyOutput;
+			const abort = cancellationOwner.abort;
+			return typeof abort === "function"
+				? (reason?: unknown) => abort.call(cancellationOwner, reason)
+				: undefined;
+		},
+	});
 	return tracked;
 }
 

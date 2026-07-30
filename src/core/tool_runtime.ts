@@ -293,8 +293,15 @@ export async function resumeToolRequest({
 			);
 		}
 		if (approved !== true) {
+			// Keep the approval ID usable while this may still be waiting on a
+			// concurrent state writer. Dropping the index first would orphan the
+			// capability if cancellation interrupts the deletion.
+			await deleteStateJson({
+				env: runtime.env,
+				key: payload.stateKey,
+				signal: runtime.signal,
+			});
 			await cleanupIndex();
-			await deleteStateJson({ env: runtime.env, key: payload.stateKey });
 			return okEnvelope("cancelled", [], null, null);
 		}
 	}
