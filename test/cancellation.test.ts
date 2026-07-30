@@ -651,47 +651,33 @@ test("same-stage ask resume restores its token when cancellation wins before exe
 		const stateDir = join(dir, "state");
 		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
 		const sideEffect = createCountingSideEffect("test.same-stage-ask-side-effect");
-		const registry = withCommands(createDefaultRegistry(), sideEffect.command);
+		let activeController: AbortController | undefined;
+		const inputGate = {
+			name: "test.same-stage-ask-gate",
+			meta: { resumeSafeBeforeInput: true, resumeSafeAfterInput: true },
+			async run({ ctx }: any) {
+				await ctx.requestInput({ prompt: "First?", responseSchema: { type: "object" } });
+				activeController?.abort(new Error("abort after same-stage input delivery"));
+				return { output: streamOf([]) };
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), inputGate, sideEffect.command);
 		const first = await runToolRequest({
-			pipeline: "ask --prompt First? | test.same-stage-ask-side-effect",
+			pipeline: "test.same-stage-ask-gate | test.same-stage-ask-side-effect",
 			ctx: { env, registry },
 		});
 		assert.equal(first.status, "needs_input");
 		assert.ok(first.requiresInput?.resumeToken);
-		const payload = decodeResumeToken(first.requiresInput.resumeToken);
-		const statePath = keyToPath(stateDir, payload.stateKey);
 
 		const controller = new AbortController();
-		const originalUnlink = fsp.unlink;
-		let stateDeleted = false;
-		Object.defineProperty(fsp, "unlink", {
-			configurable: true,
-			writable: true,
-			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
-				const result = await originalUnlink(filePath);
-				if (String(filePath) === statePath && !controller.signal.aborted) {
-					stateDeleted = true;
-					controller.abort(new Error("abort after same-stage ask state cleanup"));
-				}
-				return result;
-			},
+		activeController = controller;
+		const aborted = await resumeToolRequest({
+			token: first.requiresInput.resumeToken,
+			response: { decision: "approve" },
+			ctx: { env, registry, signal: controller.signal },
 		});
-		let aborted;
-		try {
-			aborted = await resumeToolRequest({
-				token: first.requiresInput.resumeToken,
-				response: { decision: "approve" },
-				ctx: { env, registry, signal: controller.signal },
-			});
-		} finally {
-			Object.defineProperty(fsp, "unlink", {
-				configurable: true,
-				writable: true,
-				value: originalUnlink,
-			});
-		}
-		assertCancellationEnvelope(aborted!);
-		assert.equal(stateDeleted, true);
+		activeController = undefined;
+		assertCancellationEnvelope(aborted);
 		assert.equal(sideEffect.invocations, 0);
 
 		const retried = await resumeToolRequest({
@@ -3625,6 +3611,185 @@ test("a failed post-effect resume cleanup leaves a non-replayable pipeline tombs
 			configurable: true,
 			writable: true,
 			value: originalUnlink,
+		});
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+async function assertApprovalResumeIsExclusive({
+	workflow,
+	resumeBy,
+}: {
+	workflow: boolean;
+	resumeBy: "token" | "approvalId";
+}) {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-exclusive-resume-"));
+	const originalRename = fsp.rename;
+	let releaseFirstRename!: () => void;
+	const firstRenameReached = new Promise<void>((resolve) => {
+		releaseFirstRename = resolve;
+	});
+	let renamePaused = false;
+	let releaseFirstEffect!: () => void;
+	const firstEffectMayFinish = new Promise<void>((resolve) => {
+		releaseFirstEffect = resolve;
+	});
+	let invocations = 0;
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const effect = {
+			name: "test.exclusive-resume-effect",
+			async run({ input }: { input: AsyncIterable<unknown> }) {
+				invocations += 1;
+				const items = [];
+				for await (const item of input) items.push(item);
+				if (invocations === 1) await firstEffectMayFinish;
+				return { output: streamOf(items.length ? items : [{ ok: true }]) };
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), effect);
+		let first;
+		if (workflow) {
+			const filePath = join(dir, "workflow.lobster");
+			await writeFile(
+				filePath,
+				JSON.stringify({
+					steps: [
+						{ id: "approve", approval: "Continue?" },
+						{ id: "effect", pipeline: "test.exclusive-resume-effect" },
+					],
+				}),
+				"utf8",
+			);
+			first = await runToolRequest({ filePath, ctx: { cwd: dir, env, registry } });
+		} else {
+			first = await runToolRequest({
+				pipeline: "approve --prompt Continue? | test.exclusive-resume-effect",
+				ctx: { cwd: dir, env, registry },
+			});
+		}
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.resumeToken);
+		assert.ok(first.requiresApproval?.approvalId);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken!);
+		const statePath = keyToPath(stateDir, payload.stateKey);
+
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			async value(from: Parameters<typeof fsp.rename>[0], to: Parameters<typeof fsp.rename>[1]) {
+				if (String(to) === statePath && !renamePaused) {
+					renamePaused = true;
+					await firstRenameReached;
+				}
+				return originalRename(from, to);
+			},
+		});
+
+		const resumeArgs =
+			resumeBy === "token"
+				? { token: first.requiresApproval.resumeToken! }
+				: { approvalId: first.requiresApproval.approvalId! };
+		const firstResume = resumeToolRequest({
+			...resumeArgs,
+			approved: true,
+			ctx: { cwd: dir, env, registry },
+		});
+		while (!renamePaused) await new Promise((resolve) => setImmediate(resolve));
+		const secondResume = resumeToolRequest({
+			...resumeArgs,
+			approved: true,
+			ctx: { cwd: dir, env, registry },
+		});
+		releaseFirstRename();
+		// The first effect is held open. The second request has enough time to
+		// reach the guarded claim, but cannot be allowed to observe cleanup as a
+		// missing-state retry opportunity.
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		releaseFirstEffect();
+		const outcomes = await Promise.all([firstResume, secondResume]);
+
+		assert.equal(invocations, 1, "one approval may dispatch exactly one effect");
+		assert.equal(outcomes.filter((outcome) => outcome.ok).length, 1);
+		assert.equal(outcomes.filter((outcome) => !outcome.ok).length, 1);
+		assert.match(
+			outcomes.find((outcome) => !outcome.ok)?.error?.message ?? "",
+			/resume state not found/i,
+		);
+	} finally {
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			value: originalRename,
+		});
+		await rm(dir, { recursive: true, force: true });
+	}
+}
+
+test("pipeline approval token and short ID each dispatch an effect at most once", async () => {
+	for (const resumeBy of ["token", "approvalId"] as const) {
+		await assertApprovalResumeIsExclusive({ workflow: false, resumeBy });
+	}
+});
+
+test("workflow approval token and short ID each dispatch an effect at most once", async () => {
+	for (const resumeBy of ["token", "approvalId"] as const) {
+		await assertApprovalResumeIsExclusive({ workflow: true, resumeBy });
+	}
+});
+
+test("a cancellation immediately after pipeline resume consumption restores the unstarted approval", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-consume-rename-abort-"));
+	const originalRename = fsp.rename;
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const effect = createCountingSideEffect("test.consume-rename-effect");
+		const registry = withCommands(createDefaultRegistry(), effect.command);
+		const first = await runToolRequest({
+			pipeline: "approve --prompt Continue? | test.consume-rename-effect",
+			ctx: { cwd: dir, env, registry },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.resumeToken);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken!);
+		const statePath = keyToPath(stateDir, payload.stateKey);
+		const controller = new AbortController();
+		let abortedAtConsumption = false;
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			async value(from: Parameters<typeof fsp.rename>[0], to: Parameters<typeof fsp.rename>[1]) {
+				await originalRename(from, to);
+				if (String(to) === statePath && !abortedAtConsumption) {
+					abortedAtConsumption = true;
+					controller.abort(new Error("abort after consumed resume rename"));
+				}
+			},
+		});
+
+		const cancelled = await resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { cwd: dir, env, registry, signal: controller.signal },
+		});
+		assertCancellationEnvelope(cancelled);
+		assert.equal(effect.invocations, 0);
+		assert.equal(abortedAtConsumption, true);
+
+		const retried = await resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { cwd: dir, env, registry },
+		});
+		assert.equal(retried.ok, true);
+		assert.equal(effect.invocations, 1);
+	} finally {
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			value: originalRename,
 		});
 		await rm(dir, { recursive: true, force: true });
 	}

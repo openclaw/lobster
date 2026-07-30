@@ -13,6 +13,7 @@ import {
 	cleanupApprovalIndexByStateKey,
 	consumeResumeState,
 	readStateJson,
+	restoreConsumedResumeState,
 	stateJsonExists,
 	writeStateJson,
 } from "../state/store.js";
@@ -331,20 +332,11 @@ export async function resumeToolRequest({
 	const abortedBeforeResume = runtime.signal?.aborted === true;
 	let pipelineResumeStateRestored = false;
 	let pipelineExecutionStarted = false;
+	let pipelineResumeStateClaimRejected = false;
 	const requestInputResume = isSameStageInput
 		? {
 				state: resumeState.commandInput!,
 				response,
-				onConsumed: async () => {
-					// Release the old snapshot before a resume-safe command receives its
-					// response. The awaited execution boundary either tombstones it before
-					// an effect or restores this exact snapshot if cancellation wins here.
-					await deleteStateJson({
-						env: runtime.env,
-						key: payload.stateKey,
-						signal: runtime.signal,
-					});
-				},
 			}
 		: undefined;
 
@@ -364,11 +356,30 @@ export async function resumeToolRequest({
 			input,
 			requestInputResume,
 			onExecutionStart: async () => {
-				await consumeResumeState({
+				const consumption = await consumeResumeState({
 					env: runtime.env,
 					key: payload.stateKey,
+					expectedState: resumeState,
 					signal: runtime.signal,
 				});
+				if (!consumption.consumed) {
+					pipelineResumeStateClaimRejected = true;
+					throw new Error("Pipeline resume state not found");
+				}
+				if (consumption.signalAbortedAfterCommit) {
+					const restored = await restoreConsumedResumeState({
+						env: runtime.env,
+						key: payload.stateKey,
+						expectedState: resumeState,
+						claimId: consumption.claimId,
+					});
+					if (restored) {
+						pipelineResumeStateRestored = true;
+					} else {
+						pipelineResumeStateClaimRejected = true;
+					}
+					runtime.signal?.throwIfAborted();
+				}
 				// The durable tombstone blocks raw-token replay even if index cleanup
 				// suffers a storage error, so an index failure cannot re-enable effects.
 				await cleanupIndex().catch(() => {});
@@ -398,16 +409,6 @@ export async function resumeToolRequest({
 		);
 	} catch (err: any) {
 		const abortedResume = runtime.signal?.aborted === true;
-		if (!pipelineExecutionStarted && !pipelineResumeStateRestored) {
-			// No unsafe command dispatch occurred, so a safe-input validation or
-			// cancellation failure must leave the original capability retryable. If
-			// cleanup was interrupted while another writer held its lock, the old
-			// state is already intact; do not immediately contend for that lock again.
-			if ((await readStateJson({ env: runtime.env, key: payload.stateKey })) === null) {
-				await writeStateJson({ env: runtime.env, key: payload.stateKey, value: resumeState });
-			}
-			pipelineResumeStateRestored = true;
-		}
 		if (
 			abortedResume &&
 			!abortedBeforeResume &&

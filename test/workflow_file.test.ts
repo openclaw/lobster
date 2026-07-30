@@ -245,6 +245,86 @@ test("direct workflow resume consumes its capability after cancellation starts a
 	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
 });
 
+test("workflow template setup failure preserves an unstarted approval capability", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-template-resume-"));
+	try {
+		const stateDir = path.join(tmpDir, "state");
+		const filePath = path.join(tmpDir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const broken = {
+			steps: [
+				{ id: "approve", approval: "Continue?" },
+				{
+					id: "effect",
+					run: "node -e \"process.stdout.write('should not run')\"",
+					stdin: "$missing.stdout",
+				},
+			],
+		};
+		await fsp.writeFile(filePath, JSON.stringify(broken), "utf8");
+
+		const first = await runWorkflowFile({
+			filePath,
+			ctx: {
+				stdin: process.stdin,
+				stdout: process.stdout,
+				stderr: process.stderr,
+				env,
+				mode: "tool",
+			},
+		});
+		assert.equal(first.status, "needs_approval");
+		const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+		assert.equal(payload.kind, "workflow-file");
+		assert.ok(payload.stateKey);
+
+		await assert.rejects(
+			() =>
+				runWorkflowFile({
+					filePath,
+					ctx: {
+						stdin: process.stdin,
+						stdout: process.stdout,
+						stderr: process.stderr,
+						env,
+						mode: "tool",
+					},
+					resume: payload,
+					approved: true,
+				}),
+			/Unknown step reference: missing\.stdout/,
+		);
+		assert.notEqual(await readStateJson({ env, key: payload.stateKey! }), null);
+
+		await fsp.writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "approve", approval: "Continue?" },
+					{ id: "effect", run: "node -e \"process.stdout.write('ok')\"" },
+				],
+			}),
+			"utf8",
+		);
+		const retried = await runWorkflowFile({
+			filePath,
+			ctx: {
+				stdin: process.stdin,
+				stdout: process.stdout,
+				stderr: process.stderr,
+				env,
+				mode: "tool",
+			},
+			resume: payload,
+			approved: true,
+		});
+		assert.equal(retried.status, "ok");
+		assert.deepEqual(retried.output, ["ok"]);
+	} finally {
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
+});
+
 test("workflow resume consumes its capability after a step timeout starts an effect", async () => {
 	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-step-timeout-"));
 	const stateDir = path.join(tmpDir, "state");

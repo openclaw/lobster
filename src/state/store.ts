@@ -8,6 +8,7 @@ const CONSUMED_RESUME_STATE_TYPE = "lobster.consumed-resume-state.v1";
 export type ConsumedResumeState = {
 	type: typeof CONSUMED_RESUME_STATE_TYPE;
 	consumedAt: string;
+	claimId: string;
 };
 
 export function isConsumedResumeState(value: unknown): value is ConsumedResumeState {
@@ -373,9 +374,12 @@ export async function writeFileAtomic(filePath, data, options: AtomicWriteOption
 		handle = undefined;
 		options.signal?.throwIfAborted();
 		await renameFile(tmpPath, filePath);
-		options.signal?.throwIfAborted();
+		// The rename is the irreversible publication point. Callers that need to
+		// compensate an aborted write must decide from the returned commit status;
+		// throwing here would hide that the replacement is already visible.
 		await syncDir(filePath);
 		cleanup = false;
+		return { signalAbortedAfterCommit: options.signal?.aborted === true };
 	} finally {
 		if (handle) await handle.close().catch(() => {});
 		if (cleanup) await fsp.rm(tmpPath, { force: true }).catch(() => {});
@@ -457,7 +461,7 @@ async function writeStateJsonUnlocked({
 	const filePath = keyToPath(stateDir, key);
 
 	await ensureDirectory(stateDir);
-	await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n", {
+	return writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n", {
 		...atomicWriteOptions,
 		signal,
 	});
@@ -492,17 +496,73 @@ export async function writeStateJson({
 export async function consumeResumeState({
 	env,
 	key,
+	expectedState,
 	signal = undefined,
 }: {
 	env: Record<string, string | undefined>;
 	key: string;
+	expectedState: unknown;
 	signal?: AbortSignal;
 }) {
-	await writeStateJson({
+	return withStateKeyLock({
 		env,
 		key,
-		value: { type: CONSUMED_RESUME_STATE_TYPE, consumedAt: new Date().toISOString() },
 		signal,
+		task: async () => {
+			const currentState = await readStateJson({ env, key });
+			// A resume snapshot is loaded before command/workflow setup. Re-check it
+			// while holding the state lock so two callers cannot both turn the same
+			// approval into an executable invocation.
+			if (stableStringify(currentState) !== stableStringify(expectedState)) {
+				return { consumed: false as const };
+			}
+			const claimId = randomBytes(16).toString("hex");
+			const result = await writeStateJsonUnlocked({
+				env,
+				key,
+				value: {
+					type: CONSUMED_RESUME_STATE_TYPE,
+					consumedAt: new Date().toISOString(),
+					claimId,
+				},
+				signal,
+			});
+			return {
+				consumed: true as const,
+				claimId,
+				signalAbortedAfterCommit: result?.signalAbortedAfterCommit === true,
+			};
+		},
+	});
+}
+
+/**
+ * Undo a just-published consumed marker only when it is still owned by the
+ * caller's pre-dispatch claim. This never overwrites a replacement state or a
+ * concurrent claimant's marker.
+ */
+export async function restoreConsumedResumeState({
+	env,
+	key,
+	expectedState,
+	claimId,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	expectedState: unknown;
+	claimId: string;
+}) {
+	return withStateKeyLock({
+		env,
+		key,
+		task: async () => {
+			const currentState = await readStateJson({ env, key });
+			if (!isConsumedResumeState(currentState) || currentState.claimId !== claimId) {
+				return false;
+			}
+			await writeStateJsonUnlocked({ env, key, value: expectedState });
+			return true;
+		},
 	});
 }
 

@@ -16,6 +16,7 @@ import {
 	deleteStateJson,
 	isConsumedResumeState,
 	readStateJson,
+	restoreConsumedResumeState,
 	writeStateJson,
 } from "../state/store.js";
 import { readLineFromStream } from "../read_line.js";
@@ -716,6 +717,7 @@ export async function runWorkflowFile({
 	let resumedExecutionStarted = false;
 	let resumedExecutionInterrupted = false;
 	let resumeStateConsumed = false;
+	let resumeStateClaimRejected = false;
 	const executionSignalListeners: Array<{ signal: AbortSignal; onAbort: () => void }> = [];
 	let executionStart: Promise<void> | undefined;
 	const markExecutionStarted = async (signal?: AbortSignal) => {
@@ -724,7 +726,26 @@ export async function runWorkflowFile({
 		executionStart = (async () => {
 			signal?.throwIfAborted();
 			if (consumedResumeStateKey) {
-				await consumeResumeState({ env: ctx.env, key: consumedResumeStateKey, signal });
+				const consumption = await consumeResumeState({
+					env: ctx.env,
+					key: consumedResumeStateKey,
+					expectedState: resumeState,
+					signal,
+				});
+				if (!consumption.consumed) {
+					resumeStateClaimRejected = true;
+					throw new Error("Workflow resume state not found");
+				}
+				if (consumption.signalAbortedAfterCommit) {
+					const restored = await restoreConsumedResumeState({
+						env: ctx.env,
+						key: consumedResumeStateKey,
+						expectedState: resumeState,
+						claimId: consumption.claimId,
+					});
+					if (!restored) resumeStateClaimRejected = true;
+					signal?.throwIfAborted();
+				}
 				resumeStateConsumed = true;
 				// A retained index may point to the tombstone after an I/O failure, but
 				// it can never re-enable the now-consumed raw token.
@@ -868,15 +889,6 @@ export async function runWorkflowFile({
 					stepId: resumeState.inputStepId,
 					response,
 					pipelineInput: resumeState.pipelineInput!,
-					onConsumed: consumedResumeStateKey
-						? async () => {
-								await deleteStateJson({
-									env: ctx.env,
-									key: consumedResumeStateKey,
-									signal: ctx.signal,
-								});
-							}
-						: undefined,
 				};
 			} else {
 				const inputStep = steps[stepIndexById.get(resumeState.inputStepId) ?? -1];
@@ -1067,9 +1079,9 @@ export async function runWorkflowFile({
 
 						let subResult: WorkflowStepResult;
 						if (subExecution.kind === "shell") {
-							await markExecutionStarted(ctx.signal);
 							const command = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
 							const stdinValue = resolveShellStdin(subStep.stdin, resolvedArgs, scopedResults);
+							await markExecutionStarted(ctx.signal);
 							const { stdout } = await runShellCommand({
 								command,
 								stdin: stdinValue,
@@ -1084,7 +1096,6 @@ export async function runWorkflowFile({
 									`Workflow step ${step.id} for_each sub-step ${subStep.id} requires a command registry for pipeline execution`,
 								);
 							}
-							await markExecutionStarted(ctx.signal);
 							const pipelineText = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
 							const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
 							subResult = await runPipelineStep({
@@ -1095,6 +1106,7 @@ export async function runWorkflowFile({
 								env: subEnv,
 								cwd: subCwd,
 								requestInputEnabled: false,
+								onExecutionStart: () => markExecutionStarted(ctx.signal),
 							});
 						} else {
 							const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
@@ -1172,7 +1184,6 @@ export async function runWorkflowFile({
 							? AbortSignal.any([stepSignal, parallelTimeoutController.signal])
 							: parallelTimeoutController.signal;
 						const branchSignal = AbortSignal.any([parallelSignal, branchAbortController.signal]);
-						await markExecutionStarted(parallelSignal);
 						const shouldForceKill = Boolean(step.timeout_ms || parallel.timeout_ms);
 						const runBranch = async (
 							branch: ParallelBranch,
@@ -1198,6 +1209,7 @@ export async function runWorkflowFile({
 							if (branchExec.kind === "shell") {
 								const command = resolveTemplate(branchExec.value, resolvedArgs, results);
 								const stdinValue = resolveShellStdin(branch.stdin, resolvedArgs, results);
+								await markExecutionStarted(branchSignal);
 								const { stdout } = await runShellCommand({
 									command,
 									stdin: stdinValue,
@@ -1228,6 +1240,7 @@ export async function runWorkflowFile({
 									env: branchEnv,
 									cwd: branchCwd,
 									requestInputEnabled: false,
+									onExecutionStart: () => markExecutionStarted(branchSignal),
 								});
 								return { branchId: branch.id, result: branchResult };
 							}
@@ -1364,9 +1377,9 @@ export async function runWorkflowFile({
 						const stdout = subResult.output.length ? serializeValueForStdout(json) : "";
 						result = { id: step.id, stdout, json };
 					} else if (execution.kind === "shell") {
-						await markExecutionStarted(stepSignal);
 						const command = resolveTemplate(execution.value, resolvedArgs, results);
 						const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
+						await markExecutionStarted(stepSignal);
 						const { stdout } = await runShellCommand({
 							command,
 							stdin: stdinValue,
@@ -1664,7 +1677,12 @@ export async function runWorkflowFile({
 		}
 		return runResult;
 	} catch (err) {
-		if (!resumedExecutionStarted && !resumeStateConsumed && consumedResumeStateKey) {
+		if (
+			!resumedExecutionStarted &&
+			!resumeStateConsumed &&
+			!resumeStateClaimRejected &&
+			consumedResumeStateKey
+		) {
 			await restoreWorkflowResumeState({
 				env: ctx.env,
 				stateKey: consumedResumeStateKey,
