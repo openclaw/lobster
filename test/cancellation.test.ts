@@ -1446,7 +1446,7 @@ test("terminal workflow approval resume restores its original capability when cl
 	}
 });
 
-test("cancellation while draining terminal lazy output returns cancellation", async () => {
+test("cancellation stops terminal lazy output before reading its next item", async () => {
 	const controller = new AbortController();
 	let outputDrained = false;
 	const terminal = {
@@ -1472,10 +1472,10 @@ test("cancellation while draining terminal lazy output returns cancellation", as
 	});
 
 	assertCancellationEnvelope(envelope);
-	assert.equal(outputDrained, true, "terminal output must finish before cancellation is reported");
+	assert.equal(outputDrained, false, "terminal cancellation must not read another output item");
 });
 
-test("cancellation observed before terminal drain is reported after output cleanup", async () => {
+test("cancellation observed before terminal output does not start its iterator", async () => {
 	const controller = new AbortController();
 	let outputDrained = false;
 	const terminal = {
@@ -1502,10 +1502,10 @@ test("cancellation observed before terminal drain is reported after output clean
 
 	assertCancellationEnvelope(envelope);
 	assert.equal(envelope.error?.message, "abort before terminal drain");
-	assert.equal(outputDrained, true, "terminal output cleanup must complete before cancellation");
+	assert.equal(outputDrained, false, "pre-aborted terminal output must not be read");
 });
 
-test("cancellation drains a halted lazy output before a later pipeline stage", async () => {
+test("cancellation before halted lazy output skips its iterator and later pipeline stages", async () => {
 	const controller = new AbortController();
 	let outputDrained = false;
 	let downstreamRan = false;
@@ -1540,7 +1540,7 @@ test("cancellation drains a halted lazy output before a later pipeline stage", a
 
 	assertCancellationEnvelope(envelope);
 	assert.equal(envelope.error?.message, "abort before halted output drain");
-	assert.equal(outputDrained, true, "halted output cleanup must complete before cancellation");
+	assert.equal(outputDrained, false, "halted output must not be read after cancellation");
 	assert.equal(downstreamRan, false, "a halted stage must not dispatch later pipeline stages");
 });
 
@@ -1628,6 +1628,41 @@ test("cancellation before a terminal lazy read invokes its iterator abort hook",
 	assert.equal(settled.settled, true, "cancellation must release the terminal lazy read");
 	if (settled.settled) assertCancellationEnvelope(settled.value);
 	assert.equal(abortCalled, true);
+});
+
+test("cancellation does not pull another lazy output item after an in-flight read aborts", async () => {
+	const controller = new AbortController();
+	let afterAbortEffects = 0;
+	const source = {
+		name: "test.abort-does-not-pull-another-output",
+		async run() {
+			return {
+				output: (async function* () {
+					yield { value: 1 };
+					controller.abort(new Error("abort before next lazy output"));
+					afterAbortEffects += 1;
+					yield { value: 2 };
+					afterAbortEffects += 1;
+					yield { value: 3 };
+				})(),
+			};
+		},
+	};
+
+	const envelope = await runToolRequest({
+		pipeline: "test.abort-does-not-pull-another-output",
+		ctx: {
+			registry: withCommands(createDefaultRegistry(), source),
+			signal: controller.signal,
+		},
+	});
+
+	assertCancellationEnvelope(envelope);
+	assert.equal(
+		afterAbortEffects,
+		1,
+		"cancellation must close the in-flight iterator instead of pulling a later item",
+	);
 });
 
 test("cancellable lazy output releases a pending read before cancellation returns", async () => {
@@ -1795,6 +1830,7 @@ test("cancellation during lazy handoff stops yielding items to the downstream st
 	assertCancellationEnvelope(envelope);
 	assert.equal(envelope.error?.message, "abort after first lazy item");
 	assert.deepEqual(delivered, [1], "cancelled handoff must not deliver later items");
+	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(sourceClosed, true, "cancelling the handoff must close the source iterator");
 });
 
