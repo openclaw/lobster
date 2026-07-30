@@ -13,10 +13,8 @@ import {
 	findStateKeyByApprovalId,
 	cleanupApprovalIndexByStateKey,
 	consumeResumeState,
-	readStateJson,
 	restoreConsumedResumeState,
 	stateJsonExists,
-	writeStateJson,
 } from "../state/store.js";
 import {
 	WorkflowResumeArgumentError,
@@ -349,7 +347,7 @@ export async function resumeToolRequest({
 	const abortedBeforeResume = runtime.signal?.aborted === true;
 	let pipelineResumeStateRestored = false;
 	let pipelineExecutionStarted = false;
-	let pipelineResumeStateClaimRejected = false;
+	let pipelineResumeStateClaimId: string | undefined;
 	const requestInputResume = isSameStageInput
 		? {
 				state: resumeState.commandInput!,
@@ -380,9 +378,9 @@ export async function resumeToolRequest({
 					signal: runtime.signal,
 				});
 				if (!consumption.consumed) {
-					pipelineResumeStateClaimRejected = true;
 					throw new Error("Pipeline resume state not found");
 				}
+				pipelineResumeStateClaimId = consumption.claimId;
 				if (consumption.signalAbortedAfterCommit) {
 					const restored = await restoreConsumedResumeState({
 						env: runtime.env,
@@ -392,14 +390,14 @@ export async function resumeToolRequest({
 					});
 					if (restored) {
 						pipelineResumeStateRestored = true;
-					} else {
-						pipelineResumeStateClaimRejected = true;
+						pipelineResumeStateClaimId = undefined;
 					}
 					runtime.signal?.throwIfAborted();
 				}
 				// The durable tombstone blocks raw-token replay even if index cleanup
 				// suffers a storage error, so an index failure cannot re-enable effects.
 				await cleanupIndex().catch(() => {});
+				runtime.signal?.throwIfAborted();
 				pipelineExecutionStarted = true;
 			},
 		});
@@ -426,6 +424,19 @@ export async function resumeToolRequest({
 		);
 	} catch (err: any) {
 		const abortedResume = runtime.signal?.aborted === true;
+		if (
+			abortedResume &&
+			!pipelineExecutionStarted &&
+			!pipelineResumeStateRestored &&
+			pipelineResumeStateClaimId
+		) {
+			pipelineResumeStateRestored = await restoreConsumedResumeState({
+				env: runtime.env,
+				key: payload.stateKey,
+				expectedState: resumeState,
+				claimId: pipelineResumeStateClaimId,
+			}).catch(() => false);
+		}
 		if (
 			abortedResume &&
 			!abortedBeforeResume &&

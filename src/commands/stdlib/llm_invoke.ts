@@ -5,13 +5,13 @@ import { Ajv } from "ajv";
 import type { ErrorObject } from "ajv";
 
 import {
+	diffAndStore,
 	ensureDirectory,
 	isJsonSyntaxError,
 	readStateJson,
 	stableStringify,
 	withFileLock,
 	writeFileAtomic,
-	writeStateJson,
 } from "../../state/store.js";
 import { createCompileCached } from "../../validation.js";
 import type { LobsterCommand } from "../types.js";
@@ -923,7 +923,7 @@ async function persistOutputs({
 		items,
 		storedAt: new Date().toISOString(),
 	};
-	await writeStateJson({ env, key: stateKey, value: record, signal });
+	await diffAndStore({ env, key: stateKey, value: record, signal });
 }
 
 async function readReusableLlmState(env: any, stateKey: string) {

@@ -718,7 +718,6 @@ export async function runWorkflowFile({
 		? await loadWorkflowResumeState(ctx.env, consumedResumeStateKey ?? resume.stateKey)
 		: (resume ?? null);
 	let resumedExecutionStarted = false;
-	let resumedExecutionInterrupted = false;
 	let resumeStateConsumed = false;
 	let resumeStateClaimRejected = false;
 	const executionSignalListeners: Array<{ signal: AbortSignal; onAbort: () => void }> = [];
@@ -740,28 +739,39 @@ export async function runWorkflowFile({
 					throw new Error("Workflow resume state not found");
 				}
 				if (consumption.signalAbortedAfterCommit) {
-					const restored = await restoreConsumedResumeState({
+					await restoreConsumedResumeState({
 						env: ctx.env,
 						key: consumedResumeStateKey,
 						expectedState: resumeState,
 						claimId: consumption.claimId,
 					});
-					if (!restored) resumeStateClaimRejected = true;
+					resumeStateClaimRejected = true;
 					signal?.throwIfAborted();
 				}
-				resumeStateConsumed = true;
 				// A retained index may point to the tombstone after an I/O failure, but
 				// it can never re-enable the now-consumed raw token.
-				await cleanupApprovalIndexByStateKey({
-					env: ctx.env,
-					stateKey: consumedResumeStateKey,
-				}).catch(() => {});
+				try {
+					await cleanupApprovalIndexByStateKey({
+						env: ctx.env,
+						stateKey: consumedResumeStateKey,
+					}).catch(() => {});
+					signal?.throwIfAborted();
+				} catch (err) {
+					resumeStateClaimRejected = true;
+					await restoreConsumedResumeState({
+						env: ctx.env,
+						key: consumedResumeStateKey,
+						expectedState: resumeState,
+						claimId: consumption.claimId,
+					}).catch(() => {});
+					throw err;
+				}
+				resumeStateConsumed = true;
 				resumedExecutionStarted = true;
 			}
 			await ctx._onExecutionStarted?.();
 			if (!signal) return;
 			const onAbort = () => {
-				if (consumedResumeStateKey) resumedExecutionInterrupted = true;
 				ctx._onExecutionInterrupted?.();
 			};
 			if (signal.aborted) {
@@ -1364,7 +1374,6 @@ export async function runWorkflowFile({
 									await markExecutionStarted(stepSignal);
 								},
 								_onExecutionInterrupted: () => {
-									resumedExecutionInterrupted = true;
 									ctx._onExecutionInterrupted?.();
 								},
 							},

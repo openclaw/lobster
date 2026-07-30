@@ -1,4 +1,3 @@
-import { writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 
 const writeResponse = () => {
