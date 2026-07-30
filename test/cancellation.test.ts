@@ -72,6 +72,48 @@ test("runAbortableProcess does not spawn when its signal is already aborted", as
 	}
 });
 
+test(
+	"runAbortableProcess without a signal keeps direct children in the terminal process group",
+	{ skip: process.platform !== "linux" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-terminal-direct-process-"));
+		let terminal: ReturnType<typeof spawn> | undefined;
+		try {
+			const repoRoot = join(__dirname, "..", "..");
+			const runner = join(repoRoot, "dist", "src", "abortable_process.js");
+			const wrapper = join(repoRoot, "test", "fixtures", "abortable-process-terminal-direct.mjs");
+			const groupFile = join(dir, "process-group");
+			const startedFile = join(dir, "started");
+			const completedFile = join(dir, "completed");
+			const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+			const command = `exec ${[process.execPath, wrapper, runner].map(quote).join(" ")}`;
+			terminal = spawn("script", ["-qefc", command, "/dev/null"], {
+				env: {
+					...process.env,
+					LOBSTER_TERMINAL_DIRECT_GROUP_FILE: groupFile,
+					LOBSTER_TERMINAL_DIRECT_STARTED_FILE: startedFile,
+					LOBSTER_TERMINAL_DIRECT_COMPLETED_FILE: completedFile,
+				},
+				stdio: ["ignore", "ignore", "ignore"],
+			});
+			await waitForFile(groupFile, 5000);
+			await waitForFile(startedFile, 5000);
+			const processGroup = Number(await readFile(groupFile, "utf8"));
+			assert.ok(Number.isInteger(processGroup) && processGroup > 0);
+			process.kill(-processGroup, "SIGINT");
+			await new Promise((resolve) => setTimeout(resolve, 900));
+			assert.equal(
+				await fileExists(completedFile),
+				false,
+				"a direct child must not complete after terminal interruption",
+			);
+		} finally {
+			terminal?.kill("SIGKILL");
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
+
 async function fileExists(path: string) {
 	try {
 		await access(path);
@@ -3808,6 +3850,113 @@ test("pipeline approval token and short ID cannot fork a next input gate", async
 test("workflow approval token and short ID cannot fork a next input gate", async () => {
 	for (const resumeBy of ["token", "approvalId"] as const) {
 		await assertApprovalGateHandoffIsExclusive({ workflow: true, resumeBy });
+	}
+});
+
+async function assertCancellationCannotRetireClaimedSuccessor({
+	workflow,
+	rejectApproval,
+}: {
+	workflow: boolean;
+	rejectApproval: boolean;
+}) {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-cancel-claimed-successor-"));
+	const originalRename = fsp.rename;
+	let releaseClaim!: () => void;
+	const claimReleased = new Promise<void>((resolve) => {
+		releaseClaim = resolve;
+	});
+	let claimPublished!: () => void;
+	const claimReached = new Promise<void>((resolve) => {
+		claimPublished = resolve;
+	});
+	let claimPaused = false;
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		let first: any;
+		if (workflow) {
+			const filePath = join(dir, "workflow.lobster");
+			await writeFile(
+				filePath,
+				JSON.stringify({
+					steps: [
+						{ id: "approve", approval: "Continue?" },
+						{ id: "next-input", pipeline: "ask --prompt Next?" },
+					],
+				}),
+				"utf8",
+			);
+			first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		} else {
+			first = await runToolRequest({
+				pipeline: "approve --prompt Continue? | ask --prompt Next?",
+				ctx: { cwd: dir, env },
+			});
+		}
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.resumeToken);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken!);
+		const predecessorPath = keyToPath(stateDir, payload.stateKey);
+
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			async value(from: Parameters<typeof fsp.rename>[0], to: Parameters<typeof fsp.rename>[1]) {
+				const result = await originalRename(from, to);
+				if (String(to) === predecessorPath && !claimPaused) {
+					claimPaused = true;
+					claimPublished();
+					await claimReleased;
+				}
+				return result;
+			},
+		});
+
+		const resumed = resumeToolRequest({
+			token: first.requiresApproval.resumeToken!,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		await claimReached;
+		const cancelled = resumeToolRequest({
+			token: first.requiresApproval.resumeToken!,
+			...(rejectApproval ? { approved: false } : { cancel: true }),
+			ctx: { cwd: dir, env },
+		});
+		releaseClaim();
+
+		const [resumedResult, cancelledResult] = await Promise.all([resumed, cancelled]);
+		assert.equal(resumedResult.ok, true);
+		assert.equal(resumedResult.status, "needs_input");
+		assert.ok(resumedResult.requiresInput?.resumeToken);
+		assert.equal(
+			cancelledResult.ok,
+			false,
+			"cancellation must reject a predecessor already claimed for a successor",
+		);
+		assert.match(cancelledResult.error?.message ?? "", /resume state not found/i);
+		const successor = decodeResumeToken(resumedResult.requiresInput.resumeToken!);
+		assert.notEqual(
+			await fsp.readFile(keyToPath(stateDir, successor.stateKey), "utf8"),
+			"",
+			"the returned successor must remain live",
+		);
+	} finally {
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			value: originalRename,
+		});
+		await rm(dir, { recursive: true, force: true });
+	}
+}
+
+test("cancellation and rejection cannot retire a claimed pipeline or workflow successor", async () => {
+	for (const workflow of [false, true]) {
+		for (const rejectApproval of [false, true]) {
+			await assertCancellationCannotRetireClaimedSuccessor({ workflow, rejectApproval });
+		}
 	}
 });
 

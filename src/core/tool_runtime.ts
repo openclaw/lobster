@@ -8,6 +8,7 @@ import { runPipeline } from "../runtime.js";
 import { encodeToken } from "../token.js";
 import {
 	deleteStateJson,
+	deleteUnconsumedResumeState,
 	deleteApprovalId,
 	findStateKeyByApprovalId,
 	cleanupApprovalIndexByStateKey,
@@ -233,8 +234,21 @@ export async function resumeToolRequest({
 		// Keep the capability indexed until every state deletion succeeds. A
 		// cancelled request must not orphan a resume state by dropping its
 		// approval ID while waiting on another writer's state lock.
+		const deletionResults = [];
 		for (const stateKey of new Set(stateKeys)) {
-			await deleteStateJson({ env: runtime.env, key: stateKey, signal: runtime.signal });
+			deletionResults.push(
+				await deleteUnconsumedResumeState({
+					env: runtime.env,
+					key: stateKey,
+					signal: runtime.signal,
+				}),
+			);
+		}
+		if (
+			deletionResults.includes("claimed") ||
+			deletionResults.every((result) => result === "missing")
+		) {
+			return errorEnvelope("runtime_error", "Resume state not found");
 		}
 		if (resolvedApprovalId) {
 			await cleanupIndex();
@@ -311,11 +325,14 @@ export async function resumeToolRequest({
 			// Keep the approval ID usable while this may still be waiting on a
 			// concurrent state writer. Dropping the index first would orphan the
 			// capability if cancellation interrupts the deletion.
-			await deleteStateJson({
+			const deletion = await deleteUnconsumedResumeState({
 				env: runtime.env,
 				key: payload.stateKey,
 				signal: runtime.signal,
 			});
+			if (deletion !== "deleted") {
+				return errorEnvelope("runtime_error", "Pipeline resume state not found");
+			}
 			await cleanupIndex();
 			return okEnvelope("cancelled", [], null, null);
 		}

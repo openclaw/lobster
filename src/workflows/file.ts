@@ -14,6 +14,7 @@ import {
 	consumeResumeState,
 	createApprovalIndex,
 	deleteStateJson,
+	deleteUnconsumedResumeState,
 	isConsumedResumeState,
 	readStateJson,
 	restoreConsumedResumeState,
@@ -789,11 +790,12 @@ export async function runWorkflowFile({
 		}
 		if (cancel === true || approved === false) {
 			if (consumedResumeStateKey) {
-				await deleteStateJson({
+				const deletion = await deleteUnconsumedResumeState({
 					env: ctx.env,
 					key: consumedResumeStateKey,
 					signal: ctx.signal,
 				});
+				if (deletion !== "deleted") throw new Error("Workflow resume state not found");
 			}
 			return { status: "cancelled", output: [] };
 		}
@@ -801,11 +803,12 @@ export async function runWorkflowFile({
 
 	if (resumeState?.inputStepId && cancel === true) {
 		if (consumedResumeStateKey) {
-			await deleteStateJson({
+			const deletion = await deleteUnconsumedResumeState({
 				env: ctx.env,
 				key: consumedResumeStateKey,
 				signal: ctx.signal,
 			});
+			if (deletion !== "deleted") throw new Error("Workflow resume state not found");
 		}
 		return { status: "cancelled", output: [] };
 	}

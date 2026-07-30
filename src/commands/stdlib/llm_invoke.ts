@@ -9,6 +9,7 @@ import {
 	isJsonSyntaxError,
 	readStateJson,
 	stableStringify,
+	withFileLock,
 	writeFileAtomic,
 	writeStateJson,
 } from "../../state/store.js";
@@ -400,7 +401,7 @@ async function runLlmInvoke({
 	}
 
 	if (!disableCache && !forceRefresh) {
-		const cache = await readCacheEntry(env, cacheKey, config.cacheNamespace);
+		const cache = await readCacheEntry(env, cacheKey, config.cacheNamespace, ctx.signal);
 		if (cache) {
 			return {
 				output: streamOf(cache.items.map((item) => ({ ...item, source: "cache", cached: true }))),
@@ -478,7 +479,8 @@ async function runLlmInvoke({
 				signal: ctx.signal,
 			});
 			ctx.signal?.throwIfAborted();
-			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
+			if (!disableCache)
+				await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace, ctx.signal);
 			return { output: streamOf(normalized) };
 		}
 
@@ -494,7 +496,8 @@ async function runLlmInvoke({
 				signal: ctx.signal,
 			});
 			ctx.signal?.throwIfAborted();
-			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
+			if (!disableCache)
+				await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace, ctx.signal);
 			return { output: streamOf(normalized) };
 		}
 
@@ -949,18 +952,25 @@ async function readCacheEntry(
 	env: any,
 	key: string,
 	cacheNamespace: string,
+	signal?: AbortSignal,
 ): Promise<CacheEntry | null> {
 	const filePath = path.join(getCacheDir(env), cacheNamespace, `${key}.json`);
-	try {
-		const text = await fsp.readFile(filePath, "utf8");
-		const parsed = JSON.parse(text) as Partial<CacheEntry>;
-		if (parsed?.cacheKey !== key || !Array.isArray(parsed.items)) return null;
-		return parsed as CacheEntry;
-	} catch (err: any) {
-		if (err?.code === "ENOENT") return null;
-		if (isJsonSyntaxError(err)) return null;
-		throw err;
-	}
+	return withFileLock({
+		filePath,
+		signal,
+		task: async () => {
+			try {
+				const text = await fsp.readFile(filePath, "utf8");
+				const parsed = JSON.parse(text) as Partial<CacheEntry>;
+				if (parsed?.cacheKey !== key || !Array.isArray(parsed.items)) return null;
+				return parsed as CacheEntry;
+			} catch (err: any) {
+				if (err?.code === "ENOENT") return null;
+				if (isJsonSyntaxError(err)) return null;
+				throw err;
+			}
+		},
+	});
 }
 
 async function writeCacheEntry(
@@ -968,14 +978,30 @@ async function writeCacheEntry(
 	key: string,
 	items: NormalizedInvocationItem[],
 	cacheNamespace: string,
+	signal?: AbortSignal,
 ) {
 	const dir = path.join(getCacheDir(env), cacheNamespace);
+	signal?.throwIfAborted();
 	await ensureDirectory(dir);
 	const filePath = path.join(dir, `${key}.json`);
-	await writeFileAtomic(
+	const content =
+		JSON.stringify({ items, cacheKey: key, storedAt: new Date().toISOString() }, null, 2) + "\n";
+	await withFileLock({
 		filePath,
-		JSON.stringify({ items, cacheKey: key, storedAt: new Date().toISOString() }, null, 2) + "\n",
-	);
+		signal,
+		task: async () => {
+			signal?.throwIfAborted();
+			const result = await writeFileAtomic(filePath, content, { signal });
+			if (result?.signalAbortedAfterCommit || signal?.aborted) {
+				// No cache reader or competing cache writer can observe this entry
+				// until this lock is released, so rollback cannot delete another
+				// invocation's result.
+				await fsp.rm(filePath, { force: true });
+				signal?.throwIfAborted();
+				throw new Error("LLM cache publication cancelled");
+			}
+		},
+	});
 }
 
 function getCacheDir(env: any) {

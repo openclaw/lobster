@@ -16,6 +16,8 @@ type RunAbortableProcessOptions = {
 	stdin?: string | null;
 	signal?: AbortSignal;
 	killSignal?: NodeJS.Signals;
+	maxOutputBytes?: number;
+	outputLimitMessage?: string;
 	notFoundMessage: string;
 };
 
@@ -59,9 +61,18 @@ export function runAbortableProcess({
 	stdin,
 	signal,
 	killSignal,
+	maxOutputBytes,
+	outputLimitMessage,
 	notFoundMessage,
 }: RunAbortableProcessOptions): Promise<ProcessResult> {
 	return new Promise((resolve, reject) => {
+		if (
+			maxOutputBytes !== undefined &&
+			(!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 0)
+		) {
+			reject(new Error("maxOutputBytes must be a non-negative safe integer"));
+			return;
+		}
 		try {
 			signal?.throwIfAborted();
 		} catch (err) {
@@ -72,34 +83,30 @@ export function runAbortableProcess({
 			env,
 			cwd,
 			stdio: ["pipe", "pipe", "pipe"],
-			// A dedicated POSIX process group lets a cancellation reach helpers
-			// that the CLI spawned and then detached from its own lifecycle.
-			detached: process.platform !== "win32",
+			// Create a dedicated POSIX process group only when this runner owns a
+			// cancellation signal for it. Direct APIs without one must retain the
+			// caller's terminal process group so Ctrl-C still reaches their child.
+			detached: process.platform !== "win32" && signal !== undefined,
 		});
 
 		let stdout = "";
 		let stderr = "";
-		let cancellation: Error | undefined;
+		let stdoutBytes = 0;
+		let stderrBytes = 0;
+		let terminationError: Error | undefined;
 		let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
 		let processClosed = false;
 		let forceKillIssued = false;
 		let settled = false;
-		child.stdout?.setEncoding("utf8");
-		child.stderr?.setEncoding("utf8");
-		child.stdout?.on("data", (data) => (stdout += data));
-		child.stderr?.on("data", (data) => (stderr += data));
-		if (typeof stdin === "string") child.stdin?.write(stdin);
-		child.stdin?.end();
-
 		const cleanup = () => {
 			signal?.removeEventListener("abort", onAbort);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
 		};
-		const failCancellationWhenTreeIsStopped = () => {
-			if (!cancellation || !processClosed || !forceKillIssued || settled) return;
+		const failTerminationWhenTreeIsStopped = () => {
+			if (!terminationError || !processClosed || !forceKillIssued || settled) return;
 			settled = true;
 			cleanup();
-			reject(cancellation);
+			reject(terminationError);
 		};
 		const fail = (error: Error) => {
 			if (settled) return;
@@ -107,14 +114,13 @@ export function runAbortableProcess({
 			cleanup();
 			reject(error);
 		};
-		const onAbort = () => {
-			if (settled || cancellation || !signal) return;
-			cancellation = abortError(signal);
-			const initialKillSignal = killSignal ?? "SIGTERM";
+		const startTermination = (error: Error, initialKillSignal = killSignal ?? "SIGTERM") => {
+			if (settled || terminationError) return;
+			terminationError = error;
 			if (initialKillSignal === "SIGKILL") {
 				void terminateProcessTree(child, "SIGKILL").finally(() => {
 					forceKillIssued = true;
-					failCancellationWhenTreeIsStopped();
+					failTerminationWhenTreeIsStopped();
 				});
 				return;
 			}
@@ -123,15 +129,43 @@ export function runAbortableProcess({
 				forceKillTimer = undefined;
 				void terminateProcessTree(child, "SIGKILL").finally(() => {
 					forceKillIssued = true;
-					failCancellationWhenTreeIsStopped();
+					failTerminationWhenTreeIsStopped();
 				});
 			}, ABORT_FORCE_KILL_AFTER_MS);
 		};
+		const onAbort = () => {
+			if (!signal) return;
+			startTermination(abortError(signal));
+		};
+		const appendOutput = (stream: "stdout" | "stderr", data: string) => {
+			const bytes = Buffer.byteLength(data);
+			const total = stream === "stdout" ? stdoutBytes + bytes : stderrBytes + bytes;
+			if (maxOutputBytes !== undefined && total > maxOutputBytes) {
+				startTermination(
+					new Error(outputLimitMessage ?? `Process output exceeded ${maxOutputBytes} bytes`),
+				);
+				return;
+			}
+			if (stream === "stdout") {
+				stdoutBytes = total;
+				stdout += data;
+			} else {
+				stderrBytes = total;
+				stderr += data;
+			}
+		};
+
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		child.stdout?.on("data", (data: string) => appendOutput("stdout", data));
+		child.stderr?.on("data", (data: string) => appendOutput("stderr", data));
+		if (typeof stdin === "string") child.stdin?.write(stdin);
+		child.stdin?.end();
 
 		child.on("error", (error: NodeJS.ErrnoException) => {
-			if (cancellation) {
+			if (terminationError) {
 				processClosed = true;
-				failCancellationWhenTreeIsStopped();
+				failTerminationWhenTreeIsStopped();
 				return;
 			}
 			if (error.code === "ENOENT") {
@@ -143,8 +177,8 @@ export function runAbortableProcess({
 		child.on("close", (code) => {
 			if (settled) return;
 			processClosed = true;
-			if (cancellation) {
-				failCancellationWhenTreeIsStopped();
+			if (terminationError) {
+				failTerminationWhenTreeIsStopped();
 				return;
 			}
 			settled = true;

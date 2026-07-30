@@ -1,6 +1,8 @@
 import { runAbortableProcess } from "../../abortable_process.js";
 import type { LobsterCommand } from "../types.js";
 
+const OPENCLAW_AGENT_MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+
 type AgentCliRunner = (params: {
 	executable: string;
 	argv: string[];
@@ -111,6 +113,8 @@ export function runOpenClawAgentCli(params: {
 		cwd: params.cwd,
 		env: params.env,
 		signal: params.signal,
+		maxOutputBytes: OPENCLAW_AGENT_MAX_OUTPUT_BYTES,
+		outputLimitMessage: `openclaw.agent output exceeded ${OPENCLAW_AGENT_MAX_OUTPUT_BYTES} bytes`,
 		notFoundMessage: "openclaw.agent could not find the OpenClaw CLI",
 	}).then(({ code, stdout, stderr }) => {
 		if (code !== 0) {

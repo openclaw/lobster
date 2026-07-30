@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { promises as fsp } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -208,6 +209,80 @@ test("llm.invoke does not retry schema validation after adapter cancellation", a
 		/adapter cancelled during validation/,
 	);
 	assert.equal(calls, 1, "cancellation after an invalid response must suppress retries");
+});
+
+test("llm.invoke does not publish a reusable cache entry when cancellation races cache commit", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-cancel-publication-"));
+	const stateDir = path.join(cacheDir, "state");
+	const controller = new AbortController();
+	const originalRename = fsp.rename;
+	let cacheCommitAborted = false;
+	let calls = 0;
+	const adapter = {
+		source: "cache-cancel-test",
+		async invoke() {
+			calls += 1;
+			return {
+				ok: true,
+				result: {
+					runId: `call-${calls}`,
+					output: { data: { call: calls } },
+				},
+			};
+		},
+	};
+	const args = { _: [], provider: "cache-cancel-test", prompt: "Decide" };
+
+	try {
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			async value(from: Parameters<typeof fsp.rename>[0], to: Parameters<typeof fsp.rename>[1]) {
+				const result = await originalRename(from, to);
+				if (!cacheCommitAborted && String(to).startsWith(`${cacheDir}${path.sep}`)) {
+					cacheCommitAborted = true;
+					controller.abort(new Error("cancelled during cache publication"));
+				}
+				return result;
+			},
+		});
+
+		await assert.rejects(
+			cmd.run({
+				input: streamOf([]),
+				args,
+				ctx: {
+					...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+					signal: controller.signal,
+					llmAdapters: { "cache-cancel-test": adapter },
+				},
+			} as any),
+			/cancelled during cache publication/,
+		);
+	} finally {
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			value: originalRename,
+		});
+	}
+
+	const retried = await cmd.run({
+		input: streamOf([]),
+		args,
+		ctx: {
+			...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+			llmAdapters: { "cache-cancel-test": adapter },
+		},
+	} as any);
+	const retriedItems = await collect(retried.output!);
+	assert.equal(calls, 2, "a cancelled invocation must not satisfy a later request from cache");
+	assert.equal(retriedItems[0]?.source, "cache-cancel-test");
+
+	await rm(cacheDir, { recursive: true, force: true });
 });
 
 function baseCtx(envOverrides: Record<string, string>, registry?: any) {

@@ -281,8 +281,29 @@ async function withStateKeyLock<T>({
 	task: () => Promise<T>;
 }): Promise<T> {
 	const stateDir = defaultStateDir(env);
-	await ensureDirectory(stateDir);
-	const lockPath = `${keyToPath(stateDir, key)}.lock`;
+	return withFileLock({
+		filePath: keyToPath(stateDir, key),
+		signal,
+		task,
+	});
+}
+
+/**
+ * Serialize a transition for an arbitrary durable file. Readers that need a
+ * publish-or-rollback decision use the same lock as writers, rather than
+ * observing an atomic rename that cancellation may still need to undo.
+ */
+export async function withFileLock<T>({
+	filePath,
+	signal,
+	task,
+}: {
+	filePath: string;
+	signal?: AbortSignal;
+	task: () => Promise<T>;
+}): Promise<T> {
+	await ensureDirectory(path.dirname(filePath));
+	const lockPath = `${filePath}.lock`;
 	let acquired = false;
 	let owner: string | undefined;
 	let ownerWritten = false;
@@ -612,6 +633,44 @@ export async function deleteStateJson({
 		key,
 		signal,
 		task: () => deleteStateJsonUnlocked({ env, key }),
+	});
+}
+
+/**
+ * Retire a resume capability only while it is still a live, unclaimed state.
+ * A consumed marker belongs to a resume that has already started its atomic
+ * predecessor-to-successor handoff, so cancellation must not delete it and
+ * report success while that successor remains executable.
+ */
+export async function deleteUnconsumedResumeState({
+	env,
+	key,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	signal?: AbortSignal;
+}): Promise<"deleted" | "missing" | "claimed"> {
+	return withStateKeyLock({
+		env,
+		key,
+		signal,
+		task: async () => {
+			let currentState: unknown;
+			try {
+				currentState = await readStateJson({ env, key });
+			} catch (err) {
+				// A corrupt state is not resumable, so explicit cancellation may still
+				// remove it. This keeps the legacy workflow-alias recovery behavior.
+				if (!isJsonSyntaxError(err)) throw err;
+				await deleteStateJsonUnlocked({ env, key });
+				return "deleted";
+			}
+			if (currentState === null) return "missing";
+			if (isConsumedResumeState(currentState)) return "claimed";
+			await deleteStateJsonUnlocked({ env, key });
+			return "deleted";
+		},
 	});
 }
 

@@ -134,6 +134,18 @@ test("OpenClaw CLI runner parses structured JSON output", async () => {
 	});
 });
 
+test("OpenClaw CLI runner preserves the 10 MiB output limit", async () => {
+	await assert.rejects(
+		runOpenClawAgentCli({
+			executable: process.execPath,
+			argv: ["-e", "process.stdout.write('x'.repeat(10 * 1024 * 1024 + 1))"],
+			cwd: process.cwd(),
+			env: process.env,
+		}),
+		/openclaw\.agent output exceeded 10485760 bytes/,
+	);
+});
+
 test("OpenClaw CLI runner preserves workflow cancellation", async () => {
 	const fixturePath = path.join(process.cwd(), "test", "fixtures", "mock-openclaw-agent.mjs");
 	const controller = new AbortController();
