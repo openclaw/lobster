@@ -167,6 +167,49 @@ test("llm.invoke uses Pi adapter over local HTTP bridge", async () => {
 	}
 });
 
+test("llm.invoke does not retry schema validation after adapter cancellation", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const controller = new AbortController();
+	let calls = 0;
+
+	await assert.rejects(
+		cmd.run({
+			input: streamOf([]),
+			args: {
+				_: [],
+				provider: "cancel-test",
+				prompt: "Decide",
+				"output-schema": '{"type":"object","required":["decision"]}',
+				"max-validation-retries": 2,
+			},
+			ctx: {
+				...baseCtx({}, registry),
+				signal: controller.signal,
+				llmAdapters: {
+					"cancel-test": {
+						source: "cancel-test",
+						async invoke() {
+							calls += 1;
+							controller.abort(new Error("adapter cancelled during validation"));
+							return {
+								ok: true,
+								result: {
+									runId: "cancelled-attempt",
+									output: { data: { unexpected: true } },
+								},
+							};
+						},
+					},
+				},
+			},
+		} as any),
+		/adapter cancelled during validation/,
+	);
+	assert.equal(calls, 1, "cancellation after an invalid response must suppress retries");
+});
+
 function baseCtx(envOverrides: Record<string, string>, registry?: any) {
 	return {
 		stdin: process.stdin,

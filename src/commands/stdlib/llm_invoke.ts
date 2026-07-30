@@ -441,7 +441,9 @@ async function runLlmInvoke({
 
 		let responseEnvelope: LlmResponseEnvelope;
 		try {
+			ctx.signal?.throwIfAborted();
 			responseEnvelope = await adapter.invoke({ env, args, payload, signal: ctx.signal });
+			ctx.signal?.throwIfAborted();
 		} catch (err: any) {
 			throw new Error(`${config.name} request failed: ${err?.message ?? String(err)}`);
 		}
@@ -466,6 +468,7 @@ async function runLlmInvoke({
 		});
 
 		if (!validator) {
+			ctx.signal?.throwIfAborted();
 			await persistOutputs({
 				env,
 				stateKey,
@@ -474,12 +477,14 @@ async function runLlmInvoke({
 				stateType: config.stateType,
 				signal: ctx.signal,
 			});
+			ctx.signal?.throwIfAborted();
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
 			return { output: streamOf(normalized) };
 		}
 
 		const structured = normalized[0]?.output?.data ?? null;
 		if (validator(structured)) {
+			ctx.signal?.throwIfAborted();
 			await persistOutputs({
 				env,
 				stateKey,
@@ -488,6 +493,7 @@ async function runLlmInvoke({
 				stateType: config.stateType,
 				signal: ctx.signal,
 			});
+			ctx.signal?.throwIfAborted();
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
 			return { output: streamOf(normalized) };
 		}

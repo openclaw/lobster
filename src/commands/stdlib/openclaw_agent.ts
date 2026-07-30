@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { runAbortableProcess } from "../../abortable_process.js";
 import type { LobsterCommand } from "../types.js";
 
 type AgentCliRunner = (params: {
@@ -105,38 +105,27 @@ export function runOpenClawAgentCli(params: {
 	env: NodeJS.ProcessEnv;
 	signal?: AbortSignal;
 }): Promise<unknown> {
-	return new Promise((resolve, reject) => {
-		execFile(
-			params.executable,
-			params.argv,
-			{
-				cwd: params.cwd,
-				env: params.env,
-				signal: params.signal,
-				encoding: "utf8",
-				maxBuffer: 10 * 1024 * 1024,
-			},
-			(error, stdout, stderr) => {
-				if (error) {
-					if (error.name === "AbortError") {
-						reject(error);
-						return;
-					}
-					const detail = String(stderr || stdout || error.message).trim();
-					reject(new Error(`openclaw.agent failed: ${detail}`));
-					return;
-				}
-				try {
-					const parsed = JSON.parse(String(stdout).trim() || "null");
-					if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-						throw new Error("response must be an object");
-					}
-					resolve(parsed);
-				} catch {
-					reject(new Error("openclaw.agent expected JSON output from `openclaw agent --json`"));
-				}
-			},
-		);
+	return runAbortableProcess({
+		command: params.executable,
+		argv: params.argv,
+		cwd: params.cwd,
+		env: params.env,
+		signal: params.signal,
+		notFoundMessage: "openclaw.agent could not find the OpenClaw CLI",
+	}).then(({ code, stdout, stderr }) => {
+		if (code !== 0) {
+			const detail = String(stderr || stdout || `exited with code ${code}`).trim();
+			throw new Error(`openclaw.agent failed: ${detail}`);
+		}
+		try {
+			const parsed = JSON.parse(stdout.trim() || "null");
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				throw new Error("response must be an object");
+			}
+			return parsed;
+		} catch {
+			throw new Error("openclaw.agent expected JSON output from `openclaw agent --json`");
+		}
 	});
 }
 

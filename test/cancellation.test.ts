@@ -1173,16 +1173,16 @@ test("pipeline approval resume restores its original capability after next-appro
 		const previousStatePath = keyToPath(stateDir, payload.stateKey);
 
 		const controller = new AbortController();
-		const originalUnlink = fsp.unlink;
-		let previousStateDeleted = false;
-		Object.defineProperty(fsp, "unlink", {
+		const originalRename = fsp.rename;
+		let previousStateClaimed = false;
+		Object.defineProperty(fsp, "rename", {
 			configurable: true,
 			writable: true,
-			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
-				const result = await originalUnlink(filePath);
-				if (String(filePath) === previousStatePath && !controller.signal.aborted) {
-					previousStateDeleted = true;
-					controller.abort(new Error("abort after previous pipeline approval state deletion"));
+			async value(from: Parameters<typeof fsp.rename>[0], to: Parameters<typeof fsp.rename>[1]) {
+				const result = await originalRename(from, to);
+				if (String(to) === previousStatePath && !controller.signal.aborted) {
+					previousStateClaimed = true;
+					controller.abort(new Error("abort after previous pipeline approval state claim"));
 				}
 				return result;
 			},
@@ -1195,14 +1195,14 @@ test("pipeline approval resume restores its original capability after next-appro
 				ctx: { env, signal: controller.signal },
 			});
 		} finally {
-			Object.defineProperty(fsp, "unlink", {
+			Object.defineProperty(fsp, "rename", {
 				configurable: true,
 				writable: true,
-				value: originalUnlink,
+				value: originalRename,
 			});
 		}
 		assertCancellationEnvelope(aborted!);
-		assert.equal(previousStateDeleted, true);
+		assert.equal(previousStateClaimed, true);
 
 		const retried = await resumeToolRequest({
 			approvalId: first.requiresApproval.approvalId,
@@ -1232,16 +1232,16 @@ test("pipeline approval resume restores its original capability after next-input
 		const previousStatePath = keyToPath(stateDir, payload.stateKey);
 
 		const controller = new AbortController();
-		const originalUnlink = fsp.unlink;
-		let previousStateDeleted = false;
-		Object.defineProperty(fsp, "unlink", {
+		const originalRename = fsp.rename;
+		let previousStateClaimed = false;
+		Object.defineProperty(fsp, "rename", {
 			configurable: true,
 			writable: true,
-			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
-				const result = await originalUnlink(filePath);
-				if (String(filePath) === previousStatePath && !controller.signal.aborted) {
-					previousStateDeleted = true;
-					controller.abort(new Error("abort after previous pipeline input state deletion"));
+			async value(from: Parameters<typeof fsp.rename>[0], to: Parameters<typeof fsp.rename>[1]) {
+				const result = await originalRename(from, to);
+				if (String(to) === previousStatePath && !controller.signal.aborted) {
+					previousStateClaimed = true;
+					controller.abort(new Error("abort after previous pipeline input state claim"));
 				}
 				return result;
 			},
@@ -1254,14 +1254,14 @@ test("pipeline approval resume restores its original capability after next-input
 				ctx: { env, signal: controller.signal },
 			});
 		} finally {
-			Object.defineProperty(fsp, "unlink", {
+			Object.defineProperty(fsp, "rename", {
 				configurable: true,
 				writable: true,
-				value: originalUnlink,
+				value: originalRename,
 			});
 		}
 		assertCancellationEnvelope(aborted!);
-		assert.equal(previousStateDeleted, true);
+		assert.equal(previousStateClaimed, true);
 
 		const retried = await resumeToolRequest({
 			approvalId: first.requiresApproval.approvalId,
@@ -1285,11 +1285,16 @@ test("pipeline cancellation after side effects does not restore the consumed app
 			name: "test.side-effect-then-input",
 			async run({ ctx }: any) {
 				sideEffects += 1;
-				await ctx.requestInput({
-					prompt: "Second?",
-					responseSchema: { type: "object" },
-				});
-				return { output: streamOf([]) };
+				try {
+					await ctx.requestInput({
+						prompt: "Second?",
+						responseSchema: { type: "object" },
+					});
+					return { output: streamOf([]) };
+				} catch (err) {
+					controller.abort(new Error("abort after side-effecting pipeline state claim"));
+					throw err;
+				}
 			},
 		};
 		const registry = withCommands(createDefaultRegistry(), sideEffectThenInput);
@@ -1300,36 +1305,12 @@ test("pipeline cancellation after side effects does not restore the consumed app
 		assert.equal(first.status, "needs_approval");
 		assert.ok(first.requiresApproval?.approvalId);
 		assert.ok(first.requiresApproval?.resumeToken);
-		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
-		const previousStatePath = keyToPath(stateDir, payload.stateKey);
-
 		const controller = new AbortController();
-		const originalUnlink = fsp.unlink;
-		Object.defineProperty(fsp, "unlink", {
-			configurable: true,
-			writable: true,
-			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
-				const result = await originalUnlink(filePath);
-				if (String(filePath) === previousStatePath && !controller.signal.aborted) {
-					controller.abort(new Error("abort after side-effecting pipeline state deletion"));
-				}
-				return result;
-			},
+		const aborted = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { env, registry, signal: controller.signal },
 		});
-		let aborted;
-		try {
-			aborted = await resumeToolRequest({
-				approvalId: first.requiresApproval.approvalId,
-				approved: true,
-				ctx: { env, registry, signal: controller.signal },
-			});
-		} finally {
-			Object.defineProperty(fsp, "unlink", {
-				configurable: true,
-				writable: true,
-				value: originalUnlink,
-			});
-		}
 		assertCancellationEnvelope(aborted!);
 		assert.equal(sideEffects, 1);
 
@@ -3736,6 +3717,97 @@ test("pipeline approval token and short ID each dispatch an effect at most once"
 test("workflow approval token and short ID each dispatch an effect at most once", async () => {
 	for (const resumeBy of ["token", "approvalId"] as const) {
 		await assertApprovalResumeIsExclusive({ workflow: true, resumeBy });
+	}
+});
+
+async function assertApprovalGateHandoffIsExclusive({
+	workflow,
+	resumeBy,
+}: {
+	workflow: boolean;
+	resumeBy: "token" | "approvalId";
+}) {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-exclusive-gate-handoff-"));
+	let invocations = 0;
+	try {
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const effect = {
+			name: "test.exclusive-gate-handoff-effect",
+			async run() {
+				invocations += 1;
+				return { output: streamOf([{ ok: true }]) };
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), effect);
+		let first;
+		if (workflow) {
+			const filePath = join(dir, "workflow.lobster");
+			await writeFile(
+				filePath,
+				JSON.stringify({
+					steps: [
+						{ id: "first", approval: "First?" },
+						{ id: "second", pipeline: "ask --prompt Second?" },
+						{ id: "effect", pipeline: "test.exclusive-gate-handoff-effect" },
+					],
+				}),
+				"utf8",
+			);
+			first = await runToolRequest({ filePath, ctx: { cwd: dir, env, registry } });
+		} else {
+			first = await runToolRequest({
+				pipeline:
+					"approve --prompt First? | ask --prompt Second? | test.exclusive-gate-handoff-effect",
+				ctx: { cwd: dir, env, registry },
+			});
+		}
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.resumeToken);
+		assert.ok(first.requiresApproval?.approvalId);
+
+		const resumeArgs =
+			resumeBy === "token"
+				? { token: first.requiresApproval.resumeToken! }
+				: { approvalId: first.requiresApproval.approvalId! };
+		const outcomes = await Promise.all([
+			resumeToolRequest({ ...resumeArgs, approved: true, ctx: { cwd: dir, env, registry } }),
+			resumeToolRequest({ ...resumeArgs, approved: true, ctx: { cwd: dir, env, registry } }),
+		]);
+
+		const successor = outcomes.find((outcome) => outcome.ok && outcome.status === "needs_input");
+		assert.ok(successor?.requiresInput?.resumeToken, "exactly one successor gate must be returned");
+		assert.equal(
+			outcomes.filter((outcome) => outcome.ok && outcome.status === "needs_input").length,
+			1,
+		);
+		assert.equal(outcomes.filter((outcome) => !outcome.ok).length, 1);
+		assert.match(
+			outcomes.find((outcome) => !outcome.ok)?.error?.message ?? "",
+			/resume state not found/i,
+		);
+
+		const completed = await resumeToolRequest({
+			token: successor!.requiresInput!.resumeToken!,
+			response: { decision: "approve" },
+			ctx: { cwd: dir, env, registry },
+		});
+		assert.equal(completed.ok, true);
+		assert.equal(completed.status, "ok");
+		assert.equal(invocations, 1, "only the winning successor may reach the effect");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+}
+
+test("pipeline approval token and short ID cannot fork a next input gate", async () => {
+	for (const resumeBy of ["token", "approvalId"] as const) {
+		await assertApprovalGateHandoffIsExclusive({ workflow: false, resumeBy });
+	}
+});
+
+test("workflow approval token and short ID cannot fork a next input gate", async () => {
+	for (const resumeBy of ["token", "approvalId"] as const) {
+		await assertApprovalGateHandoffIsExclusive({ workflow: true, resumeBy });
 	}
 });
 

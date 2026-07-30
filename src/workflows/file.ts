@@ -195,6 +195,7 @@ export type WorkflowResumePayload = {
 	inputSchema?: unknown;
 	inputSubject?: unknown;
 	pipelineInput?: WorkflowPipelineInputResumeState;
+	supersededResumeStateKeys?: string[];
 };
 
 type WorkflowResumeState = {
@@ -209,6 +210,7 @@ type WorkflowResumeState = {
 	inputSchema?: unknown;
 	inputSubject?: unknown;
 	pipelineInput?: WorkflowPipelineInputResumeState;
+	supersededResumeStateKeys?: string[];
 	createdAt: string;
 };
 
@@ -963,17 +965,27 @@ export async function runWorkflowFile({
 								// Preserve the full resolved subject for resume semantics; the tool
 								// envelope may contain a truncated preview to stay within size limits.
 								inputSubject: subject,
+								supersededResumeStateKeys: collectSupersededWorkflowResumeStateKeys(
+									consumedResumeStateKey,
+									resumeState,
+								),
 								createdAt: new Date().toISOString(),
 							},
 							ctx.signal,
 						);
 
-						await replaceWorkflowResumeState({
+						const replaced = await replaceWorkflowResumeState({
 							env: ctx.env,
 							previousStateKey: consumedResumeStateKey,
+							expectedPreviousState: resumeState,
+							previousStateConsumed: resumeStateConsumed,
 							replacementStateKey: stateKey,
 							signal: ctx.signal,
 						});
+						if (!replaced) {
+							resumeStateClaimRejected = true;
+							throw new Error("Workflow resume state not found");
+						}
 
 						const resumeToken = encodeToken({
 							protocolVersion: 1,
@@ -1478,17 +1490,27 @@ export async function runWorkflowFile({
 								inputSchema: err.request.responseSchema,
 								inputSubject: err.request.subject,
 								pipelineInput: err.pipelineInput,
+								supersededResumeStateKeys: collectSupersededWorkflowResumeStateKeys(
+									consumedResumeStateKey,
+									resumeState,
+								),
 								createdAt: new Date().toISOString(),
 							},
 							ctx.signal,
 						);
 
-						await replaceWorkflowResumeState({
+						const replaced = await replaceWorkflowResumeState({
 							env: ctx.env,
 							previousStateKey: consumedResumeStateKey,
+							expectedPreviousState: resumeState,
+							previousStateConsumed: resumeStateConsumed,
 							replacementStateKey: stateKey,
 							signal: ctx.signal,
 						});
+						if (!replaced) {
+							resumeStateClaimRejected = true;
+							throw new Error("Workflow resume state not found");
+						}
 
 						const resumeToken = encodeToken({
 							protocolVersion: 1,
@@ -1586,6 +1608,10 @@ export async function runWorkflowFile({
 								args: resolvedArgs,
 								approvalStepId: step.id,
 								approvalIdentity,
+								supersededResumeStateKeys: collectSupersededWorkflowResumeStateKeys(
+									consumedResumeStateKey,
+									resumeState,
+								),
 								createdAt: new Date().toISOString(),
 							},
 							ctx.signal,
@@ -1593,12 +1619,18 @@ export async function runWorkflowFile({
 
 						const approvalId = await createApprovalIndex({ env: ctx.env, stateKey });
 						ctx.signal?.throwIfAborted();
-						await replaceWorkflowResumeState({
+						const replaced = await replaceWorkflowResumeState({
 							env: ctx.env,
 							previousStateKey: consumedResumeStateKey,
+							expectedPreviousState: resumeState,
+							previousStateConsumed: resumeStateConsumed,
 							replacementStateKey: stateKey,
 							signal: ctx.signal,
 						});
+						if (!replaced) {
+							resumeStateClaimRejected = true;
+							throw new Error("Workflow resume state not found");
+						}
 
 						const resumeToken = encodeToken({
 							protocolVersion: 1,
@@ -1658,6 +1690,10 @@ export async function runWorkflowFile({
 					signal: ctx.signal,
 				});
 				ctx.signal?.throwIfAborted();
+				await cleanupSupersededWorkflowResumeStates(
+					ctx.env,
+					resumeState?.supersededResumeStateKeys,
+				);
 			} catch (err) {
 				if (!resumeStateConsumed) {
 					await restoreWorkflowResumeState({
@@ -2031,23 +2067,54 @@ async function saveWorkflowResumeState(
 async function replaceWorkflowResumeState({
 	env,
 	previousStateKey,
+	expectedPreviousState,
+	previousStateConsumed,
 	replacementStateKey,
 	signal,
 }: {
 	env: Record<string, string | undefined>;
 	previousStateKey: string | null;
+	expectedPreviousState: WorkflowResumeState | WorkflowResumePayload | null;
+	previousStateConsumed: boolean;
 	replacementStateKey: string;
 	signal?: AbortSignal;
 }) {
-	if (previousStateKey && previousStateKey !== replacementStateKey) {
-		await deleteStateJson({ env, key: previousStateKey, signal });
+	if (!previousStateKey || previousStateKey === replacementStateKey) {
+		signal?.throwIfAborted();
+		return true;
 	}
-	signal?.throwIfAborted();
-	if (previousStateKey && previousStateKey !== replacementStateKey) {
-		// The replacement is committed once its predecessor has been removed.
-		// Do not add another cancellation checkpoint after retiring its old
-		// approval capability: the outer rollback path must be able to restore it.
+	if (previousStateConsumed) {
+		signal?.throwIfAborted();
+		return true;
+	}
+	if (!expectedPreviousState) return false;
+
+	let claimId: string | undefined;
+	try {
+		const consumption = await consumeResumeState({
+			env,
+			key: previousStateKey,
+			expectedState: expectedPreviousState,
+			signal,
+		});
+		if (!consumption.consumed) return false;
+		claimId = consumption.claimId;
+		// Keep the consumed marker until terminal cleanup. It is the atomic
+		// predecessor-to-successor handoff and prevents another resume from
+		// creating a competing successor after this call returns.
+		signal?.throwIfAborted();
 		await cleanupApprovalIndexByStateKey({ env, stateKey: previousStateKey }).catch(() => {});
+		return true;
+	} catch (err) {
+		if (claimId && signal?.aborted) {
+			await restoreConsumedResumeState({
+				env,
+				key: previousStateKey,
+				expectedState: expectedPreviousState,
+				claimId,
+			}).catch(() => {});
+		}
+		throw err;
 	}
 }
 
@@ -2063,6 +2130,31 @@ async function restoreWorkflowResumeState({
 	if (!stateKey || !state) return;
 	if ((await readStateJson({ env, key: stateKey })) !== null) return;
 	await writeStateJson({ env, key: stateKey, value: state });
+}
+
+function collectSupersededWorkflowResumeStateKeys(
+	previousStateKey: string | null,
+	previousState: WorkflowResumeState | WorkflowResumePayload | null,
+) {
+	return [
+		...(previousState?.supersededResumeStateKeys ?? []),
+		...(previousStateKey ? [previousStateKey] : []),
+	].filter((stateKey, index, all) => stateKey && all.indexOf(stateKey) === index);
+}
+
+async function cleanupSupersededWorkflowResumeStates(
+	env: Record<string, string | undefined>,
+	stateKeys: string[] | undefined,
+) {
+	for (const stateKey of stateKeys ?? []) {
+		try {
+			if (isConsumedResumeState(await readStateJson({ env, key: stateKey }))) {
+				await deleteStateJson({ env, key: stateKey });
+			}
+		} catch {
+			// The completed successor makes retained ancestor markers safe.
+		}
+	}
 }
 
 async function discardWorkflowResumeState(
@@ -2126,6 +2218,13 @@ async function loadWorkflowResumeState(env: Record<string, string | undefined>, 
 	if (!data.steps || typeof data.steps !== "object")
 		throw new Error("Invalid workflow resume state");
 	if (!data.args || typeof data.args !== "object") throw new Error("Invalid workflow resume state");
+	if (
+		data.supersededResumeStateKeys !== undefined &&
+		(!Array.isArray(data.supersededResumeStateKeys) ||
+			data.supersededResumeStateKeys.some((stateKey) => typeof stateKey !== "string"))
+	) {
+		throw new Error("Invalid workflow resume state");
+	}
 	if (
 		data.inputKind !== undefined &&
 		!["workflow_step", "pipeline_command"].includes(data.inputKind)

@@ -3,10 +3,12 @@ import { randomUUID } from "node:crypto";
 import { encodeToken } from "./token.js";
 import {
 	cleanupApprovalIndexByStateKey,
+	consumeResumeState,
 	createApprovalIndex,
 	deleteStateJson,
 	isConsumedResumeState,
 	readStateJson,
+	restoreConsumedResumeState,
 	writeStateJson,
 } from "./state/store.js";
 import { compileCached } from "./validation.js";
@@ -21,6 +23,7 @@ export type PipelineResumeState = {
 	inputSchema?: unknown;
 	prompt?: string;
 	commandInput?: CommandInputState;
+	supersededResumeStateKeys?: string[];
 	createdAt: string;
 };
 
@@ -118,18 +121,25 @@ export async function finalizePipelineToolRun(params: {
 					items: approval.items,
 					haltType: "approval_request",
 					prompt: approval.prompt,
+					supersededResumeStateKeys: collectSupersededPipelineResumeStateKeys(
+						params.previousStateKey,
+						params.previousState,
+					),
 					createdAt: new Date().toISOString(),
 				},
 				params.signal,
 			);
 			let approvalId: string | null;
 			approvalId = await createApprovalIndex({ env: params.env, stateKey: nextStateKey });
-			await replacePipelineResumeState({
+			const replaced = await replacePipelineResumeState({
 				env: params.env,
 				previousStateKey: params.previousStateKey,
+				expectedPreviousState: params.previousState,
+				previousStateConsumed: params.previousStateConsumed,
 				replacementStateKey: nextStateKey,
 				signal: params.signal,
 			});
+			if (!replaced) throw new Error("Pipeline resume state not found");
 			const resumeToken = encodeToken({
 				protocolVersion: 1,
 				v: 1,
@@ -172,16 +182,23 @@ export async function finalizePipelineToolRun(params: {
 					inputSchema: inputRequest.responseSchema,
 					prompt: inputRequest.prompt,
 					...(inputRequest.commandInput ? { commandInput: inputRequest.commandInput } : null),
+					supersededResumeStateKeys: collectSupersededPipelineResumeStateKeys(
+						params.previousStateKey,
+						params.previousState,
+					),
 					createdAt: new Date().toISOString(),
 				},
 				params.signal,
 			);
-			await replacePipelineResumeState({
+			const replaced = await replacePipelineResumeState({
 				env: params.env,
 				previousStateKey: params.previousStateKey,
+				expectedPreviousState: params.previousState,
+				previousStateConsumed: params.previousStateConsumed,
 				replacementStateKey: nextStateKey,
 				signal: params.signal,
 			});
+			if (!replaced) throw new Error("Pipeline resume state not found");
 			const resumeToken = encodeToken({
 				protocolVersion: 1,
 				v: 1,
@@ -218,6 +235,10 @@ export async function finalizePipelineToolRun(params: {
 				signal: params.signal,
 			});
 			params.signal?.throwIfAborted();
+			await cleanupSupersededPipelineResumeStates(
+				params.env,
+				params.previousState?.supersededResumeStateKeys,
+			);
 		} catch (err) {
 			if (!params.previousStateConsumed) await restorePreviousPipelineResumeState(params);
 			throw err;
@@ -251,18 +272,60 @@ export async function savePipelineResumeState(
 async function replacePipelineResumeState({
 	env,
 	previousStateKey,
+	expectedPreviousState,
+	previousStateConsumed,
 	replacementStateKey,
 	signal,
 }: {
 	env: Record<string, string | undefined>;
 	previousStateKey?: string;
+	expectedPreviousState?: PipelineResumeState;
+	previousStateConsumed?: boolean;
 	replacementStateKey: string;
 	signal?: AbortSignal;
 }) {
-	if (previousStateKey && previousStateKey !== replacementStateKey) {
-		await deleteStateJson({ env, key: previousStateKey, signal });
+	if (!previousStateKey || previousStateKey === replacementStateKey) {
+		signal?.throwIfAborted();
+		return true;
 	}
-	signal?.throwIfAborted();
+	// The current resume has already crossed an unsafe boundary and owns the
+	// predecessor's consumed marker. It may safely publish the next gate, but
+	// must retain that marker rather than attempting a stale snapshot CAS.
+	if (previousStateConsumed) {
+		signal?.throwIfAborted();
+		return true;
+	}
+	if (!expectedPreviousState) return false;
+
+	let claimId: string | undefined;
+	try {
+		const consumption = await consumeResumeState({
+			env,
+			key: previousStateKey,
+			expectedState: expectedPreviousState,
+			signal,
+		});
+		if (!consumption.consumed) return false;
+		claimId = consumption.claimId;
+		// The predecessor remains as a durable tombstone until terminal cleanup.
+		// A concurrent caller can therefore never turn the same approval into a
+		// second successor capability.
+		signal?.throwIfAborted();
+		return true;
+	} catch (err) {
+		// A cancellation after the atomic marker publication has not exposed the
+		// successor token yet. Restore only the marker created by this caller so a
+		// competing transition can never be overwritten.
+		if (claimId && signal?.aborted) {
+			await restoreConsumedResumeState({
+				env,
+				key: previousStateKey,
+				expectedState: expectedPreviousState,
+				claimId,
+			}).catch(() => {});
+		}
+		throw err;
+	}
 }
 
 async function restorePreviousPipelineResumeState({
@@ -303,6 +366,33 @@ async function retirePreviousPipelineApprovalIndex(
 	await cleanupApprovalIndexByStateKey({ env, stateKey: previousStateKey }).catch(() => {});
 }
 
+function collectSupersededPipelineResumeStateKeys(
+	previousStateKey: string | undefined,
+	previousState: PipelineResumeState | undefined,
+) {
+	return [
+		...(previousState?.supersededResumeStateKeys ?? []),
+		...(previousStateKey ? [previousStateKey] : []),
+	].filter((stateKey, index, all) => stateKey && all.indexOf(stateKey) === index);
+}
+
+async function cleanupSupersededPipelineResumeStates(
+	env: Record<string, string | undefined>,
+	stateKeys: string[] | undefined,
+) {
+	for (const stateKey of stateKeys ?? []) {
+		try {
+			// Retire only a non-executable marker after the successor itself has
+			// committed. A restored state must remain available for retry.
+			if (isConsumedResumeState(await readStateJson({ env, key: stateKey }))) {
+				await deleteStateJson({ env, key: stateKey });
+			}
+		} catch {
+			// Leaving a tombstone is safe if best-effort cleanup cannot complete.
+		}
+	}
+}
+
 async function discardPipelineResumeState(
 	env: Record<string, string | undefined>,
 	stateKey: string,
@@ -331,6 +421,13 @@ export async function loadPipelineResumeState(
 		throw new Error("Invalid pipeline resume state");
 	}
 	if (!Array.isArray(data.items)) throw new Error("Invalid pipeline resume state");
+	if (
+		data.supersededResumeStateKeys !== undefined &&
+		(!Array.isArray(data.supersededResumeStateKeys) ||
+			data.supersededResumeStateKeys.some((stateKey) => typeof stateKey !== "string"))
+	) {
+		throw new Error("Invalid pipeline resume state");
+	}
 	if (
 		data.haltType !== undefined &&
 		!["approval_request", "input_request"].includes(data.haltType)

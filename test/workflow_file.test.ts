@@ -92,6 +92,61 @@ test("workflow file runs with approval and resume", async () => {
 	assert.deepEqual(resumeStateFiles, []);
 });
 
+test("sequential workflow approvals reclaim superseded resume markers", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-sequential-approval-"));
+	try {
+		const stateDir = path.join(tmpDir, "state");
+		const filePath = path.join(tmpDir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		await fsp.writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "first", approval: "First?" },
+					{ id: "second", approval: "Second?" },
+					{ id: "finish", command: "node -e \"process.stdout.write('{}')\"" },
+				],
+			}),
+			"utf8",
+		);
+
+		const ctx = {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool" as const,
+		};
+		const first = await runWorkflowFile({ filePath, ctx });
+		assert.equal(first.status, "needs_approval");
+		const firstPayload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+		assert.equal(firstPayload.kind, "workflow-file");
+		const second = await runWorkflowFile({
+			filePath,
+			ctx,
+			resume: firstPayload,
+			approved: true,
+		});
+		assert.equal(second.status, "needs_approval");
+		const secondPayload = decodeResumeToken(second.requiresApproval?.resumeToken ?? "");
+		assert.equal(secondPayload.kind, "workflow-file");
+		const completed = await runWorkflowFile({
+			filePath,
+			ctx,
+			resume: secondPayload,
+			approved: true,
+		});
+		assert.equal(completed.status, "ok");
+		const stateFiles = await fsp.readdir(stateDir);
+		assert.deepEqual(
+			stateFiles.filter((name) => name.startsWith("workflow_resume_")),
+			[],
+		);
+	} finally {
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
+});
+
 test("workflow resume cancellation cleans up resume state", async () => {
 	const workflow = {
 		steps: [
