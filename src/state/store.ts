@@ -217,6 +217,15 @@ async function hasExpiredStateLockLease(lockPath: string) {
 }
 
 async function reclaimOrphanedStateLock(lockPath: string) {
+	let observedLock: { dev: number; ino: number };
+	try {
+		const stat = await fsp.lstat(lockPath);
+		observedLock = { dev: stat.dev, ino: stat.ino };
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return true;
+		throw err;
+	}
+
 	let stale = false;
 	try {
 		const ownerPath = path.join(lockPath, "owner");
@@ -246,14 +255,30 @@ async function reclaimOrphanedStateLock(lockPath: string) {
 	}
 	if (!stale) return false;
 
-	const orphanPath = `${lockPath}.${randomBytes(6).toString("hex")}.orphan`;
+	// Claim reclamation inside the observed directory before removing it. Renaming
+	// `lockPath` directly is unsafe: another reclaimer can replace that pathname
+	// with a live lock after the stale observation, and a later recursive cleanup
+	// would then delete the new owner's lock while it is in use.
+	const reclaimPath = path.join(lockPath, ".reclaiming");
 	try {
-		await fsp.rename(lockPath, orphanPath);
+		await fsp.mkdir(reclaimPath, { mode: 0o700 });
 	} catch (err: any) {
 		if (err?.code === "ENOENT") return true;
+		if (err?.code === "EEXIST") return false;
 		throw err;
 	}
-	await fsp.rm(orphanPath, { recursive: true, force: true });
+
+	try {
+		const currentLock = await fsp.lstat(lockPath);
+		if (currentLock.dev !== observedLock.dev || currentLock.ino !== observedLock.ino) {
+			return false;
+		}
+		await fsp.rm(lockPath, { recursive: true, force: true });
+	} finally {
+		// If the path changed before the reclamation marker was claimed, leave the
+		// replacement lock intact and only remove our harmless marker.
+		await fsp.rmdir(reclaimPath).catch(() => {});
+	}
 	return true;
 }
 

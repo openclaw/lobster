@@ -11,6 +11,7 @@ import {
 	createApprovalIndex,
 	diffAndStore,
 	keyToPath,
+	withFileLock,
 	writeStateJson,
 	readStateJson,
 	writeFileAtomic,
@@ -604,6 +605,82 @@ test("diffAndStore reclaims an old lock after its owner PID is reused", async ()
 	assert.equal(controller.signal.aborted, false);
 	assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { version: "recovered" });
 	await assert.rejects(fsp.access(lockPath));
+});
+
+test("withFileLock does not reclaim a replacement lock after observing a stale one", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-state-lock-replacement-"));
+	const filePath = path.join(tmp, "snapshot.json");
+	const lockPath = `${filePath}.lock`;
+	await fsp.mkdir(lockPath);
+	await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}:0:stale-owner\n`, "utf8");
+	const staleAt = new Date(Date.now() - 10_000);
+	await fsp.utimes(lockPath, staleAt, staleAt);
+	await fsp.utimes(path.join(lockPath, "owner"), staleAt, staleAt);
+
+	const originalReadFile = fsp.readFile;
+	let replaced = false;
+	let replacementActive = false;
+	let overlap = false;
+	let replacement: Promise<void> | undefined;
+	let releaseReplacement!: () => void;
+	const replacementReleased = new Promise<void>((resolve) => {
+		releaseReplacement = resolve;
+	});
+	let replacementStarted!: () => void;
+	const replacementEntered = new Promise<void>((resolve) => {
+		replacementStarted = resolve;
+	});
+
+	Object.defineProperty(fsp, "readFile", {
+		configurable: true,
+		writable: true,
+		async value(
+			filePathArg: Parameters<typeof fsp.readFile>[0],
+			options?: Parameters<typeof fsp.readFile>[1],
+		) {
+			const result = await originalReadFile(filePathArg, options);
+			if (!replaced && String(filePathArg) === path.join(lockPath, "owner")) {
+				replaced = true;
+				await fsp.rm(lockPath, { recursive: true, force: true });
+				replacement = withFileLock({
+					filePath,
+					task: async () => {
+						replacementActive = true;
+						replacementStarted();
+						await replacementReleased;
+						replacementActive = false;
+					},
+				});
+				await replacementEntered;
+			}
+			return result;
+		},
+	});
+
+	try {
+		const original = withFileLock({
+			filePath,
+			task: async () => {
+				if (replacementActive) overlap = true;
+			},
+		});
+		await replacementEntered;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		assert.equal(overlap, false, "the stale reclaimer must not enter beside the replacement");
+		releaseReplacement();
+		if (!replacement) throw new Error("replacement lock did not start");
+		await Promise.all([original, replacement]);
+	} finally {
+		Object.defineProperty(fsp, "readFile", {
+			configurable: true,
+			writable: true,
+			value: originalReadFile,
+		});
+		await fsp.rm(tmp, { recursive: true, force: true });
+	}
+
+	assert.equal(replaced, true);
+	assert.equal(overlap, false);
 });
 
 test("SDK diff primitives treat corrupt previous state as a miss (#112)", async () => {

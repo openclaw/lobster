@@ -748,24 +748,7 @@ export async function runWorkflowFile({
 					resumeStateClaimRejected = true;
 					signal?.throwIfAborted();
 				}
-				// A retained index may point to the tombstone after an I/O failure, but
-				// it can never re-enable the now-consumed raw token.
-				try {
-					await cleanupApprovalIndexByStateKey({
-						env: ctx.env,
-						stateKey: consumedResumeStateKey,
-					}).catch(() => {});
-					signal?.throwIfAborted();
-				} catch (err) {
-					resumeStateClaimRejected = true;
-					await restoreConsumedResumeState({
-						env: ctx.env,
-						key: consumedResumeStateKey,
-						expectedState: resumeState,
-						claimId: consumption.claimId,
-					}).catch(() => {});
-					throw err;
-				}
+				signal?.throwIfAborted();
 				resumeStateConsumed = true;
 				resumedExecutionStarted = true;
 			}
@@ -2097,6 +2080,9 @@ async function replaceWorkflowResumeState({
 	}
 	if (previousStateConsumed) {
 		signal?.throwIfAborted();
+		// The successor is already durable. Retire the predecessor's short ID here,
+		// rather than when the preceding unsafe execution is only being claimed.
+		await cleanupApprovalIndexByStateKey({ env, stateKey: previousStateKey }).catch(() => {});
 		return true;
 	}
 	if (!expectedPreviousState) return false;

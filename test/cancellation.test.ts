@@ -4016,6 +4016,79 @@ test("a cancellation immediately after pipeline resume consumption restores the 
 	}
 });
 
+test("resumed pipeline and workflow approvals retain their short ID until the started invocation settles", async () => {
+	for (const workflow of [false, true]) {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-approval-index-dispatch-boundary-"));
+		let releaseEffect!: () => void;
+		const effectReleased = new Promise<void>((resolve) => {
+			releaseEffect = resolve;
+		});
+		let effectStarted!: () => void;
+		const effectEntered = new Promise<void>((resolve) => {
+			effectStarted = resolve;
+		});
+		const effect = {
+			name: "test.hold-before-terminal-cleanup",
+			async run() {
+				effectStarted();
+				await effectReleased;
+				return { output: streamOf([{ ok: true }]) };
+			},
+		};
+		try {
+			const stateDir = join(dir, "state");
+			const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+			const registry = withCommands(createDefaultRegistry(), effect);
+			let first;
+			let filePath: string | undefined;
+			if (workflow) {
+				filePath = join(dir, "workflow.lobster");
+				await writeFile(
+					filePath,
+					JSON.stringify({
+						steps: [
+							{ id: "confirm", approval: "Continue?" },
+							{ id: "effect", pipeline: "test.hold-before-terminal-cleanup" },
+						],
+					}),
+					"utf8",
+				);
+				first = await runToolRequest({ filePath, ctx: { cwd: dir, env, registry } });
+			} else {
+				first = await runToolRequest({
+					pipeline: "approve --prompt Continue? | test.hold-before-terminal-cleanup",
+					ctx: { cwd: dir, env, registry },
+				});
+			}
+			assert.equal(first.status, "needs_approval");
+			assert.ok(first.requiresApproval?.approvalId);
+			const approvalIndexPath = join(
+				stateDir,
+				`approval_${first.requiresApproval.approvalId}.json`,
+			);
+
+			const resumed = resumeToolRequest({
+				approvalId: first.requiresApproval.approvalId,
+				approved: true,
+				ctx: { cwd: dir, env, registry },
+			});
+			await effectEntered;
+			assert.equal(
+				await fileExists(approvalIndexPath),
+				true,
+				"the short approval ID must survive until the resumed invocation reaches a terminal outcome",
+			);
+			releaseEffect();
+			const settled = await resumed;
+			assert.equal(settled.status, "ok");
+			assert.equal(await fileExists(approvalIndexPath), false);
+		} finally {
+			releaseEffect();
+			await rm(dir, { recursive: true, force: true });
+		}
+	}
+});
+
 test("approval rejection stops waiting for a state lock without orphaning its approval ID", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-approval-rejection-lock-abort-"));
 	try {

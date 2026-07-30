@@ -394,9 +394,6 @@ export async function resumeToolRequest({
 					}
 					runtime.signal?.throwIfAborted();
 				}
-				// The durable tombstone blocks raw-token replay even if index cleanup
-				// suffers a storage error, so an index failure cannot re-enable effects.
-				await cleanupIndex().catch(() => {});
 				runtime.signal?.throwIfAborted();
 				pipelineExecutionStarted = true;
 			},
@@ -415,7 +412,7 @@ export async function resumeToolRequest({
 			},
 			signal: runtime.signal,
 		});
-		if (finalized.status === "ok") await cleanupIndex();
+		if (finalized.status === "ok" && pipelineExecutionStarted) await cleanupIndex();
 		return okEnvelope(
 			finalized.status,
 			finalized.output,
@@ -437,13 +434,14 @@ export async function resumeToolRequest({
 				claimId: pipelineResumeStateClaimId,
 			}).catch(() => false);
 		}
-		if (
-			abortedResume &&
-			!abortedBeforeResume &&
-			pipelineExecutionStarted &&
-			!pipelineResumeStateRestored
-		) {
-			await deleteStateJson({ env: runtime.env, key: payload.stateKey }).catch(() => {});
+		if (pipelineExecutionStarted && !pipelineResumeStateRestored) {
+			if (abortedResume && !abortedBeforeResume) {
+				await deleteStateJson({ env: runtime.env, key: payload.stateKey }).catch(() => {});
+			}
+			// Keep the short approval ID through the pre-dispatch claim window. Once
+			// the unsafe stage has actually been entered, the tombstone makes retry
+			// unsafe and the old index may be retired just as it was before this fix.
+			await cleanupIndex().catch(() => {});
 		}
 		// Non-abort failures and pre-aborted resumes remain retryable by token or approval ID.
 		return errorEnvelope("runtime_error", err?.message ?? String(err));
