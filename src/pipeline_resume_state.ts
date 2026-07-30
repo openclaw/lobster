@@ -210,7 +210,11 @@ export async function finalizePipelineToolRun(params: {
 	params.signal?.throwIfAborted();
 	if (params.previousStateKey) {
 		try {
-			await deleteStateJson({ env: params.env, key: params.previousStateKey });
+			await deleteStateJson({
+				env: params.env,
+				key: params.previousStateKey,
+				signal: params.signal,
+			});
 			params.signal?.throwIfAborted();
 		} catch (err) {
 			await restorePreviousPipelineResumeState(params);
@@ -254,7 +258,7 @@ async function replacePipelineResumeState({
 	signal?: AbortSignal;
 }) {
 	if (previousStateKey && previousStateKey !== replacementStateKey) {
-		await deleteStateJson({ env, key: previousStateKey });
+		await deleteStateJson({ env, key: previousStateKey, signal });
 	}
 	signal?.throwIfAborted();
 }
@@ -275,6 +279,10 @@ async function restorePreviousPipelineResumeState({
 	signal?: AbortSignal;
 }) {
 	if (!signal?.aborted || !restorePreviousStateOnAbort || !previousStateKey || !previousState) {
+		return;
+	}
+	if ((await readStateJson({ env, key: previousStateKey })) !== null) {
+		onPreviousStateRestored?.();
 		return;
 	}
 	await writeStateJson({ env, key: previousStateKey, value: previousState });

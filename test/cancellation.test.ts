@@ -2847,6 +2847,75 @@ test("workflow pipeline halts after an in-flight send completes under cancellati
 	}
 });
 
+test("parallel timeout waits for in-flight sends before retrying", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-parallel-timeout-send-settlement-"));
+	try {
+		const repoRoot = join(__dirname, "..", "..");
+		const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+		const filePath = join(dir, "workflow.lobster");
+		const sendStarted = join(dir, "send-started");
+		const sendCompleted = join(dir, "send-completed");
+		const sendInvocations = join(dir, "send-invocations");
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{
+						id: "draft",
+						run: `${JSON.stringify(process.execPath)} -e "process.stdout.write(JSON.stringify({to:'user@example.com',subject:'Hello',body:'World'}))"`,
+					},
+					{
+						id: "send",
+						retry: { max: 2, delay_ms: 0 },
+						parallel: {
+							timeout_ms: 80,
+							branches: [
+								{
+									id: "mail",
+									pipeline: "gog.gmail.send",
+									stdin: "$draft.json",
+								},
+							],
+						},
+					},
+				],
+			}),
+			"utf8",
+		);
+
+		const run = runToolRequest({
+			filePath,
+			ctx: {
+				cwd: dir,
+				registry: createDefaultRegistry(),
+				env: {
+					...process.env,
+					LOBSTER_STATE_DIR: join(dir, "state"),
+					GOG_BIN: mockGog,
+					MOCK_GOG_SEND_STARTED_FILE: sendStarted,
+					MOCK_GOG_SEND_COMPLETED_FILE: sendCompleted,
+					MOCK_GOG_SEND_INVOCATIONS_FILE: sendInvocations,
+					MOCK_GOG_COMPLETION_DELAY_MS: "300",
+				},
+			},
+		});
+
+		await waitForFile(sendStarted);
+		const result = await run;
+		assert.equal(result.ok, false);
+		assert.match(result.error?.message ?? "", /timed out|timeout|abort|cancel/i);
+		assert.equal(
+			await fileExists(sendCompleted),
+			true,
+			"a timeout must wait for its in-flight send before retry policy returns",
+		);
+		const invocations = (await readFile(sendInvocations, "utf8")).trim().split(/\r?\n/);
+		assert.equal(invocations.length, 2);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("approval resume token cannot replay a send after downstream cancellation", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-resume-cancel-replay-"));
 	try {
@@ -3321,6 +3390,276 @@ test("workflow approval rejection keeps its approval ID when state cleanup is ca
 		assert.equal(await fileExists(approvalIndexPath), true);
 		assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), true);
 		await rm(lockPath, { recursive: true, force: true });
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("terminal pipeline resume cleanup stops waiting for a state lock", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-terminal-pipeline-lock-abort-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const first = await runToolRequest({
+			pipeline: "approve --prompt Continue?",
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const lockPath = `${keyToPath(stateDir, payload.stateKey)}.lock`;
+		const approvalIndexPath = join(stateDir, `approval_${first.requiresApproval.approvalId}.json`);
+		await fsp.mkdir(lockPath);
+		await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+		const controller = new AbortController();
+		const pending = resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env, signal: controller.signal },
+		});
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		controller.abort(new Error("terminal pipeline cleanup stopped while waiting for a state lock"));
+		const early = await observeSettlement(pending, 75);
+		if (!early.settled) await rm(lockPath, { recursive: true, force: true });
+		const settled = early.settled ? early : await observeSettlement(pending, 75);
+
+		assert.equal(settled.settled, true, "terminal cleanup must not remain blocked on a state lock");
+		if (settled.settled) {
+			assert.equal(settled.value.ok, false);
+			assert.match(
+				settled.value.error?.message ?? "",
+				/terminal pipeline cleanup stopped while waiting for a state lock/,
+			);
+		}
+		assert.equal(await fileExists(approvalIndexPath), true);
+		assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), true);
+		await rm(lockPath, { recursive: true, force: true });
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.status, "ok");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("pipeline gate replacement stops waiting for a state lock", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pipeline-gate-lock-abort-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const first = await runToolRequest({
+			pipeline: "approve --prompt First? | approve --prompt Second?",
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const lockPath = `${keyToPath(stateDir, payload.stateKey)}.lock`;
+		const approvalIndexPath = join(stateDir, `approval_${first.requiresApproval.approvalId}.json`);
+		await fsp.mkdir(lockPath);
+		await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+		const controller = new AbortController();
+		const originalMkdir = fsp.mkdir;
+		let signalLockAttempt: ((value: boolean) => void) | undefined;
+		const lockAttempted = new Promise<boolean>((resolve) => {
+			signalLockAttempt = resolve;
+		});
+		let sawLockAttempt = false;
+		Object.defineProperty(fsp, "mkdir", {
+			configurable: true,
+			writable: true,
+			async value(
+				filePath: Parameters<typeof fsp.mkdir>[0],
+				options?: Parameters<typeof fsp.mkdir>[1],
+			) {
+				if (!sawLockAttempt && String(filePath) === lockPath) {
+					sawLockAttempt = true;
+					signalLockAttempt?.(true);
+				}
+				return originalMkdir(filePath, options);
+			},
+		});
+		let settled;
+		try {
+			const pending = resumeToolRequest({
+				approvalId: first.requiresApproval.approvalId,
+				approved: true,
+				ctx: { cwd: dir, env, signal: controller.signal },
+			});
+			const reachedLock = await Promise.race([
+				lockAttempted,
+				new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
+			]);
+			assert.equal(reachedLock, true, "resume must reach the held state lock");
+			controller.abort(
+				new Error("pipeline gate replacement stopped while waiting for a state lock"),
+			);
+			const early = await observeSettlement(pending, 75);
+			if (!early.settled) await rm(lockPath, { recursive: true, force: true });
+			settled = early.settled ? early : await observeSettlement(pending, 75);
+		} finally {
+			Object.defineProperty(fsp, "mkdir", {
+				configurable: true,
+				writable: true,
+				value: originalMkdir,
+			});
+		}
+
+		assert.equal(
+			settled?.settled,
+			true,
+			"gate replacement must not remain blocked on a state lock",
+		);
+		if (settled?.settled) {
+			assert.equal(settled.value.ok, false);
+			assert.match(
+				settled.value.error?.message ?? "",
+				/pipeline gate replacement stopped while waiting for a state lock/,
+			);
+		}
+		assert.equal(await fileExists(approvalIndexPath), true);
+		assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), true);
+		await rm(lockPath, { recursive: true, force: true });
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.status, "needs_approval");
+		assert.equal(retried.requiresApproval?.prompt, "Second?");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("terminal workflow resume cleanup stops waiting for a state lock", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-terminal-workflow-lock-abort-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const filePath = join(dir, "workflow.lobster");
+		await writeFile(
+			filePath,
+			JSON.stringify({ steps: [{ id: "approve", approval: "Continue?" }] }),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const lockPath = `${keyToPath(stateDir, payload.stateKey)}.lock`;
+		const approvalIndexPath = join(stateDir, `approval_${first.requiresApproval.approvalId}.json`);
+		await fsp.mkdir(lockPath);
+		await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+		const controller = new AbortController();
+		const pending = resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env, signal: controller.signal },
+		});
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		controller.abort(new Error("terminal workflow cleanup stopped while waiting for a state lock"));
+		const early = await observeSettlement(pending, 75);
+		if (!early.settled) await rm(lockPath, { recursive: true, force: true });
+		const settled = early.settled ? early : await observeSettlement(pending, 75);
+		assert.equal(
+			settled.settled,
+			true,
+			"terminal workflow cleanup must not remain blocked on a state lock",
+		);
+		if (settled.settled) {
+			assert.equal(settled.value.ok, false);
+			assert.match(
+				settled.value.error?.message ?? "",
+				/terminal workflow cleanup stopped while waiting for a state lock/,
+			);
+		}
+		assert.equal(await fileExists(approvalIndexPath), true);
+		assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), true);
+		await rm(lockPath, { recursive: true, force: true });
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.status, "ok");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("workflow gate replacement stops waiting for a state lock", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-gate-lock-abort-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const filePath = join(dir, "workflow.lobster");
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "first", approval: "First?" },
+					{ id: "second", approval: "Second?" },
+				],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const lockPath = `${keyToPath(stateDir, payload.stateKey)}.lock`;
+		const approvalIndexPath = join(stateDir, `approval_${first.requiresApproval.approvalId}.json`);
+		await fsp.mkdir(lockPath);
+		await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+		const controller = new AbortController();
+		const pending = resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env, signal: controller.signal },
+		});
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		controller.abort(new Error("workflow gate replacement stopped while waiting for a state lock"));
+		const early = await observeSettlement(pending, 75);
+		if (!early.settled) await rm(lockPath, { recursive: true, force: true });
+		const settled = early.settled ? early : await observeSettlement(pending, 75);
+		assert.equal(settled.settled, true, "gate replacement must not remain blocked on a state lock");
+		if (settled.settled) {
+			assert.equal(settled.value.ok, false);
+			assert.match(
+				settled.value.error?.message ?? "",
+				/workflow gate replacement stopped while waiting for a state lock/,
+			);
+		}
+		assert.equal(await fileExists(approvalIndexPath), true);
+		assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), true);
+		await rm(lockPath, { recursive: true, force: true });
+
+		const retried = await resumeToolRequest({
+			approvalId: first.requiresApproval.approvalId,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(retried.status, "needs_approval");
+		assert.equal(retried.requiresApproval?.prompt, "Second?");
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

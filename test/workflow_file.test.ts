@@ -403,7 +403,7 @@ test("workflow resume retries a timed-out effect before consuming its capability
 					id: "effect",
 					run: `node -e "const fs=require('fs'); const file=process.argv[1]; const attempt=fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0; fs.writeFileSync(file, String(attempt + 1)); if (attempt === 0) setInterval(() => {}, 1000); else process.stdout.write('retried');" ${JSON.stringify(attemptsPath)}`,
 					condition: "$approve.approved",
-					timeout_ms: 300,
+					timeout_ms: 1500,
 					retry: { max: 2, delay_ms: 10 },
 				},
 			],

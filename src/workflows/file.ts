@@ -1228,9 +1228,10 @@ export async function runWorkflowFile({
 								})
 							: null;
 
+						const branchPromises = parallel.branches.map((branch) => runBranch(branch));
+						const branchesSettled = Promise.allSettled(branchPromises);
 						try {
 							if (wait === "any") {
-								const branchPromises = parallel.branches.map((branch) => runBranch(branch));
 								const winner = (await (timeoutPromise
 									? Promise.race([...branchPromises, timeoutPromise])
 									: Promise.race(branchPromises))) as {
@@ -1238,12 +1239,10 @@ export async function runWorkflowFile({
 									result: WorkflowStepResult;
 								};
 								parallelBranchResults = { [winner.branchId]: winner.result };
-								branchAbortController.abort();
 							} else {
-								const branchPromises = parallel.branches.map((branch) => runBranch(branch));
 								const settled = (await (timeoutPromise
 									? Promise.race([Promise.allSettled(branchPromises), timeoutPromise])
-									: Promise.allSettled(branchPromises))) as PromiseSettledResult<{
+									: branchesSettled)) as PromiseSettledResult<{
 									branchId: string;
 									result: WorkflowStepResult;
 								}>[];
@@ -1260,6 +1259,8 @@ export async function runWorkflowFile({
 							}
 						} finally {
 							if (parallelTimeoutId !== undefined) clearTimeout(parallelTimeoutId);
+							if (wait === "any" || parallelSignal.aborted) branchAbortController.abort();
+							await branchesSettled;
 						}
 
 						const merged: Record<string, unknown> = {};
@@ -1610,7 +1611,11 @@ export async function runWorkflowFile({
 		if (consumedResumeStateKey) {
 			try {
 				ctx.signal?.throwIfAborted();
-				await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+				await deleteStateJson({
+					env: ctx.env,
+					key: consumedResumeStateKey,
+					signal: ctx.signal,
+				});
 				ctx.signal?.throwIfAborted();
 			} catch (err) {
 				await restoreWorkflowResumeState({
@@ -1976,7 +1981,7 @@ async function replaceWorkflowResumeState({
 	signal?: AbortSignal;
 }) {
 	if (previousStateKey && previousStateKey !== replacementStateKey) {
-		await deleteStateJson({ env, key: previousStateKey });
+		await deleteStateJson({ env, key: previousStateKey, signal });
 	}
 	signal?.throwIfAborted();
 	if (previousStateKey && previousStateKey !== replacementStateKey) {
@@ -1997,6 +2002,7 @@ async function restoreWorkflowResumeState({
 	state: WorkflowResumeState | WorkflowResumePayload | null;
 }) {
 	if (!stateKey || !state) return;
+	if ((await readStateJson({ env, key: stateKey })) !== null) return;
 	await writeStateJson({ env, key: stateKey, value: state });
 }
 
