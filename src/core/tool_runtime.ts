@@ -11,7 +11,9 @@ import {
 	deleteApprovalId,
 	findStateKeyByApprovalId,
 	cleanupApprovalIndexByStateKey,
+	consumeResumeState,
 	readStateJson,
+	stateJsonExists,
 	writeStateJson,
 } from "../state/store.js";
 import {
@@ -210,16 +212,27 @@ export async function resumeToolRequest({
 	};
 
 	if (cancel === true) {
-		const stateKeys = new Set<string>();
-		if (payload.stateKey) stateKeys.add(payload.stateKey);
-		if (payload.kind === "workflow-file" && payload.stateKey) {
+		let stateKeys = [payload.stateKey];
+		if (payload.kind === "workflow-file") {
 			const alternateStateKey = alternateWorkflowResumeStateKey(payload.stateKey);
-			if (alternateStateKey) stateKeys.add(alternateStateKey);
+			if (alternateStateKey) {
+				// Delete a non-authoritative spelling first. If cancellation interrupts
+				// its lock wait, the state that makes this capability resumable remains.
+				const [primaryExists, alternateExists] = await Promise.all([
+					stateJsonExists({ env: runtime.env, key: payload.stateKey }),
+					stateJsonExists({ env: runtime.env, key: alternateStateKey }),
+				]);
+				if (primaryExists || !alternateExists) {
+					stateKeys = [alternateStateKey, payload.stateKey];
+				} else {
+					stateKeys = [payload.stateKey, alternateStateKey];
+				}
+			}
 		}
 		// Keep the capability indexed until every state deletion succeeds. A
 		// cancelled request must not orphan a resume state by dropping its
 		// approval ID while waiting on another writer's state lock.
-		for (const stateKey of stateKeys) {
+		for (const stateKey of new Set(stateKeys)) {
 			await deleteStateJson({ env: runtime.env, key: stateKey, signal: runtime.signal });
 		}
 		if (resolvedApprovalId) {
@@ -323,7 +336,9 @@ export async function resumeToolRequest({
 				state: resumeState.commandInput!,
 				response,
 				onConsumed: async () => {
-					await cleanupIndex();
+					// Release the old snapshot before a resume-safe command receives its
+					// response. The awaited execution boundary either tombstones it before
+					// an effect or restores this exact snapshot if cancellation wins here.
 					await deleteStateJson({
 						env: runtime.env,
 						key: payload.stateKey,
@@ -348,7 +363,15 @@ export async function resumeToolRequest({
 			haltAfterStageOnAbort: true,
 			input,
 			requestInputResume,
-			onExecutionStart: () => {
+			onExecutionStart: async () => {
+				await consumeResumeState({
+					env: runtime.env,
+					key: payload.stateKey,
+					signal: runtime.signal,
+				});
+				// The durable tombstone blocks raw-token replay even if index cleanup
+				// suffers a storage error, so an index failure cannot re-enable effects.
+				await cleanupIndex().catch(() => {});
 				pipelineExecutionStarted = true;
 			},
 		});
@@ -359,6 +382,7 @@ export async function resumeToolRequest({
 			output,
 			previousStateKey: payload.stateKey,
 			previousState: resumeState,
+			previousStateConsumed: pipelineExecutionStarted,
 			restorePreviousStateOnAbort: !pipelineExecutionStarted,
 			onPreviousStateRestored: () => {
 				pipelineResumeStateRestored = true;
@@ -374,16 +398,11 @@ export async function resumeToolRequest({
 		);
 	} catch (err: any) {
 		const abortedResume = runtime.signal?.aborted === true;
-		if (
-			abortedResume &&
-			!abortedBeforeResume &&
-			!pipelineExecutionStarted &&
-			!pipelineResumeStateRestored
-		) {
-			// No command dispatch occurred, so cancellation must leave the original
-			// approval or input capability retryable. If cancellation interrupted
-			// the delete while another writer held the state lock, the old state is
-			// already intact; do not immediately contend for that same lock again.
+		if (!pipelineExecutionStarted && !pipelineResumeStateRestored) {
+			// No unsafe command dispatch occurred, so a safe-input validation or
+			// cancellation failure must leave the original capability retryable. If
+			// cleanup was interrupted while another writer held its lock, the old
+			// state is already intact; do not immediately contend for that lock again.
 			if ((await readStateJson({ env: runtime.env, key: payload.stateKey })) === null) {
 				await writeStateJson({ env: runtime.env, key: payload.stateKey, value: resumeState });
 			}
@@ -395,8 +414,7 @@ export async function resumeToolRequest({
 			pipelineExecutionStarted &&
 			!pipelineResumeStateRestored
 		) {
-			await cleanupIndex();
-			await deleteStateJson({ env: runtime.env, key: payload.stateKey });
+			await deleteStateJson({ env: runtime.env, key: payload.stateKey }).catch(() => {});
 		}
 		// Non-abort failures and pre-aborted resumes remain retryable by token or approval ID.
 		return errorEnvelope("runtime_error", err?.message ?? String(err));

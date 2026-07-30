@@ -3,6 +3,21 @@ import path from "node:path";
 import { promises as fsp } from "node:fs";
 import { randomBytes } from "node:crypto";
 
+const CONSUMED_RESUME_STATE_TYPE = "lobster.consumed-resume-state.v1";
+
+export type ConsumedResumeState = {
+	type: typeof CONSUMED_RESUME_STATE_TYPE;
+	consumedAt: string;
+};
+
+export function isConsumedResumeState(value: unknown): value is ConsumedResumeState {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		(value as { type?: unknown }).type === CONSUMED_RESUME_STATE_TYPE
+	);
+}
+
 export function defaultStateDir(env) {
 	return (
 		(env?.LOBSTER_STATE_DIR && String(env.LOBSTER_STATE_DIR).trim()) ||
@@ -467,6 +482,49 @@ export async function writeStateJson({
 		signal,
 		task: () => writeStateJsonUnlocked({ env, key, value, signal, atomicWriteOptions }),
 	});
+}
+
+/**
+ * Retire a resume capability before its first unsafe execution boundary. The
+ * replacement is deliberately persistent: a failed later unlink must not make
+ * the original token replayable.
+ */
+export async function consumeResumeState({
+	env,
+	key,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	signal?: AbortSignal;
+}) {
+	await writeStateJson({
+		env,
+		key,
+		value: { type: CONSUMED_RESUME_STATE_TYPE, consumedAt: new Date().toISOString() },
+		signal,
+	});
+}
+
+/**
+ * Check physical state presence without parsing it. Cancellation uses this to
+ * retain the authoritative workflow spelling even if the state file is corrupt.
+ */
+export async function stateJsonExists({
+	env,
+	key,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+}) {
+	const filePath = keyToPath(defaultStateDir(env), key);
+	try {
+		await fsp.access(filePath);
+		return true;
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return false;
+		throw err;
+	}
 }
 
 async function deleteStateJsonUnlocked({ env, key }) {

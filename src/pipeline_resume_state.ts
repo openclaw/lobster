@@ -5,6 +5,7 @@ import {
 	cleanupApprovalIndexByStateKey,
 	createApprovalIndex,
 	deleteStateJson,
+	isConsumedResumeState,
 	readStateJson,
 	writeStateJson,
 } from "./state/store.js";
@@ -99,6 +100,7 @@ export async function finalizePipelineToolRun(params: {
 	output: PipelineRunOutput;
 	previousStateKey?: string;
 	previousState?: PipelineResumeState;
+	previousStateConsumed?: boolean;
 	restorePreviousStateOnAbort?: boolean;
 	onPreviousStateRestored?: () => void;
 	signal?: AbortSignal;
@@ -146,7 +148,7 @@ export async function finalizePipelineToolRun(params: {
 				requiresInput: null,
 			};
 		} catch (err) {
-			await restorePreviousPipelineResumeState(params);
+			if (!params.previousStateConsumed) await restorePreviousPipelineResumeState(params);
 			if (nextStateKey) await discardPipelineResumeState(params.env, nextStateKey);
 			throw err;
 		}
@@ -201,7 +203,7 @@ export async function finalizePipelineToolRun(params: {
 				},
 			};
 		} catch (err) {
-			await restorePreviousPipelineResumeState(params);
+			if (!params.previousStateConsumed) await restorePreviousPipelineResumeState(params);
 			if (nextStateKey) await discardPipelineResumeState(params.env, nextStateKey);
 			throw err;
 		}
@@ -217,7 +219,7 @@ export async function finalizePipelineToolRun(params: {
 			});
 			params.signal?.throwIfAborted();
 		} catch (err) {
-			await restorePreviousPipelineResumeState(params);
+			if (!params.previousStateConsumed) await restorePreviousPipelineResumeState(params);
 			throw err;
 		}
 	}
@@ -314,7 +316,7 @@ export async function loadPipelineResumeState(
 	stateKey: string,
 ) {
 	const stored = await readStateJson({ env, key: stateKey });
-	if (!stored || typeof stored !== "object") {
+	if (!stored || typeof stored !== "object" || isConsumedResumeState(stored)) {
 		throw new Error("Pipeline resume state not found");
 	}
 	const data = stored as Partial<PipelineResumeState>;

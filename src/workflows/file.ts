@@ -11,8 +11,10 @@ import { runPipeline } from "../runtime.js";
 import { encodeToken, decodeToken } from "../token.js";
 import {
 	cleanupApprovalIndexByStateKey,
+	consumeResumeState,
 	createApprovalIndex,
 	deleteStateJson,
+	isConsumedResumeState,
 	readStateJson,
 	writeStateJson,
 } from "../state/store.js";
@@ -172,7 +174,7 @@ type RunContext = {
 	dryRun?: boolean;
 	_activeWorkflows?: Set<string>;
 	_onResumeStateResolved?: (stateKey: string) => void;
-	_onExecutionStarted?: () => void;
+	_onExecutionStarted?: () => void | Promise<void>;
 	_onExecutionInterrupted?: () => void;
 };
 
@@ -713,22 +715,39 @@ export async function runWorkflowFile({
 		: (resume ?? null);
 	let resumedExecutionStarted = false;
 	let resumedExecutionInterrupted = false;
+	let resumeStateConsumed = false;
 	const executionSignalListeners: Array<{ signal: AbortSignal; onAbort: () => void }> = [];
-	const markExecutionStarted = (signal?: AbortSignal) => {
+	let executionStart: Promise<void> | undefined;
+	const markExecutionStarted = async (signal?: AbortSignal) => {
 		if (!consumedResumeStateKey && !ctx._onExecutionStarted && !ctx._onExecutionInterrupted) return;
-		if (consumedResumeStateKey) resumedExecutionStarted = true;
-		ctx._onExecutionStarted?.();
-		if (!signal) return;
-		const onAbort = () => {
-			if (consumedResumeStateKey) resumedExecutionInterrupted = true;
-			ctx._onExecutionInterrupted?.();
-		};
-		if (signal.aborted) {
-			onAbort();
-			return;
-		}
-		signal.addEventListener("abort", onAbort, { once: true });
-		executionSignalListeners.push({ signal, onAbort });
+		if (executionStart) return executionStart;
+		executionStart = (async () => {
+			signal?.throwIfAborted();
+			if (consumedResumeStateKey) {
+				await consumeResumeState({ env: ctx.env, key: consumedResumeStateKey, signal });
+				resumeStateConsumed = true;
+				// A retained index may point to the tombstone after an I/O failure, but
+				// it can never re-enable the now-consumed raw token.
+				await cleanupApprovalIndexByStateKey({
+					env: ctx.env,
+					stateKey: consumedResumeStateKey,
+				}).catch(() => {});
+				resumedExecutionStarted = true;
+			}
+			await ctx._onExecutionStarted?.();
+			if (!signal) return;
+			const onAbort = () => {
+				if (consumedResumeStateKey) resumedExecutionInterrupted = true;
+				ctx._onExecutionInterrupted?.();
+			};
+			if (signal.aborted) {
+				onAbort();
+				return;
+			}
+			signal.addEventListener("abort", onAbort, { once: true });
+			executionSignalListeners.push({ signal, onAbort });
+		})();
+		return executionStart;
 	};
 	if (resumeState?.approvalStepId && resumeState?.inputStepId) {
 		throw new Error("Invalid workflow resume state");
@@ -960,11 +979,13 @@ export async function runWorkflowFile({
 							},
 						};
 					} catch (err) {
-						await restoreWorkflowResumeState({
-							env: ctx.env,
-							stateKey: consumedResumeStateKey,
-							state: resumeState,
-						});
+						if (!resumeStateConsumed) {
+							await restoreWorkflowResumeState({
+								env: ctx.env,
+								stateKey: consumedResumeStateKey,
+								state: resumeState,
+							});
+						}
 						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
 						throw err;
 					}
@@ -1046,7 +1067,7 @@ export async function runWorkflowFile({
 
 						let subResult: WorkflowStepResult;
 						if (subExecution.kind === "shell") {
-							markExecutionStarted(ctx.signal);
+							await markExecutionStarted(ctx.signal);
 							const command = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
 							const stdinValue = resolveShellStdin(subStep.stdin, resolvedArgs, scopedResults);
 							const { stdout } = await runShellCommand({
@@ -1063,7 +1084,7 @@ export async function runWorkflowFile({
 									`Workflow step ${step.id} for_each sub-step ${subStep.id} requires a command registry for pipeline execution`,
 								);
 							}
-							markExecutionStarted(ctx.signal);
+							await markExecutionStarted(ctx.signal);
 							const pipelineText = resolveTemplate(subExecution.value, resolvedArgs, scopedResults);
 							const inputValue = resolveInputValue(subStep.stdin, resolvedArgs, scopedResults);
 							subResult = await runPipelineStep({
@@ -1151,7 +1172,7 @@ export async function runWorkflowFile({
 							? AbortSignal.any([stepSignal, parallelTimeoutController.signal])
 							: parallelTimeoutController.signal;
 						const branchSignal = AbortSignal.any([parallelSignal, branchAbortController.signal]);
-						markExecutionStarted(parallelSignal);
+						await markExecutionStarted(parallelSignal);
 						const shouldForceKill = Boolean(step.timeout_ms || parallel.timeout_ms);
 						const runBranch = async (
 							branch: ParallelBranch,
@@ -1311,9 +1332,8 @@ export async function runWorkflowFile({
 								cwd,
 								signal: stepSignal,
 								_activeWorkflows: childActive,
-								_onExecutionStarted: () => {
-									resumedExecutionStarted = true;
-									ctx._onExecutionStarted?.();
+								_onExecutionStarted: async () => {
+									await markExecutionStarted(stepSignal);
 								},
 								_onExecutionInterrupted: () => {
 									resumedExecutionInterrupted = true;
@@ -1344,7 +1364,7 @@ export async function runWorkflowFile({
 						const stdout = subResult.output.length ? serializeValueForStdout(json) : "";
 						result = { id: step.id, stdout, json };
 					} else if (execution.kind === "shell") {
-						markExecutionStarted(stepSignal);
+						await markExecutionStarted(stepSignal);
 						const command = resolveTemplate(execution.value, resolvedArgs, results);
 						const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
 						const { stdout } = await runShellCommand({
@@ -1382,7 +1402,7 @@ export async function runWorkflowFile({
 							onExecutionStart: () => markExecutionStarted(stepSignal),
 						});
 					} else {
-						if (execution.kind !== "none") markExecutionStarted(stepSignal);
+						if (execution.kind !== "none") await markExecutionStarted(stepSignal);
 						const inputValue = resolveInputValue(step.stdin, resolvedArgs, results);
 						result = createSyntheticStepResult(step.id, inputValue);
 					}
@@ -1473,11 +1493,13 @@ export async function runWorkflowFile({
 							},
 						};
 					} catch (stateError) {
-						await restoreWorkflowResumeState({
-							env: ctx.env,
-							stateKey: consumedResumeStateKey,
-							state: resumeState,
-						});
+						if (!resumeStateConsumed) {
+							await restoreWorkflowResumeState({
+								env: ctx.env,
+								stateKey: consumedResumeStateKey,
+								state: resumeState,
+							});
+						}
 						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
 						throw stateError;
 					}
@@ -1582,11 +1604,13 @@ export async function runWorkflowFile({
 							},
 						};
 					} catch (err) {
-						await restoreWorkflowResumeState({
-							env: ctx.env,
-							stateKey: consumedResumeStateKey,
-							state: resumeState,
-						});
+						if (!resumeStateConsumed) {
+							await restoreWorkflowResumeState({
+								env: ctx.env,
+								stateKey: consumedResumeStateKey,
+								state: resumeState,
+							});
+						}
 						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
 						throw err;
 					}
@@ -1622,11 +1646,13 @@ export async function runWorkflowFile({
 				});
 				ctx.signal?.throwIfAborted();
 			} catch (err) {
-				await restoreWorkflowResumeState({
-					env: ctx.env,
-					stateKey: consumedResumeStateKey,
-					state: resumeState,
-				});
+				if (!resumeStateConsumed) {
+					await restoreWorkflowResumeState({
+						env: ctx.env,
+						stateKey: consumedResumeStateKey,
+						state: resumeState,
+					});
+				}
 				throw err;
 			}
 		} else {
@@ -1638,18 +1664,23 @@ export async function runWorkflowFile({
 		}
 		return runResult;
 	} catch (err) {
-		if (ctx.signal?.aborted && !resumedExecutionStarted && consumedResumeStateKey) {
+		if (!resumedExecutionStarted && !resumeStateConsumed && consumedResumeStateKey) {
 			await restoreWorkflowResumeState({
 				env: ctx.env,
 				stateKey: consumedResumeStateKey,
 				state: resumeState,
 			});
-		} else if (resumedExecutionInterrupted && resumedExecutionStarted && consumedResumeStateKey) {
-			await cleanupApprovalIndexByStateKey({
-				env: ctx.env,
-				stateKey: consumedResumeStateKey,
-			}).catch(() => {});
-			await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey }).catch(() => {});
+		} else if (resumedExecutionStarted && consumedResumeStateKey) {
+			try {
+				await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+				await cleanupApprovalIndexByStateKey({
+					env: ctx.env,
+					stateKey: consumedResumeStateKey,
+				});
+			} catch {
+				// Leave the tombstone in place if cleanup fails: it is the durable
+				// record that prevents the consumed token from replaying an effect.
+			}
 		}
 		throw err;
 	} finally {
@@ -2055,10 +2086,16 @@ async function resolveWorkflowResumeStateKey(
 
 async function loadWorkflowResumeState(env: Record<string, string | undefined>, stateKey: string) {
 	let stored = await readStateJson({ env, key: stateKey });
+	if (isConsumedResumeState(stored)) {
+		throw new Error("Workflow resume state not found");
+	}
 	if ((!stored || typeof stored !== "object") && typeof stateKey === "string") {
 		const altKey = alternateWorkflowResumeStateKey(stateKey);
 		if (altKey) {
 			stored = await readStateJson({ env, key: altKey });
+			if (isConsumedResumeState(stored)) {
+				throw new Error("Workflow resume state not found");
+			}
 		}
 	}
 	if (!stored || typeof stored !== "object") {
@@ -3046,7 +3083,7 @@ async function runPipelineStep({
 		onConsumed?: () => Promise<void>;
 	};
 	requestInputEnabled?: boolean;
-	onExecutionStart?: () => void;
+	onExecutionStart?: () => void | Promise<void>;
 }) {
 	let pipeline;
 	try {

@@ -41,7 +41,7 @@ export async function runPipeline({
 	dryRun?: boolean;
 	requestInputResume?: CommandInputResume | undefined;
 	requestInputEnabled?: boolean;
-	onExecutionStart?: (() => void) | undefined;
+	onExecutionStart?: (() => void | Promise<void>) | undefined;
 }) {
 	if (dryRun) {
 		return dryRunPipeline({ pipeline, registry, stderr });
@@ -53,10 +53,14 @@ export async function runPipeline({
 	let haltedAt = null;
 	let pipelineOutputStarted = false;
 	let executionStarted = false;
-	const markExecutionStarted = () => {
-		if (executionStarted) return;
-		executionStarted = true;
-		onExecutionStart?.();
+	let executionStart: Promise<void> | undefined;
+	const markExecutionStarted = async () => {
+		if (executionStart) return executionStart;
+		executionStart = (async () => {
+			await onExecutionStart?.();
+			executionStarted = true;
+		})();
+		return executionStart;
 	};
 
 	const baseCtx = {
@@ -79,7 +83,7 @@ export async function runPipeline({
 			throw new Error(`Unknown command: ${stage.name}`);
 		}
 		if (command.meta?.resumeSafeBeforeInput !== true) {
-			markExecutionStarted();
+			await markExecutionStarted();
 		}
 
 		const inputTracker = createInputTracker(stream);
@@ -392,7 +396,10 @@ function trackCommandOutput(
 	Object.defineProperty(tracked, "abort", {
 		configurable: true,
 		get() {
-			const cancellationOwner = (sourceIterator ?? source) as CancellableLazyOutput;
+			const cancellationOwner =
+				sourceIterator && typeof (sourceIterator as CancellableLazyOutput).abort === "function"
+					? (sourceIterator as CancellableLazyOutput)
+					: source;
 			const abort = cancellationOwner.abort;
 			return typeof abort === "function"
 				? (reason?: unknown) => abort.call(cancellationOwner, reason)

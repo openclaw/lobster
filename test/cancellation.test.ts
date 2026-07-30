@@ -1774,6 +1774,56 @@ test("cancellation before a terminal lazy read invokes its iterator abort hook",
 	assert.equal(abortCalled, true);
 });
 
+test("cancellation falls back to an iterable-owned lazy abort hook", async () => {
+	const controller = new AbortController();
+	let readStarted!: () => void;
+	const pendingReadStarted = new Promise<void>((resolve) => {
+		readStarted = resolve;
+	});
+	let resolveNext!: (value: IteratorResult<unknown>) => void;
+	let abortCalled = false;
+	const source = {
+		name: "test.iterable-owned-lazy-abort",
+		async run() {
+			return {
+				output: {
+					abort() {
+						abortCalled = true;
+						resolveNext({ done: true, value: undefined });
+					},
+					[Symbol.asyncIterator]() {
+						return {
+							next() {
+								readStarted();
+								return new Promise<IteratorResult<unknown>>((resolve) => {
+									resolveNext = resolve;
+								});
+							},
+							async return() {
+								return { done: true, value: undefined };
+							},
+						};
+					},
+				},
+			};
+		},
+	};
+
+	const pending = runToolRequest({
+		pipeline: "test.iterable-owned-lazy-abort",
+		ctx: { registry: withCommands(createDefaultRegistry(), source), signal: controller.signal },
+	});
+	await pendingReadStarted;
+	controller.abort(new Error("cancel iterable-owned lazy output"));
+	const settled = await observeSettlement(pending, 500);
+	assert.equal(settled.settled, true);
+	if (settled.settled) {
+		assert.equal(settled.value.ok, false);
+		assert.equal(settled.value.error?.type, "runtime_error");
+	}
+	assert.equal(abortCalled, true);
+});
+
 test("cancellation does not pull another lazy output item after an in-flight read aborts", async () => {
 	const controller = new AbortController();
 	let afterAbortEffects = 0;
@@ -2504,6 +2554,53 @@ test(
 				1,
 				"retrying an interrupted CLI resume must not resend",
 			);
+		} finally {
+			resumed?.child.kill("SIGKILL");
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
+
+test(
+	"CLI SIGINT reports a tool envelope while resume cleanup waits on a state lock",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-cli-sigint-resume-cleanup-lock-"));
+		let resumed: ReturnType<typeof startLobsterCli> | undefined;
+		try {
+			const stateDir = join(dir, "state");
+			const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+			const first = startLobsterCli({
+				args: ["run", "--mode", "tool", "approve --prompt Continue?"],
+				cwd: dir,
+				env,
+			});
+			const initial = await first.result;
+			assert.equal(initial.code, 0, initial.stderr);
+			const approval = JSON.parse(initial.stdout).requiresApproval;
+			assert.ok(approval?.resumeToken);
+
+			const payload = decodeResumeToken(approval.resumeToken);
+			const lockPath = `${keyToPath(stateDir, payload.stateKey)}.lock`;
+			await fsp.mkdir(lockPath);
+			await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+			resumed = startLobsterCli({
+				args: ["resume", "--token", approval.resumeToken, "--cancel"],
+				cwd: dir,
+				env,
+			});
+			await new Promise((resolve) => setTimeout(resolve, 1500));
+			assert.equal(resumed.child.kill("SIGINT"), true);
+			const exited = await resumed.result;
+
+			assert.equal(exited.signal, null);
+			assert.equal(exited.code, 130);
+			const envelope = JSON.parse(exited.stdout);
+			assert.equal(envelope.ok, false);
+			assert.equal(envelope.error?.type, "runtime_error");
+			assert.match(envelope.error?.message ?? "", /Received SIGINT/);
+			await rm(lockPath, { recursive: true, force: true });
 		} finally {
 			resumed?.child.kill("SIGKILL");
 			await rm(dir, { recursive: true, force: true });
@@ -3428,6 +3525,111 @@ test("explicit cancellation stops waiting for a state lock without orphaning its
 	}
 });
 
+test("workflow explicit cancellation keeps canonical state when its alternate spelling is locked", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-alternate-cancel-lock-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const filePath = join(dir, "workflow.lobster");
+		await writeFile(
+			filePath,
+			JSON.stringify({ steps: [{ id: "confirm", approval: "Continue?" }] }),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.approvalId);
+		assert.ok(first.requiresApproval?.resumeToken);
+
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		assert.ok(payload.stateKey?.startsWith("workflow_resume_"));
+		const alternateStateKey = payload.stateKey.replace("workflow_resume_", "workflow-resume_");
+		const alternateLock = `${keyToPath(stateDir, alternateStateKey)}.lock`;
+		const approvalIndexPath = join(stateDir, `approval_${first.requiresApproval.approvalId}.json`);
+		await fsp.mkdir(alternateLock);
+		await fsp.writeFile(join(alternateLock, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+		const controller = new AbortController();
+		const pending = resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			cancel: true,
+			ctx: { cwd: dir, env, signal: controller.signal },
+		}).then(
+			(value) => ({ kind: "value" as const, value }),
+			(error) => ({ kind: "error" as const, error }),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		controller.abort(new Error("alternate cleanup lock interrupted cancellation"));
+		const settled = await observeSettlement(pending, 500);
+		assert.equal(settled.settled, true);
+		if (settled.settled) {
+			assert.equal(settled.value.kind, "error");
+			if (settled.value.kind === "error") {
+				assert.match(settled.value.error?.message ?? "", /alternate cleanup lock interrupted/);
+			}
+		}
+		assert.equal(await fileExists(keyToPath(stateDir, payload.stateKey)), true);
+		assert.equal(await fileExists(approvalIndexPath), true);
+		await rm(alternateLock, { recursive: true, force: true });
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("a failed post-effect resume cleanup leaves a non-replayable pipeline tombstone", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-consumed-pipeline-tombstone-"));
+	const originalUnlink = fsp.unlink;
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const effect = createCountingSideEffect("test.tombstone-effect");
+		const registry = withCommands(createDefaultRegistry(), effect.command);
+		const first = await runToolRequest({
+			pipeline: "approve --prompt Continue? | test.tombstone-effect",
+			ctx: { cwd: dir, env, registry },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.resumeToken);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const statePath = keyToPath(stateDir, payload.stateKey);
+		Object.defineProperty(fsp, "unlink", {
+			configurable: true,
+			writable: true,
+			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
+				if (String(filePath) === statePath) {
+					throw Object.assign(new Error("injected resume unlink failure"), { code: "EIO" });
+				}
+				return originalUnlink(filePath);
+			},
+		});
+
+		const resumed = await resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { cwd: dir, env, registry },
+		});
+		assert.equal(resumed.ok, false);
+		assert.match(resumed.error?.message ?? "", /injected resume unlink failure/);
+		assert.equal(effect.invocations, 1);
+
+		const replay = await resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { cwd: dir, env, registry },
+		});
+		assert.equal(replay.ok, false);
+		assert.match(replay.error?.message ?? "", /Pipeline resume state not found/);
+		assert.equal(effect.invocations, 1, "a tombstoned token must not repeat its side effect");
+	} finally {
+		Object.defineProperty(fsp, "unlink", {
+			configurable: true,
+			writable: true,
+			value: originalUnlink,
+		});
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("approval rejection stops waiting for a state lock without orphaning its approval ID", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-approval-rejection-lock-abort-"));
 	try {
@@ -3949,7 +4151,7 @@ test("workflow on_error cannot swallow cancellation with a custom reason", async
 	}
 });
 
-test("approval resume token remains retryable after a non-abort failure", async () => {
+test("approval resume token cannot replay after a non-abort failure past an unsafe boundary", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-resume-retry-"));
 	try {
 		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
@@ -3986,20 +4188,20 @@ test("approval resume token remains retryable after a non-abort failure", async 
 		assert.equal(failed.ok, false);
 		assert.match(failed.error?.message ?? "", /retryable failure/);
 
-		const retried = await resumeToolRequest({
+		const replay = await resumeToolRequest({
 			token: first.requiresApproval.resumeToken,
 			approved: true,
 			ctx: { registry, env },
 		});
-		assert.equal(retried.ok, true);
-		assert.deepEqual(retried.output, [{ value: 1 }]);
-		assert.equal(attempts, 2);
+		assert.equal(replay.ok, false);
+		assert.match(replay.error?.message ?? "", /Pipeline resume state not found/);
+		assert.equal(attempts, 1);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
 });
 
-test("next-stage input resume remains retryable after a non-abort failure", async () => {
+test("next-stage input resume cannot replay after a non-abort failure past an unsafe boundary", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-input-resume-retry-"));
 	try {
 		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
@@ -4034,20 +4236,20 @@ test("next-stage input resume remains retryable after a non-abort failure", asyn
 		});
 		assert.equal(failed.ok, false);
 		assert.match(failed.error?.message ?? "", /retryable failure/);
-		const retried = await resumeToolRequest({
+		const replay = await resumeToolRequest({
 			token: first.requiresInput.resumeToken,
 			response: { value: 1 },
 			ctx: { registry, env },
 		});
-		assert.equal(retried.ok, true);
-		assert.deepEqual(retried.output, [{ value: 1 }]);
-		assert.equal(attempts, 2);
+		assert.equal(replay.ok, false);
+		assert.match(replay.error?.message ?? "", /Pipeline resume state not found/);
+		assert.equal(attempts, 1);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
 });
 
-test("workflow resume remains retryable after a non-abort failure", async () => {
+test("workflow resume cannot replay after a non-abort failure past an unsafe boundary", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-resume-retry-"));
 	try {
 		const filePath = join(dir, "workflow.lobster");
@@ -4090,13 +4292,14 @@ test("workflow resume remains retryable after a non-abort failure", async () => 
 		});
 		assert.equal(failed.ok, false);
 		assert.match(failed.error?.message ?? "", /retryable failure/);
-		const retried = await resumeToolRequest({
+		const replay = await resumeToolRequest({
 			token: first.requiresApproval.resumeToken,
 			approved: true,
 			ctx: { cwd: dir, registry, env },
 		});
-		assert.equal(retried.ok, true);
-		assert.equal(attempts, 2);
+		assert.equal(replay.ok, false);
+		assert.match(replay.error?.message ?? "", /Workflow resume state not found/);
+		assert.equal(attempts, 1);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

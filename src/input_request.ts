@@ -187,7 +187,7 @@ export function createStageRequestInput({
 	getInactiveReason?: () => string | undefined;
 	isOutputStarted: () => boolean;
 	resume?: CommandInputResume;
-	onResumedInput?: () => void;
+	onResumedInput?: () => void | Promise<void>;
 }) {
 	let requestIndex = 0;
 	const history: CommandInputHistoryEntry[] = [...(resume?.state.history ?? [])];
@@ -211,7 +211,7 @@ export function createStageRequestInput({
 			const response = snapshotJson(historical.response, "requestInput response");
 			validateRequestInputResponse(metadata.responseSchema, response, "requestInput");
 			requestIndex += 1;
-			onResumedInput?.();
+			await onResumedInput?.();
 			return response;
 		}
 
@@ -237,7 +237,7 @@ export function createStageRequestInput({
 				response: historyResponse,
 			});
 			requestIndex += 1;
-			onResumedInput?.();
+			await onResumedInput?.();
 			return response;
 		}
 

@@ -13,11 +13,10 @@ export async function runCli(argv) {
 	try {
 		await runCliWithSignal(argv, cancellation.signal);
 	} finally {
+		if (cancellation.exitCode !== undefined) {
+			process.exitCode = cancellation.exitCode;
+		}
 		cancellation.dispose();
-	}
-
-	if (cancellation.exitCode !== undefined) {
-		process.exitCode = cancellation.exitCode;
 	}
 }
 
@@ -550,23 +549,31 @@ async function handleResume({ argv, registry, signal }: { argv; registry; signal
 		return;
 	}
 
-	const envelope = await resumeToolRequest({
-		token: parsed.token ?? undefined,
-		approvalId: parsed.approvalId ?? undefined,
-		approved: parsed.approved,
-		response: parsed.response,
-		cancel: parsed.cancel,
-		ctx: {
-			cwd: process.cwd(),
-			env: process.env,
-			mode: "tool",
-			stdin: process.stdin,
-			stdout: process.stdout,
-			stderr: process.stderr,
-			registry,
-			signal,
-		},
-	});
+	let envelope;
+	try {
+		envelope = await resumeToolRequest({
+			token: parsed.token ?? undefined,
+			approvalId: parsed.approvalId ?? undefined,
+			approved: parsed.approved,
+			response: parsed.response,
+			cancel: parsed.cancel,
+			ctx: {
+				cwd: process.cwd(),
+				env: process.env,
+				mode: "tool",
+				stdin: process.stdin,
+				stdout: process.stdout,
+				stderr: process.stderr,
+				registry,
+				signal,
+			},
+		});
+	} catch (err: any) {
+		envelope = {
+			ok: false,
+			error: { type: "runtime_error", message: err?.message ?? String(err) },
+		};
+	}
 	writeToolEnvelope(envelope);
 	if (!envelope.ok) {
 		process.exitCode = envelope.error?.type === "parse_error" ? 2 : 1;

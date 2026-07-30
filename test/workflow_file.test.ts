@@ -758,6 +758,7 @@ test("workflow pipeline requestInput resume invariant bypasses on_error", async 
 	let sideEffects = 0;
 	const choose = {
 		name: "choose",
+		meta: { resumeSafeBeforeInput: true },
 		async run({ ctx }: any) {
 			calls += 1;
 			if (calls > 1) return { output: streamOf([{ skipped: true }]) };
