@@ -613,6 +613,70 @@ export async function restoreConsumedResumeState({
 }
 
 /**
+ * Retire an unconsumed capability at a safe terminal boundary. The snapshot is
+ * first replaced by a caller-owned marker under the state lock, so a
+ * cancellation can restore only the state this caller claimed. A stale resume
+ * that merely observed an earlier snapshot can never recreate a state another
+ * resume has already settled.
+ */
+export async function deleteResumeStateWithRollback({
+	env,
+	key,
+	expectedState,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	expectedState: unknown;
+	signal?: AbortSignal;
+}): Promise<boolean> {
+	return withStateKeyLock({
+		env,
+		key,
+		signal,
+		task: async () => {
+			signal?.throwIfAborted();
+			const currentState = await readStateJson({ env, key });
+			if (stableStringify(currentState) !== stableStringify(expectedState)) return false;
+
+			const claimId = randomBytes(16).toString("hex");
+			let claimPublished = false;
+			let deleted = false;
+			try {
+				const result = await writeStateJsonUnlocked({
+					env,
+					key,
+					value: {
+						type: CONSUMED_RESUME_STATE_TYPE,
+						consumedAt: new Date().toISOString(),
+						claimId,
+					},
+					signal,
+				});
+				claimPublished = true;
+				if (result?.signalAbortedAfterCommit) signal?.throwIfAborted();
+				signal?.throwIfAborted();
+				await deleteStateJsonUnlocked({ env, key });
+				deleted = true;
+				signal?.throwIfAborted();
+				return true;
+			} catch (err) {
+				if (signal?.aborted && claimPublished) {
+					const latest = await readStateJson({ env, key });
+					if (
+						(deleted && latest === null) ||
+						(isConsumedResumeState(latest) && latest.claimId === claimId)
+					) {
+						await writeStateJsonUnlocked({ env, key, value: expectedState });
+					}
+				}
+				throw err;
+			}
+		},
+	});
+}
+
+/**
  * Check physical state presence without parsing it. Cancellation uses this to
  * retain the authoritative workflow spelling even if the state file is corrupt.
  */

@@ -5,6 +5,7 @@ import {
 	cleanupApprovalIndexByStateKey,
 	consumeResumeState,
 	createApprovalIndex,
+	deleteResumeStateWithRollback,
 	deleteStateJson,
 	isConsumedResumeState,
 	readStateJson,
@@ -229,12 +230,22 @@ export async function finalizePipelineToolRun(params: {
 	params.signal?.throwIfAborted();
 	if (params.previousStateKey) {
 		try {
-			await deleteStateJson({
-				env: params.env,
-				key: params.previousStateKey,
-				signal: params.signal,
-			});
-			params.signal?.throwIfAborted();
+			if (params.previousStateConsumed) {
+				await deleteStateJson({
+					env: params.env,
+					key: params.previousStateKey,
+					signal: params.signal,
+				});
+				params.signal?.throwIfAborted();
+			} else {
+				const deleted = await deleteResumeStateWithRollback({
+					env: params.env,
+					key: params.previousStateKey,
+					expectedState: params.previousState,
+					signal: params.signal,
+				});
+				if (!deleted) throw new Error("Pipeline resume state not found");
+			}
 			await cleanupSupersededPipelineResumeStates(
 				params.env,
 				params.previousState?.supersededResumeStateKeys,
@@ -346,12 +357,12 @@ async function restorePreviousPipelineResumeState({
 	if (!signal?.aborted || !restorePreviousStateOnAbort || !previousStateKey || !previousState) {
 		return;
 	}
+	// Safe terminal cleanup restores its own claimed marker while still holding
+	// the state lock. Never recreate a missing snapshot here: this caller may
+	// have only observed it before another resume completed.
 	if ((await readStateJson({ env, key: previousStateKey })) !== null) {
 		onPreviousStateRestored?.();
-		return;
 	}
-	await writeStateJson({ env, key: previousStateKey, value: previousState });
-	onPreviousStateRestored?.();
 }
 
 async function retirePreviousPipelineApprovalIndex(

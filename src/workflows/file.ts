@@ -13,6 +13,7 @@ import {
 	cleanupApprovalIndexByStateKey,
 	consumeResumeState,
 	createApprovalIndex,
+	deleteResumeStateWithRollback,
 	deleteStateJson,
 	deleteUnconsumedResumeState,
 	isConsumedResumeState,
@@ -719,7 +720,6 @@ export async function runWorkflowFile({
 		: (resume ?? null);
 	let resumedExecutionStarted = false;
 	let resumeStateConsumed = false;
-	let resumeStateClaimRejected = false;
 	const executionSignalListeners: Array<{ signal: AbortSignal; onAbort: () => void }> = [];
 	let executionStart: Promise<void> | undefined;
 	const markExecutionStarted = async (signal?: AbortSignal) => {
@@ -735,7 +735,6 @@ export async function runWorkflowFile({
 					signal,
 				});
 				if (!consumption.consumed) {
-					resumeStateClaimRejected = true;
 					throw new Error("Workflow resume state not found");
 				}
 				if (consumption.signalAbortedAfterCommit) {
@@ -745,7 +744,6 @@ export async function runWorkflowFile({
 						expectedState: resumeState,
 						claimId: consumption.claimId,
 					});
-					resumeStateClaimRejected = true;
 					signal?.throwIfAborted();
 				}
 				signal?.throwIfAborted();
@@ -979,7 +977,6 @@ export async function runWorkflowFile({
 							signal: ctx.signal,
 						});
 						if (!replaced) {
-							resumeStateClaimRejected = true;
 							throw new Error("Workflow resume state not found");
 						}
 
@@ -999,13 +996,6 @@ export async function runWorkflowFile({
 							},
 						};
 					} catch (err) {
-						if (!resumeStateConsumed) {
-							await restoreWorkflowResumeState({
-								env: ctx.env,
-								stateKey: consumedResumeStateKey,
-								state: resumeState,
-							});
-						}
 						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
 						throw err;
 					}
@@ -1503,7 +1493,6 @@ export async function runWorkflowFile({
 							signal: ctx.signal,
 						});
 						if (!replaced) {
-							resumeStateClaimRejected = true;
 							throw new Error("Workflow resume state not found");
 						}
 
@@ -1523,13 +1512,6 @@ export async function runWorkflowFile({
 							},
 						};
 					} catch (stateError) {
-						if (!resumeStateConsumed) {
-							await restoreWorkflowResumeState({
-								env: ctx.env,
-								stateKey: consumedResumeStateKey,
-								state: resumeState,
-							});
-						}
 						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
 						throw stateError;
 					}
@@ -1623,7 +1605,6 @@ export async function runWorkflowFile({
 							signal: ctx.signal,
 						});
 						if (!replaced) {
-							resumeStateClaimRejected = true;
 							throw new Error("Workflow resume state not found");
 						}
 
@@ -1644,13 +1625,6 @@ export async function runWorkflowFile({
 							},
 						};
 					} catch (err) {
-						if (!resumeStateConsumed) {
-							await restoreWorkflowResumeState({
-								env: ctx.env,
-								stateKey: consumedResumeStateKey,
-								state: resumeState,
-							});
-						}
 						if (stateKey) await discardWorkflowResumeState(ctx.env, stateKey);
 						throw err;
 					}
@@ -1677,7 +1651,7 @@ export async function runWorkflowFile({
 
 		const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
 		if (consumedResumeStateKey) {
-			try {
+			if (resumeStateConsumed) {
 				ctx.signal?.throwIfAborted();
 				await deleteStateJson({
 					env: ctx.env,
@@ -1685,20 +1659,18 @@ export async function runWorkflowFile({
 					signal: ctx.signal,
 				});
 				ctx.signal?.throwIfAborted();
-				await cleanupSupersededWorkflowResumeStates(
-					ctx.env,
-					resumeState?.supersededResumeStateKeys,
-				);
-			} catch (err) {
-				if (!resumeStateConsumed) {
-					await restoreWorkflowResumeState({
-						env: ctx.env,
-						stateKey: consumedResumeStateKey,
-						state: resumeState,
-					});
+			} else {
+				const deleted = await deleteResumeStateWithRollback({
+					env: ctx.env,
+					key: consumedResumeStateKey,
+					expectedState: resumeState,
+					signal: ctx.signal,
+				});
+				if (!deleted) {
+					throw new Error("Workflow resume state not found");
 				}
-				throw err;
 			}
+			await cleanupSupersededWorkflowResumeStates(ctx.env, resumeState?.supersededResumeStateKeys);
 		} else {
 			ctx.signal?.throwIfAborted();
 		}
@@ -1708,18 +1680,7 @@ export async function runWorkflowFile({
 		}
 		return runResult;
 	} catch (err) {
-		if (
-			!resumedExecutionStarted &&
-			!resumeStateConsumed &&
-			!resumeStateClaimRejected &&
-			consumedResumeStateKey
-		) {
-			await restoreWorkflowResumeState({
-				env: ctx.env,
-				stateKey: consumedResumeStateKey,
-				state: resumeState,
-			});
-		} else if (resumedExecutionStarted && consumedResumeStateKey) {
+		if (resumedExecutionStarted && consumedResumeStateKey) {
 			try {
 				await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
 				await cleanupApprovalIndexByStateKey({
@@ -2114,20 +2075,6 @@ async function replaceWorkflowResumeState({
 		}
 		throw err;
 	}
-}
-
-async function restoreWorkflowResumeState({
-	env,
-	stateKey,
-	state,
-}: {
-	env: Record<string, string | undefined>;
-	stateKey: string | null;
-	state: WorkflowResumeState | WorkflowResumePayload | null;
-}) {
-	if (!stateKey || !state) return;
-	if ((await readStateJson({ env, key: stateKey })) !== null) return;
-	await writeStateJson({ env, key: stateKey, value: state });
 }
 
 function collectSupersededWorkflowResumeStateKeys(

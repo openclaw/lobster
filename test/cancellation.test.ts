@@ -1599,6 +1599,197 @@ test("terminal workflow approval resume restores its original capability when cl
 	}
 });
 
+test("a cancelled stale pipeline resume cannot restore a capability settled by another resume", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-stale-pipeline-resume-"));
+	try {
+		const stateDir = join(dir, "state");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		let delayedStageEntered!: () => void;
+		const delayedStageReady = new Promise<void>((resolve) => {
+			delayedStageEntered = resolve;
+		});
+		let releaseDelayedStage!: () => void;
+		const delayedStageReleased = new Promise<void>((resolve) => {
+			releaseDelayedStage = resolve;
+		});
+		let runs = 0;
+		let effects = 0;
+		const terminal = {
+			name: "test.stale-safe-terminal",
+			meta: { resumeSafeBeforeInput: true },
+			async run() {
+				runs += 1;
+				if (runs === 1) {
+					delayedStageEntered();
+					await delayedStageReleased;
+				} else {
+					effects += 1;
+				}
+				return { output: [] };
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), terminal);
+		const first = await runToolRequest({
+			pipeline: "approve --prompt First? | test.stale-safe-terminal",
+			ctx: { env, registry },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.resumeToken);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const statePath = keyToPath(stateDir, payload.stateKey);
+
+		const controller = new AbortController();
+		const delayed = resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { env, registry, signal: controller.signal },
+		});
+		await delayedStageReady;
+
+		const winner = await resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { env, registry },
+		});
+		assert.equal(winner.status, "ok");
+		assert.equal(effects, 1);
+		assert.equal(await fileExists(statePath), false);
+
+		const originalUnlink = fsp.unlink;
+		Object.defineProperty(fsp, "unlink", {
+			configurable: true,
+			writable: true,
+			async value(filePath: Parameters<typeof fsp.unlink>[0]) {
+				try {
+					return await originalUnlink(filePath);
+				} finally {
+					if (String(filePath) === statePath && !controller.signal.aborted) {
+						controller.abort(new Error("cancel stale pipeline terminal cleanup"));
+					}
+				}
+			},
+		});
+		let stale;
+		try {
+			releaseDelayedStage();
+			stale = await delayed;
+		} finally {
+			Object.defineProperty(fsp, "unlink", {
+				configurable: true,
+				writable: true,
+				value: originalUnlink,
+			});
+		}
+		assert.equal(stale.ok, false);
+		assert.equal(await fileExists(statePath), false);
+
+		const replay = await resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { env, registry },
+		});
+		assert.equal(replay.ok, false);
+		assert.equal(effects, 1);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("a cancelled stale workflow resume cannot restore a capability settled by another resume", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-stale-workflow-resume-"));
+	try {
+		const stateDir = join(dir, "state");
+		const effectPath = join(dir, "effects.log");
+		const filePath = join(dir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "confirm", approval: "Continue?" },
+					{
+						id: "effect",
+						run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n')" ${JSON.stringify(effectPath)}`,
+					},
+				],
+			}),
+			"utf8",
+		);
+		const first = await runToolRequest({ filePath, ctx: { cwd: dir, env } });
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.resumeToken);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const statePath = keyToPath(stateDir, payload.stateKey);
+
+		let delayedPathEntered!: () => void;
+		const delayedPathReady = new Promise<void>((resolve) => {
+			delayedPathEntered = resolve;
+		});
+		let releaseDelayedPath!: () => void;
+		const delayedPathReleased = new Promise<void>((resolve) => {
+			releaseDelayedPath = resolve;
+		});
+		const controller = new AbortController();
+		const originalRealpath = fsp.realpath;
+		let delayedPathPaused = false;
+		Object.defineProperty(fsp, "realpath", {
+			configurable: true,
+			writable: true,
+			async value(...args: Parameters<typeof fsp.realpath>) {
+				if (!delayedPathPaused && String(args[0]) === filePath) {
+					delayedPathPaused = true;
+					delayedPathEntered();
+					await delayedPathReleased;
+				}
+				return originalRealpath(...args);
+			},
+		});
+		let stale;
+		try {
+			const delayed = resumeToolRequest({
+				token: first.requiresApproval.resumeToken,
+				approved: true,
+				ctx: { cwd: dir, env, signal: controller.signal },
+			});
+			await delayedPathReady;
+			Object.defineProperty(fsp, "realpath", {
+				configurable: true,
+				writable: true,
+				value: originalRealpath,
+			});
+
+			const winner = await resumeToolRequest({
+				token: first.requiresApproval.resumeToken,
+				approved: true,
+				ctx: { cwd: dir, env },
+			});
+			assert.equal(winner.status, "ok");
+			assert.equal(await fileExists(statePath), false);
+			controller.abort(new Error("cancel stale workflow setup after winner settled"));
+			releaseDelayedPath();
+			stale = await delayed;
+		} finally {
+			Object.defineProperty(fsp, "realpath", {
+				configurable: true,
+				writable: true,
+				value: originalRealpath,
+			});
+		}
+		assert.equal(stale.ok, false);
+		assert.equal(await fileExists(statePath), false);
+
+		const replay = await resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { cwd: dir, env },
+		});
+		assert.equal(replay.ok, false);
+		assert.equal((await readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("cancellation stops terminal lazy output before reading its next item", async () => {
 	const controller = new AbortController();
 	let outputDrained = false;
