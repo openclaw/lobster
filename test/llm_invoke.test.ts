@@ -285,6 +285,96 @@ test("llm.invoke does not publish a reusable cache entry when cancellation races
 	await rm(cacheDir, { recursive: true, force: true });
 });
 
+test("llm.invoke restores the previous cache entry when a refresh is cancelled after commit", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-refresh-cancel-"));
+	const stateDir = path.join(cacheDir, "state");
+	let calls = 0;
+	const adapter = {
+		source: "cache-refresh-cancel-test",
+		async invoke() {
+			calls += 1;
+			return {
+				ok: true,
+				result: {
+					runId: `call-${calls}`,
+					output: { data: { call: calls } },
+				},
+			};
+		},
+	};
+	const args = { _: [], provider: "cache-refresh-cancel-test", prompt: "Decide" };
+
+	try {
+		const first = await cmd.run({
+			input: streamOf([]),
+			args,
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+				llmAdapters: { "cache-refresh-cancel-test": adapter },
+			},
+		} as any);
+		assert.deepEqual((await collect(first.output!))[0]?.output.data, { call: 1 });
+
+		const controller = new AbortController();
+		const originalRename = fsp.rename;
+		let cacheCommitAborted = false;
+		try {
+			Object.defineProperty(fsp, "rename", {
+				configurable: true,
+				writable: true,
+				async value(from: Parameters<typeof fsp.rename>[0], to: Parameters<typeof fsp.rename>[1]) {
+					const result = await originalRename(from, to);
+					if (
+						!cacheCommitAborted &&
+						String(to).startsWith(`${path.join(cacheDir, "llm.invoke")}${path.sep}`)
+					) {
+						cacheCommitAborted = true;
+						controller.abort(new Error("cancelled during cache refresh publication"));
+					}
+					return result;
+				},
+			});
+
+			await assert.rejects(
+				cmd.run({
+					input: streamOf([]),
+					args: { ...args, refresh: true },
+					ctx: {
+						...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+						signal: controller.signal,
+						llmAdapters: { "cache-refresh-cancel-test": adapter },
+					},
+				} as any),
+				/cancelled during cache refresh publication/,
+			);
+		} finally {
+			Object.defineProperty(fsp, "rename", {
+				configurable: true,
+				writable: true,
+				value: originalRename,
+			});
+		}
+
+		const recovered = await cmd.run({
+			input: streamOf([]),
+			args,
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+				llmAdapters: { "cache-refresh-cancel-test": adapter },
+			},
+		} as any);
+		const recoveredItems = await collect(recovered.output!);
+		assert.equal(calls, 2, "the cancelled refresh must restore the existing cache entry");
+		assert.equal(recoveredItems[0]?.source, "cache");
+		assert.deepEqual(recoveredItems[0]?.output.data, { call: 1 });
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
 function baseCtx(envOverrides: Record<string, string>, registry?: any) {
 	return {
 		stdin: process.stdin,

@@ -990,13 +990,20 @@ async function writeCacheEntry(
 		filePath,
 		signal,
 		task: async () => {
+			let previousContent: Buffer | null = null;
+			try {
+				previousContent = await fsp.readFile(filePath);
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") throw err;
+			}
 			signal?.throwIfAborted();
 			const result = await writeFileAtomic(filePath, content, { signal });
 			if (result?.signalAbortedAfterCommit || signal?.aborted) {
 				// No cache reader or competing cache writer can observe this entry
-				// until this lock is released, so rollback cannot delete another
-				// invocation's result.
-				await fsp.rm(filePath, { force: true });
+				// until this lock is released. Restore an entry replaced by a refresh;
+				// only remove the just-published file when none existed beforehand.
+				if (previousContent === null) await fsp.rm(filePath, { force: true });
+				else await writeFileAtomic(filePath, previousContent);
 				signal?.throwIfAborted();
 				throw new Error("LLM cache publication cancelled");
 			}
