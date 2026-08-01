@@ -159,8 +159,11 @@ export async function finalizePipelineToolRun(params: {
 				requiresInput: null,
 			};
 		} catch (err) {
-			if (!params.previousStateConsumed) await restorePreviousPipelineResumeState(params);
-			if (nextStateKey) await discardPipelineResumeState(params.env, nextStateKey);
+			try {
+				if (!params.previousStateConsumed) await restorePreviousPipelineResumeState(params);
+			} finally {
+				if (nextStateKey) await discardPipelineResumeState(params.env, nextStateKey);
+			}
 			throw err;
 		}
 	}
@@ -221,8 +224,11 @@ export async function finalizePipelineToolRun(params: {
 				},
 			};
 		} catch (err) {
-			if (!params.previousStateConsumed) await restorePreviousPipelineResumeState(params);
-			if (nextStateKey) await discardPipelineResumeState(params.env, nextStateKey);
+			try {
+				if (!params.previousStateConsumed) await restorePreviousPipelineResumeState(params);
+			} finally {
+				if (nextStateKey) await discardPipelineResumeState(params.env, nextStateKey);
+			}
 			throw err;
 		}
 	}

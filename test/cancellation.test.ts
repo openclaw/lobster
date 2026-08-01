@@ -1245,6 +1245,17 @@ test("pipeline approval resume restores its original capability after next-appro
 		}
 		assertCancellationEnvelope(aborted!);
 		assert.equal(previousStateClaimed, true);
+		const stateFilesAfterAbort = await listStateFiles(stateDir);
+		assert.equal(
+			stateFilesAfterAbort.filter((name) => name.startsWith("pipeline_resume_")).length,
+			1,
+			"cancellation must discard the unpublished next approval state",
+		);
+		assert.equal(
+			stateFilesAfterAbort.filter((name) => name.startsWith("approval_")).length,
+			1,
+			"cancellation must discard the unpublished next approval index",
+		);
 
 		const retried = await resumeToolRequest({
 			approvalId: first.requiresApproval.approvalId,
@@ -1304,6 +1315,17 @@ test("pipeline approval resume restores its original capability after next-input
 		}
 		assertCancellationEnvelope(aborted!);
 		assert.equal(previousStateClaimed, true);
+		const stateFilesAfterAbort = await listStateFiles(stateDir);
+		assert.equal(
+			stateFilesAfterAbort.filter((name) => name.startsWith("pipeline_resume_")).length,
+			1,
+			"cancellation must discard the unpublished next input state",
+		);
+		assert.equal(
+			stateFilesAfterAbort.filter((name) => name.startsWith("approval_")).length,
+			1,
+			"cancellation must discard the unpublished next input index",
+		);
 
 		const retried = await resumeToolRequest({
 			approvalId: first.requiresApproval.approvalId,
