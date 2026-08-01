@@ -293,15 +293,20 @@ export async function resumeToolRequest({
 		}
 	}
 
+	if (runtime.signal?.aborted) {
+		return errorEnvelope(
+			"runtime_error",
+			runtime.signal.reason instanceof Error
+				? runtime.signal.reason.message
+				: "This operation was aborted",
+		);
+	}
+
 	let resumeState;
 	try {
-		// A pre-aborted resume must still load its safe snapshot so the normal
-		// pre-execution rollback path can preserve that capability for retry.
-		resumeState = await loadPipelineResumeState(
-			runtime.env,
-			payload.stateKey,
-			runtime.signal?.aborted ? undefined : runtime.signal,
-		);
+		// No state has been claimed yet, so a cancelled resume can return before
+		// touching the lock and leave its capability safely retryable.
+		resumeState = await loadPipelineResumeState(runtime.env, payload.stateKey, runtime.signal);
 	} catch (err: any) {
 		// Approval rejection historically reaches the signal-aware deletion path
 		// below. Keep its direct cancellation propagation while other resume modes

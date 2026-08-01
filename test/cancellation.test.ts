@@ -598,6 +598,46 @@ test("pre-aborted pipeline approval resume remains retryable", async () => {
 	}
 });
 
+test("pre-aborted pipeline resume does not wait for a live state lock", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-abort-resume-live-lock-"));
+	try {
+		const env = { ...process.env, LOBSTER_STATE_DIR: join(dir, "state") };
+		const source = {
+			name: "test.pre-abort-live-lock-source",
+			async run() {
+				return { output: streamOf([{ value: 1 }]) };
+			},
+		};
+		const registry = withCommands(createDefaultRegistry(), source);
+		const first = await runToolRequest({
+			pipeline: "test.pre-abort-live-lock-source | approve --prompt Continue?",
+			ctx: { registry, env },
+		});
+		assert.equal(first.status, "needs_approval");
+		assert.ok(first.requiresApproval?.resumeToken);
+		const payload = decodeResumeToken(first.requiresApproval.resumeToken);
+		const lockPath = `${keyToPath(env.LOBSTER_STATE_DIR!, payload.stateKey)}.lock`;
+		await fsp.mkdir(lockPath);
+		await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+		const controller = new AbortController();
+		controller.abort(new Error("pre-aborted state lock resume"));
+		const pending = resumeToolRequest({
+			token: first.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { registry, signal: controller.signal, env },
+		});
+		const early = await observeSettlement(pending, 75);
+		if (!early.settled) await fsp.rm(lockPath, { recursive: true, force: true });
+		const envelope = early.settled ? early.value : await pending;
+
+		assert.equal(early.settled, true, "a pre-aborted resume must not wait for a live state lock");
+		assertCancellationEnvelope(envelope);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("pre-aborted pipeline input resume remains retryable", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-abort-input-resume-"));
 	try {
@@ -2454,6 +2494,97 @@ test("exec cancellation terminates descendant processes", async () => {
 	}
 });
 
+test("a configured workflow timeout preserves SIGTERM for external cancellation", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-timeout-external-cancel-"));
+	try {
+		const repoRoot = join(__dirname, "..", "..");
+		const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+		const workflow = join(dir, "workflow.lobster");
+		const started = join(dir, "started");
+		const terminated = join(dir, "terminated");
+		const command = [process.execPath, mockGog, "gmail", "search"]
+			.map((arg) => JSON.stringify(arg))
+			.join(" ");
+		await writeFile(
+			workflow,
+			JSON.stringify({ steps: [{ id: "waiting", run: command, timeout_ms: 10_000 }] }),
+			"utf8",
+		);
+
+		const controller = new AbortController();
+		const run = runToolRequest({
+			filePath: workflow,
+			ctx: {
+				cwd: dir,
+				env: {
+					...process.env,
+					MOCK_GOG_SEARCH_STARTED_FILE: started,
+					MOCK_GOG_SEARCH_TERMINATED_FILE: terminated,
+					MOCK_GOG_TERMINATION_DELAY_MS: "20",
+				},
+				signal: controller.signal,
+			},
+		});
+		await waitForFile(started, 5000);
+		controller.abort(new Error("external abort"));
+		assertCancellationEnvelope(await run);
+		await waitForFile(terminated, 500);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("parallel wait:any preserves SIGTERM for a loser when a timeout is merely configured", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-parallel-any-graceful-cancel-"));
+	try {
+		const repoRoot = join(__dirname, "..", "..");
+		const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+		const workflow = join(dir, "workflow.lobster");
+		const loserStarted = join(dir, "loser-started");
+		const loserTerminated = join(dir, "loser-terminated");
+		const loser = [process.execPath, mockGog, "gmail", "search"]
+			.map((arg) => JSON.stringify(arg))
+			.join(" ");
+		const winner = `while [ ! -f ${JSON.stringify(loserStarted)} ]; do sleep 0.01; done; printf winner`;
+		await writeFile(
+			workflow,
+			JSON.stringify({
+				steps: [
+					{
+						id: "parallel",
+						parallel: {
+							wait: "any",
+							timeout_ms: 10_000,
+							branches: [
+								{ id: "loser", run: loser },
+								{ id: "winner", run: winner },
+							],
+						},
+					},
+				],
+			}),
+			"utf8",
+		);
+
+		const result = await runToolRequest({
+			filePath: workflow,
+			ctx: {
+				cwd: dir,
+				env: {
+					...process.env,
+					MOCK_GOG_SEARCH_STARTED_FILE: loserStarted,
+					MOCK_GOG_SEARCH_TERMINATED_FILE: loserTerminated,
+					MOCK_GOG_TERMINATION_DELAY_MS: "20",
+				},
+			},
+		});
+		assert.equal(result.ok, true, JSON.stringify(result));
+		await waitForFile(loserTerminated, 500);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 test(
 	"CLI SIGINT terminates a detached workflow process tree before exiting",
 	{ skip: process.platform === "win32" },
@@ -2509,6 +2640,122 @@ test(
 			);
 		} finally {
 			cli?.kill("SIGKILL");
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
+
+test(
+	"CLI SIGHUP terminates a detached workflow process tree before exiting",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-cli-sighup-process-tree-"));
+		let cli: ReturnType<typeof spawn> | undefined;
+		try {
+			const repoRoot = join(__dirname, "..", "..");
+			const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+			const workflow = join(dir, "workflow.lobster");
+			const searchStarted = join(dir, "search-started");
+			const descendantStarted = join(dir, "descendant-started");
+			const descendantCompleted = join(dir, "descendant-completed");
+			const command = [process.execPath, mockGog, "gmail", "search"]
+				.map((arg) => JSON.stringify(arg))
+				.join(" ");
+			await writeFile(workflow, JSON.stringify({ steps: [{ id: "shell", run: command }] }), "utf8");
+
+			cli = spawn(
+				process.execPath,
+				[join(repoRoot, "bin", "lobster.js"), "run", "--file", workflow],
+				{
+					cwd: dir,
+					env: {
+						...process.env,
+						MOCK_GOG_SEARCH_STARTED_FILE: searchStarted,
+						MOCK_GOG_DESCENDANT_STARTED_FILE: descendantStarted,
+						MOCK_GOG_DESCENDANT_COMPLETED_FILE: descendantCompleted,
+						MOCK_GOG_TERMINATION_DELAY_MS: "1000",
+					},
+					stdio: "ignore",
+				},
+			);
+			await waitForFile(searchStarted, 5000);
+			await waitForFile(descendantStarted, 5000);
+			const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+			assert.equal(cli.kill("SIGHUP"), true);
+			const exited = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+				(resolve, reject) => {
+					cli!.once("error", reject);
+					cli!.once("exit", (code, signal) => resolve({ code, signal }));
+				},
+			);
+
+			assert.equal(exited.signal, null);
+			assert.equal(exited.code, 129, "CLI must retain the conventional SIGHUP exit status");
+			await new Promise((resolve) => setTimeout(resolve, 900));
+			assert.equal(processIsRunning(descendantPid), false);
+			assert.equal(
+				await fileExists(descendantCompleted),
+				false,
+				"a detached workflow descendant must not finish after terminal hangup",
+			);
+		} finally {
+			cli?.kill("SIGKILL");
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
+
+test(
+	"a second CLI SIGINT immediately force-terminates a detached workflow process tree",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-cli-second-sigint-process-tree-"));
+		let cli: ReturnType<typeof spawn> | undefined;
+		let descendantPid: number | undefined;
+		try {
+			const repoRoot = join(__dirname, "..", "..");
+			const mockGog = join(repoRoot, "test", "fixtures", "mock-gog-cancellation.mjs");
+			const workflow = join(dir, "workflow.lobster");
+			const searchStarted = join(dir, "search-started");
+			const searchTerminated = join(dir, "search-terminated");
+			const descendantStarted = join(dir, "descendant-started");
+			const descendantCompleted = join(dir, "descendant-completed");
+			const command = [process.execPath, mockGog, "gmail", "search"]
+				.map((arg) => JSON.stringify(arg))
+				.join(" ");
+			await writeFile(workflow, JSON.stringify({ steps: [{ id: "shell", run: command }] }), "utf8");
+
+			cli = spawn(
+				process.execPath,
+				[join(repoRoot, "bin", "lobster.js"), "run", "--file", workflow],
+				{
+					cwd: dir,
+					env: {
+						...process.env,
+						MOCK_GOG_SEARCH_STARTED_FILE: searchStarted,
+						MOCK_GOG_SEARCH_TERMINATED_FILE: searchTerminated,
+						MOCK_GOG_DESCENDANT_STARTED_FILE: descendantStarted,
+						MOCK_GOG_DESCENDANT_COMPLETED_FILE: descendantCompleted,
+						MOCK_GOG_TERMINATION_DELAY_MS: "1000",
+					},
+					stdio: "ignore",
+				},
+			);
+			await waitForFile(searchStarted, 5000);
+			await waitForFile(descendantStarted, 5000);
+			descendantPid = Number(await readFile(descendantStarted, "utf8"));
+			assert.equal(cli.kill("SIGINT"), true);
+			await waitForFile(searchTerminated, 5000);
+			assert.equal(cli.kill("SIGINT"), true);
+			await new Promise((resolve) => setTimeout(resolve, 75));
+			assert.equal(
+				processIsRunning(descendantPid),
+				false,
+				"a second interrupt must not wait for the graceful termination window",
+			);
+		} finally {
+			cli?.kill("SIGKILL");
+			if (descendantPid && processIsRunning(descendantPid)) process.kill(descendantPid, "SIGKILL");
 			await rm(dir, { recursive: true, force: true });
 		}
 	},

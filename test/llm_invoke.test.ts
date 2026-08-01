@@ -312,7 +312,8 @@ test("llm.invoke does not publish a reusable cache entry when cancellation races
 				const result = await originalRename(from, to);
 				if (
 					!cacheCommitAborted &&
-					String(to).startsWith(`${path.join(cacheDir, "llm.invoke")}${path.sep}`)
+					String(to).startsWith(`${path.join(cacheDir, "llm.invoke")}${path.sep}`) &&
+					String(to).endsWith(".json")
 				) {
 					cacheCommitAborted = true;
 					controller.abort(new Error("cancelled during cache publication"));

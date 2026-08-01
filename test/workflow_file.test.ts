@@ -617,18 +617,22 @@ test("workflow resume retries a claim blocked by a state lock before dispatch", 
 		assert.ok(payload.stateKey);
 
 		const lockPath = `${keyToPath(stateDir, payload.stateKey!)}.lock`;
+		const originalRename = fsp.rename;
 		const originalRm = fsp.rm;
 		let releasedInitialReadLocks = 0;
 		let lockReplaced!: () => void;
 		const replacedInitialReadLocks = new Promise<void>((resolve) => {
 			lockReplaced = resolve;
 		});
-		Object.defineProperty(fsp, "rm", {
+		Object.defineProperty(fsp, "rename", {
 			configurable: true,
 			writable: true,
-			async value(pathArg: Parameters<typeof fsp.rm>[0], options?: Parameters<typeof fsp.rm>[1]) {
-				const result = await originalRm(pathArg, options);
-				if (String(pathArg) === lockPath && ++releasedInitialReadLocks === 2) {
+			async value(
+				oldPath: Parameters<typeof fsp.rename>[0],
+				newPath: Parameters<typeof fsp.rename>[1],
+			) {
+				const result = await originalRename(oldPath, newPath);
+				if (String(oldPath) === lockPath && ++releasedInitialReadLocks === 2) {
 					await fsp.mkdir(lockPath);
 					await fsp.writeFile(
 						path.join(lockPath, "owner"),
@@ -664,10 +668,10 @@ test("workflow resume retries a claim blocked by a state lock before dispatch", 
 			assert.deepEqual(resumed.output, ["ran"]);
 			assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
 		} finally {
-			Object.defineProperty(fsp, "rm", {
+			Object.defineProperty(fsp, "rename", {
 				configurable: true,
 				writable: true,
-				value: originalRm,
+				value: originalRename,
 			});
 			await fsp.rm(lockPath, { recursive: true, force: true });
 		}

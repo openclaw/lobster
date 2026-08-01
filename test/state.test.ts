@@ -88,6 +88,52 @@ test("state.get returns null for missing key", async () => {
 	assert.deepEqual(output.items, [null]);
 });
 
+test("ordinary state reads work when creating a coordination lock is forbidden", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-readonly-state-"));
+	const env = { ...process.env, LOBSTER_STATE_DIR: tmp };
+	const key = "demo";
+	const value = { readable: true };
+	const statePath = keyToPath(tmp, key);
+	const lockPath = `${statePath}.lock`;
+	const originalMkdir = fsp.mkdir;
+	await fsp.writeFile(statePath, JSON.stringify(value), "utf8");
+	Object.defineProperty(fsp, "mkdir", {
+		configurable: true,
+		writable: true,
+		async value(
+			filePath: Parameters<typeof fsp.mkdir>[0],
+			options?: Parameters<typeof fsp.mkdir>[1],
+		) {
+			if (String(filePath) === lockPath) {
+				throw Object.assign(new Error("read-only state directory"), { code: "EACCES" });
+			}
+			return originalMkdir(filePath, options);
+		},
+	});
+	try {
+		assert.deepEqual(await readState(key, { env }), value);
+		const registry = createDefaultRegistry();
+		const output = await runPipeline({
+			pipeline: [{ name: "state.get", args: { _: [key] }, raw: `state.get ${key}` }],
+			registry,
+			input: [],
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		});
+		assert.deepEqual(output.items, [value]);
+	} finally {
+		Object.defineProperty(fsp, "mkdir", {
+			configurable: true,
+			writable: true,
+			value: originalMkdir,
+		});
+		await fsp.rm(tmp, { recursive: true, force: true });
+	}
+});
+
 // --- Atomic-write behavior proofs (issues #108, #109) ---
 //
 // Plain fsp.writeFile truncates the target before writing, so a concurrent
@@ -816,6 +862,46 @@ test("withFileLock does not reclaim a replacement lock after observing a stale o
 
 	assert.equal(replaced, true);
 	assert.equal(overlap, false);
+});
+
+test("withFileLock releases its key when best-effort cleanup cannot remove the detached lock", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-state-lock-release-failure-"));
+	const filePath = path.join(tmp, "snapshot.json");
+	const lockPath = `${filePath}.lock`;
+	const originalRm = fsp.rm;
+	let failReleaseOnce = true;
+
+	Object.defineProperty(fsp, "rm", {
+		configurable: true,
+		writable: true,
+		async value(filePathArg: Parameters<typeof fsp.rm>[0], options?: Parameters<typeof fsp.rm>[1]) {
+			if (failReleaseOnce && String(filePathArg).startsWith(lockPath)) {
+				failReleaseOnce = false;
+				throw Object.assign(new Error("simulated lock cleanup failure"), { code: "EIO" });
+			}
+			return originalRm(filePathArg, options);
+		},
+	});
+
+	let second: Promise<string> | undefined;
+	try {
+		await withFileLock({ filePath, task: async () => {} });
+		second = withFileLock({ filePath, task: async () => "reacquired" });
+		const settled = await Promise.race([
+			second,
+			new Promise<"timed out">((resolve) => setTimeout(() => resolve("timed out"), 75)),
+		]);
+		if (settled === "timed out") await originalRm(lockPath, { recursive: true, force: true });
+		assert.equal(settled, "reacquired", "a failed cleanup must not poison the live state lock");
+		await second;
+	} finally {
+		Object.defineProperty(fsp, "rm", {
+			configurable: true,
+			writable: true,
+			value: originalRm,
+		});
+		await originalRm(tmp, { recursive: true, force: true });
+	}
 });
 
 test("SDK diff primitives treat corrupt previous state as a miss (#112)", async () => {

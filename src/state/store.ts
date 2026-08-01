@@ -384,7 +384,19 @@ export async function withFileLock<T>({
 		if (acquired) {
 			const ownerPath = path.join(lockPath, "owner");
 			if (!ownerWritten || !owner || (await stillOwnsStateLock(ownerPath, owner))) {
-				await fsp.rm(lockPath, { recursive: true, force: true }).catch(() => {});
+				// Detach an owned lock before best-effort cleanup. If a filesystem error
+				// prevents removing the detached directory, the canonical lock path is
+				// already free for a subsequent operation; leaving it in place would
+				// instead look like a live lock owned by this still-running process.
+				const cleanupPath = `${lockPath}.release-${process.pid}-${randomBytes(6).toString("hex")}`;
+				try {
+					await fsp.rename(lockPath, cleanupPath);
+					await fsp.rm(cleanupPath, { recursive: true, force: true }).catch(() => {});
+				} catch (err: any) {
+					if (err?.code !== "ENOENT") {
+						await fsp.rm(lockPath, { recursive: true, force: true }).catch(() => {});
+					}
+				}
 			}
 		}
 	}
@@ -500,13 +512,24 @@ export async function writeFileAtomicExclusive(
 	}
 }
 
-async function readStateJson({ env, key }) {
+export async function readStateJson({
+	env,
+	key,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	signal?: AbortSignal;
+}) {
+	signal?.throwIfAborted();
 	const stateDir = defaultStateDir(env);
 	const filePath = keyToPath(stateDir, key);
 
 	try {
 		const text = await fsp.readFile(filePath, "utf8");
-		return JSON.parse(text);
+		const value = JSON.parse(text);
+		signal?.throwIfAborted();
+		return value;
 	} catch (err) {
 		if (err?.code === "ENOENT") return null;
 		throw err;
@@ -527,7 +550,17 @@ export async function readStateJsonWithLock({
 	key: string;
 	signal?: AbortSignal;
 }) {
-	return withStateKeyLock({ env, key, signal, task: () => readStateJson({ env, key }) });
+	try {
+		return await withStateKeyLock({ env, key, signal, task: () => readStateJson({ env, key }) });
+	} catch (err: any) {
+		// A readable state directory can deliberately be mounted read-only. In that
+		// case no writer can begin a paired publish-or-rollback transition, so use
+		// the non-mutating JSON read instead of requiring creation of a lock path.
+		if (["EACCES", "EPERM", "EROFS"].includes(err?.code)) {
+			return readStateJson({ env, key, signal });
+		}
+		throw err;
+	}
 }
 
 async function writeStateJsonUnlocked({

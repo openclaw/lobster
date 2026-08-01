@@ -7,6 +7,7 @@ import { loadWorkflowFile, resolveWorkflowArgs, runWorkflowFile } from "./workfl
 import { renderWorkflowGraph } from "./workflows/graph.js";
 import type { WorkflowGraphFormat } from "./workflows/graph.js";
 import { finalizePipelineToolRun } from "./pipeline_resume_state.js";
+import { forceTerminateAbortableProcesses } from "./abortable_process.js";
 
 export async function runCli(argv) {
 	const cancellation = createCliCancellation();
@@ -76,25 +77,39 @@ async function runCliWithSignal(argv, signal: AbortSignal) {
 function createCliCancellation() {
 	const controller = new AbortController();
 	let received: NodeJS.Signals | undefined;
+	const terminatingSignals: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
 	const abort = (receivedSignal: NodeJS.Signals) => {
-		if (received) return;
+		if (received) {
+			forceTerminateAbortableProcesses(controller.signal);
+			return;
+		}
 		received = receivedSignal;
 		controller.abort(new Error(`Received ${receivedSignal}`));
 	};
-	const onSigint = () => abort("SIGINT");
-	const onSigterm = () => abort("SIGTERM");
-	process.once("SIGINT", onSigint);
-	process.once("SIGTERM", onSigterm);
+	const listeners = new Map<NodeJS.Signals, () => void>();
+	for (const terminatingSignal of terminatingSignals) {
+		const listener = () => abort(terminatingSignal);
+		listeners.set(terminatingSignal, listener);
+		process.on(terminatingSignal, listener);
+	}
 
 	return {
 		signal: controller.signal,
 		get exitCode() {
 			if (!received) return undefined;
-			return received === "SIGINT" ? 130 : 143;
+			return (
+				{
+					SIGINT: 130,
+					SIGHUP: 129,
+					SIGQUIT: 131,
+					SIGTERM: 143,
+				} as const
+			)[received];
 		},
 		dispose() {
-			process.removeListener("SIGINT", onSigint);
-			process.removeListener("SIGTERM", onSigterm);
+			for (const [terminatingSignal, listener] of listeners) {
+				process.removeListener(terminatingSignal, listener);
+			}
 		},
 	};
 }

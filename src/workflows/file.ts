@@ -1167,18 +1167,19 @@ export async function runWorkflowFile({
 				// Combine external cancellation and optional per-step timeout into one signal.
 				let stepSignal: AbortSignal | undefined = ctx.signal;
 				let timeoutId: ReturnType<typeof setTimeout> | undefined;
+				let stepTimeoutController: AbortController | undefined;
 				if (step.timeout_ms) {
-					const timeoutController = new AbortController();
+					stepTimeoutController = new AbortController();
 					timeoutId = setTimeout(
 						() =>
-							timeoutController.abort(
+							stepTimeoutController!.abort(
 								new Error(`Step '${step.id}' timed out after ${step.timeout_ms}ms`),
 							),
 						step.timeout_ms,
 					);
 					stepSignal = ctx.signal
-						? AbortSignal.any([ctx.signal, timeoutController.signal])
-						: timeoutController.signal;
+						? AbortSignal.any([ctx.signal, stepTimeoutController.signal])
+						: stepTimeoutController.signal;
 				}
 
 				let result: WorkflowStepResult;
@@ -1193,7 +1194,10 @@ export async function runWorkflowFile({
 							? AbortSignal.any([stepSignal, parallelTimeoutController.signal])
 							: parallelTimeoutController.signal;
 						const branchSignal = AbortSignal.any([parallelSignal, branchAbortController.signal]);
-						const shouldForceKill = Boolean(step.timeout_ms || parallel.timeout_ms);
+						const timeoutKillSignal = () =>
+							stepTimeoutController?.signal.aborted || parallelTimeoutController.signal.aborted
+								? ("SIGKILL" as NodeJS.Signals)
+								: undefined;
 						const runBranch = async (
 							branch: ParallelBranch,
 						): Promise<{ branchId: string; result: WorkflowStepResult }> => {
@@ -1225,7 +1229,7 @@ export async function runWorkflowFile({
 									env: branchEnv,
 									cwd: branchCwd,
 									signal: branchSignal,
-									...(shouldForceKill ? { killSignal: "SIGKILL" as NodeJS.Signals } : {}),
+									killSignal: timeoutKillSignal,
 								});
 								return {
 									branchId: branch.id,
@@ -1394,7 +1398,8 @@ export async function runWorkflowFile({
 							env,
 							cwd,
 							signal: stepSignal,
-							...(step.timeout_ms ? { killSignal: "SIGKILL" as NodeJS.Signals } : {}),
+							killSignal: () =>
+								stepTimeoutController?.signal.aborted ? ("SIGKILL" as NodeJS.Signals) : undefined,
 						});
 						result = { id: step.id, stdout, json: parseJson(stdout) };
 					} else if (execution.kind === "pipeline") {
@@ -3105,7 +3110,7 @@ async function runShellCommand({
 	env: Record<string, string | undefined>;
 	cwd?: string;
 	signal?: AbortSignal;
-	killSignal?: NodeJS.Signals;
+	killSignal?: NodeJS.Signals | (() => NodeJS.Signals | undefined);
 }) {
 	signal?.throwIfAborted();
 	signal?.throwIfAborted();

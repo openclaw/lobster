@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
 const ABORT_FORCE_KILL_AFTER_MS = 250;
+const forceTerminationCallbacks = new WeakMap<AbortSignal, Set<() => void>>();
 
 type ProcessResult = {
 	stdout: string;
@@ -15,11 +16,15 @@ type RunAbortableProcessOptions = {
 	cwd?: string;
 	stdin?: string | null;
 	signal?: AbortSignal;
-	killSignal?: NodeJS.Signals;
+	killSignal?: NodeJS.Signals | (() => NodeJS.Signals | undefined);
 	maxOutputBytes?: number;
 	outputLimitMessage?: string;
 	notFoundMessage: string;
 };
+
+export function forceTerminateAbortableProcesses(signal: AbortSignal) {
+	for (const terminate of forceTerminationCallbacks.get(signal) ?? []) terminate();
+}
 
 function abortError(signal: AbortSignal) {
 	if (signal.reason instanceof Error) return signal.reason;
@@ -96,11 +101,15 @@ export function runAbortableProcess({
 		let terminationError: Error | undefined;
 		let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
 		let processClosed = false;
+		let forceKillRequested = false;
 		let forceKillIssued = false;
 		let settled = false;
+		let forceTerminationListeners: Set<() => void> | undefined;
+		let forceTerminate: (() => void) | undefined;
 		const cleanup = () => {
 			signal?.removeEventListener("abort", onAbort);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
+			if (forceTerminate) forceTerminationListeners?.delete(forceTerminate);
 		};
 		const failTerminationWhenTreeIsStopped = () => {
 			if (!terminationError || !processClosed || !forceKillIssued || settled) return;
@@ -114,24 +123,39 @@ export function runAbortableProcess({
 			cleanup();
 			reject(error);
 		};
-		const startTermination = (error: Error, initialKillSignal = killSignal ?? "SIGTERM") => {
+		const forceKill = () => {
+			if (forceKillRequested) return;
+			forceKillRequested = true;
+			void terminateProcessTree(child, "SIGKILL").finally(() => {
+				forceKillIssued = true;
+				failTerminationWhenTreeIsStopped();
+			});
+		};
+		const startTermination = (error: Error) => {
 			if (settled || terminationError) return;
 			terminationError = error;
+			const initialKillSignal =
+				(typeof killSignal === "function" ? killSignal() : killSignal) ?? "SIGTERM";
 			if (initialKillSignal === "SIGKILL") {
-				void terminateProcessTree(child, "SIGKILL").finally(() => {
-					forceKillIssued = true;
-					failTerminationWhenTreeIsStopped();
-				});
+				forceKill();
 				return;
 			}
 			void terminateProcessTree(child, initialKillSignal);
 			forceKillTimer = setTimeout(() => {
 				forceKillTimer = undefined;
-				void terminateProcessTree(child, "SIGKILL").finally(() => {
-					forceKillIssued = true;
-					failTerminationWhenTreeIsStopped();
-				});
+				forceKill();
 			}, ABORT_FORCE_KILL_AFTER_MS);
+		};
+		forceTerminate = () => {
+			if (settled) return;
+			if (!terminationError) {
+				terminationError = signal ? abortError(signal) : new Error("Process termination requested");
+			}
+			if (forceKillTimer) {
+				clearTimeout(forceKillTimer);
+				forceKillTimer = undefined;
+			}
+			forceKill();
 		};
 		const onAbort = () => {
 			if (!signal) return;
@@ -187,6 +211,12 @@ export function runAbortableProcess({
 		});
 
 		if (signal) {
+			forceTerminationListeners = forceTerminationCallbacks.get(signal);
+			if (!forceTerminationListeners) {
+				forceTerminationListeners = new Set();
+				forceTerminationCallbacks.set(signal, forceTerminationListeners);
+			}
+			forceTerminationListeners.add(forceTerminate);
 			signal.addEventListener("abort", onAbort, { once: true });
 			if (signal.aborted) onAbort();
 		}
