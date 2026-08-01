@@ -471,6 +471,33 @@ test("diffAndStore treats corrupt previous state as a miss and rewrites atomical
 	assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { ok: true });
 });
 
+test("diffAndStore rolls back a state publication when its parent-directory sync fails", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-dir-sync-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	await writeStateJson({ env, key: "snapshot", value: { version: "before" } });
+	const fault = Object.assign(new Error("dir sync failed after state publication"), {
+		code: "EIO",
+	});
+
+	await assert.rejects(
+		() =>
+			diffAndStore({
+				env,
+				key: "snapshot",
+				value: { version: "after" },
+				atomicWriteOptions: {
+					async syncParentDir() {
+						throw fault;
+					},
+				},
+			}),
+		(err: NodeJS.ErrnoException) => err?.code === "EIO",
+	);
+
+	assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { version: "before" });
+	await fsp.rm(tmp, { recursive: true, force: true });
+});
+
 test("diffAndStore does not publish a snapshot after cancellation before atomic replace", async () => {
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-cancel-publish-"));
 	const env = { LOBSTER_STATE_DIR: tmp };

@@ -1,12 +1,13 @@
 import { runAbortableProcess } from "../abortable_process.js";
 
-async function runProcess(command, argv, { env, cwd, signal }) {
+async function runProcess(command, argv, { env, cwd, signal, forceTerminationSignal }) {
 	const { stdout, stderr, code } = await runAbortableProcess({
 		command,
 		argv,
 		env,
 		cwd,
 		signal,
+		forceTerminationSignal,
 		notFoundMessage: "gh not found on PATH (install GitHub CLI)",
 	});
 	if (code === 0) return { stdout, stderr };
@@ -87,6 +88,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 		env: ctx.env,
 		cwd: process.cwd(),
 		signal: ctx.signal,
+		forceTerminationSignal: ctx.forceTerminationSignal,
 	})) as any;
 	ctx.signal?.throwIfAborted();
 

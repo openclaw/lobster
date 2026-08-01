@@ -9,6 +9,7 @@ type AgentCliRunner = (params: {
 	cwd: string;
 	env: NodeJS.ProcessEnv;
 	signal?: AbortSignal;
+	forceTerminationSignal?: AbortSignal;
 }) => Promise<unknown>;
 
 export const openclawAgentCommand = createOpenClawAgentCommand();
@@ -94,6 +95,7 @@ export function createOpenClawAgentCommand(
 				cwd: ctx?.cwd ?? process.cwd(),
 				env,
 				signal: ctx?.signal,
+				forceTerminationSignal: ctx?.forceTerminationSignal,
 			});
 			return { output: streamOf([response]) };
 		},
@@ -106,6 +108,7 @@ export function runOpenClawAgentCli(params: {
 	cwd: string;
 	env: NodeJS.ProcessEnv;
 	signal?: AbortSignal;
+	forceTerminationSignal?: AbortSignal;
 }): Promise<unknown> {
 	return runAbortableProcess({
 		command: params.executable,
@@ -113,6 +116,7 @@ export function runOpenClawAgentCli(params: {
 		cwd: params.cwd,
 		env: params.env,
 		signal: params.signal,
+		forceTerminationSignal: params.forceTerminationSignal,
 		maxOutputBytes: OPENCLAW_AGENT_MAX_OUTPUT_BYTES,
 		outputLimitMessage: `openclaw.agent output exceeded ${OPENCLAW_AGENT_MAX_OUTPUT_BYTES} bytes`,
 		notFoundMessage: "openclaw.agent could not find the OpenClaw CLI",

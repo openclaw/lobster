@@ -58,12 +58,14 @@ export const execCommand = {
 					cwd,
 					stdin: stdinPayload,
 					signal: ctx.signal,
+					forceTerminationSignal: ctx.forceTerminationSignal,
 				})
 			: await runProcess(cmd[0], cmd.slice(1), {
 					env: ctx.env,
 					cwd,
 					stdin: stdinPayload,
 					signal: ctx.signal,
+					forceTerminationSignal: ctx.forceTerminationSignal,
 				});
 
 		if (args.json) {
@@ -86,7 +88,7 @@ export const execCommand = {
 	},
 };
 
-async function runProcess(command, argv, { env, cwd, stdin, signal }) {
+async function runProcess(command, argv, { env, cwd, stdin, signal, forceTerminationSignal }) {
 	const { stdout, stderr, code } = await runAbortableProcess({
 		command,
 		argv,
@@ -94,15 +96,16 @@ async function runProcess(command, argv, { env, cwd, stdin, signal }) {
 		cwd,
 		stdin,
 		signal,
+		forceTerminationSignal,
 		notFoundMessage: `exec command not found: ${command}`,
 	});
 	if (code === 0) return { stdout, stderr };
 	throw new Error(`exec failed (${code}): ${stderr.trim() || stdout.trim() || command}`);
 }
 
-function runShellLine(commandLine, { env, cwd, stdin, signal }) {
+function runShellLine(commandLine, { env, cwd, stdin, signal, forceTerminationSignal }) {
 	const shell = resolveInlineShellCommand({ command: commandLine, env });
-	return runProcess(shell.command, shell.argv, { env, cwd, stdin, signal });
+	return runProcess(shell.command, shell.argv, { env, cwd, stdin, signal, forceTerminationSignal });
 }
 
 function encodeStdin(items, mode) {

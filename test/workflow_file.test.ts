@@ -1858,6 +1858,76 @@ test("workflow conditions reject standalone bare identifiers", async () => {
 	);
 });
 
+test("parallel wait:any fails promptly when a registered loser ignores cancellation", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-parallel-unsettled-"));
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	const registry = {
+		get(name: string) {
+			if (name === "winner") {
+				return {
+					name,
+					help: () => "winner",
+					async run() {
+						return { output: [{ winner: true }] };
+					},
+				};
+			}
+			if (name === "never") {
+				return {
+					name,
+					help: () => "never",
+					async run() {
+						await new Promise<void>(() => {});
+					},
+				};
+			}
+			return undefined;
+		},
+	};
+
+	try {
+		await fsp.writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{
+						id: "parallel",
+						parallel: {
+							wait: "any",
+							branches: [
+								{ id: "winner", pipeline: "winner" },
+								{ id: "never", pipeline: "never" },
+							],
+						},
+					},
+				],
+			}),
+			"utf8",
+		);
+		await assert.rejects(
+			Promise.race([
+				runWorkflowFile({
+					filePath,
+					ctx: {
+						stdin: process.stdin,
+						stdout: process.stdout,
+						stderr: process.stderr,
+						env: { ...process.env },
+						mode: "tool",
+						registry,
+					},
+				}),
+				new Promise<never>((_resolve, reject) =>
+					setTimeout(() => reject(new Error("workflow did not finish")), 1_000),
+				),
+			]),
+			/Parallel branches did not settle after cancellation/,
+		);
+	} finally {
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
+});
+
 test("workflow conditions reject unknown step refs even under negation", async () => {
 	const workflow = {
 		steps: [

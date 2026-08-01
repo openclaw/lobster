@@ -171,6 +171,7 @@ type RunContext = {
 	mode: "human" | "tool" | "sdk";
 	cwd?: string;
 	signal?: AbortSignal;
+	forceTerminationSignal?: AbortSignal;
 	registry?: {
 		get: (name: string) => any;
 	};
@@ -181,6 +182,25 @@ type RunContext = {
 	_onExecutionStarted?: () => void | Promise<void>;
 	_onExecutionInterrupted?: () => void;
 };
+
+const PARALLEL_BRANCH_ABORT_SETTLE_TIMEOUT_MS = 500;
+
+async function waitForCancelledParallelBranches(branchesSettled: Promise<unknown>) {
+	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			branchesSettled,
+			new Promise<never>((_resolve, reject) => {
+				timeoutId = setTimeout(
+					() => reject(new Error("Parallel branches did not settle after cancellation")),
+					PARALLEL_BRANCH_ABORT_SETTLE_TIMEOUT_MS,
+				);
+			}),
+		]);
+	} finally {
+		if (timeoutId !== undefined) clearTimeout(timeoutId);
+	}
+}
 
 export type WorkflowResumePayload = {
 	protocolVersion: 1;
@@ -1097,6 +1117,7 @@ export async function runWorkflowFile({
 								env: subEnv,
 								cwd: subCwd,
 								signal: ctx.signal,
+								forceTerminationSignal: ctx.forceTerminationSignal,
 							});
 							subResult = { id: subStep.id, stdout, json: parseJson(stdout) };
 						} else if (subExecution.kind === "pipeline") {
@@ -1229,6 +1250,7 @@ export async function runWorkflowFile({
 									env: branchEnv,
 									cwd: branchCwd,
 									signal: branchSignal,
+									forceTerminationSignal: ctx.forceTerminationSignal,
 									killSignal: timeoutKillSignal,
 								});
 								return {
@@ -1310,8 +1332,10 @@ export async function runWorkflowFile({
 							}
 						} finally {
 							if (parallelTimeoutId !== undefined) clearTimeout(parallelTimeoutId);
-							if (wait === "any" || parallelSignal.aborted) branchAbortController.abort();
-							await branchesSettled;
+							const branchesCancelled = wait === "any" || parallelSignal.aborted;
+							if (branchesCancelled) branchAbortController.abort();
+							if (branchesCancelled) await waitForCancelledParallelBranches(branchesSettled);
+							else await branchesSettled;
 						}
 
 						const merged: Record<string, unknown> = {};
@@ -1398,6 +1422,7 @@ export async function runWorkflowFile({
 							env,
 							cwd,
 							signal: stepSignal,
+							forceTerminationSignal: ctx.forceTerminationSignal,
 							killSignal: () =>
 								stepTimeoutController?.signal.aborted ? ("SIGKILL" as NodeJS.Signals) : undefined,
 						});
@@ -3103,6 +3128,7 @@ async function runShellCommand({
 	env,
 	cwd,
 	signal,
+	forceTerminationSignal,
 	killSignal,
 }: {
 	command: string;
@@ -3110,6 +3136,7 @@ async function runShellCommand({
 	env: Record<string, string | undefined>;
 	cwd?: string;
 	signal?: AbortSignal;
+	forceTerminationSignal?: AbortSignal;
 	killSignal?: NodeJS.Signals | (() => NodeJS.Signals | undefined);
 }) {
 	signal?.throwIfAborted();
@@ -3122,6 +3149,7 @@ async function runShellCommand({
 		cwd,
 		stdin,
 		signal,
+		forceTerminationSignal,
 		killSignal,
 		notFoundMessage: `workflow command not found: ${shell.command}`,
 	});
@@ -3214,6 +3242,7 @@ async function runPipelineStep({
 		mode: ctx.mode,
 		cwd,
 		signal: ctx.signal,
+		forceTerminationSignal: ctx.forceTerminationSignal,
 		haltAfterStageOnAbort: true,
 		llmAdapters: ctx.llmAdapters,
 		input: resume ? resume.pipelineInput.items : inputValueToPipelineItems(inputValue),

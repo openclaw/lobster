@@ -7,6 +7,7 @@ import type { ErrorObject } from "ajv";
 import {
 	diffAndStore,
 	ensureDirectory,
+	atomicWriteWasPublished,
 	isJsonSyntaxError,
 	readStateJsonWithLock,
 	stableStringify,
@@ -966,22 +967,27 @@ async function readCacheEntry(
 	signal?: AbortSignal,
 ): Promise<CacheEntry | null> {
 	const filePath = path.join(getCacheDir(env), cacheNamespace, `${key}.json`);
-	return withFileLock({
-		filePath,
-		signal,
-		task: async () => {
-			try {
-				const text = await fsp.readFile(filePath, "utf8");
-				const parsed = JSON.parse(text) as Partial<CacheEntry>;
-				if (parsed?.cacheKey !== key || !Array.isArray(parsed.items)) return null;
-				return parsed as CacheEntry;
-			} catch (err: any) {
-				if (err?.code === "ENOENT") return null;
-				if (isJsonSyntaxError(err)) return null;
-				throw err;
-			}
-		},
-	});
+	const read = async () => {
+		try {
+			const text = await fsp.readFile(filePath, "utf8");
+			const parsed = JSON.parse(text) as Partial<CacheEntry>;
+			if (parsed?.cacheKey !== key || !Array.isArray(parsed.items)) return null;
+			return parsed as CacheEntry;
+		} catch (err: any) {
+			if (err?.code === "ENOENT") return null;
+			if (isJsonSyntaxError(err)) return null;
+			throw err;
+		}
+	};
+	try {
+		return await withFileLock({ filePath, signal, task: read });
+	} catch (err: any) {
+		// A cache mounted read-only cannot have an active local writer because a
+		// writer first creates the same coordination lock. Preserve its reusable
+		// entries instead of requiring a lock-directory write for a read.
+		if (["EACCES", "EPERM", "EROFS"].includes(err?.code)) return read();
+		throw err;
+	}
 }
 
 async function writeCacheEntry(
@@ -1007,16 +1013,29 @@ async function writeCacheEntry(
 			} catch (err: any) {
 				if (err?.code !== "ENOENT") throw err;
 			}
-			signal?.throwIfAborted();
-			const result = await writeFileAtomic(filePath, content, { signal });
-			if (result?.signalAbortedAfterCommit || signal?.aborted) {
+			const restorePreviousContent = async () => {
 				// No cache reader or competing cache writer can observe this entry
 				// until this lock is released. Restore an entry replaced by a refresh;
 				// only remove the just-published file when none existed beforehand.
 				if (previousContent === null) await fsp.rm(filePath, { force: true });
 				else await writeFileAtomic(filePath, previousContent);
+			};
+			let cacheWasPublished = false;
+			try {
 				signal?.throwIfAborted();
-				throw new Error("LLM cache publication cancelled");
+				const result = await writeFileAtomic(filePath, content, { signal });
+				cacheWasPublished = true;
+				if (result?.signalAbortedAfterCommit || signal?.aborted) {
+					await restorePreviousContent();
+					cacheWasPublished = false;
+					signal?.throwIfAborted();
+					throw new Error("LLM cache publication cancelled");
+				}
+			} catch (err) {
+				if (cacheWasPublished || atomicWriteWasPublished(err)) {
+					await restorePreviousContent();
+				}
+				throw err;
 			}
 		},
 	});

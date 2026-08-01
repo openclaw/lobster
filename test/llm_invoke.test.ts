@@ -468,6 +468,151 @@ test("llm.invoke restores the previous cache entry when a refresh is cancelled a
 	}
 });
 
+test("llm.invoke rolls back cache and run-state publications after a cache directory sync failure", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-dir-sync-failure-"));
+	const stateDir = path.join(cacheDir, "state");
+	const cacheNamespaceDir = path.join(cacheDir, "llm.invoke");
+	const originalOpen = fsp.open;
+	const fault = Object.assign(new Error("cache directory sync failed"), { code: "EIO" });
+	let failNextCacheDirectorySync = true;
+	let calls = 0;
+	const adapter = {
+		source: "cache-dir-sync-test",
+		async invoke() {
+			calls += 1;
+			return { ok: true, result: { runId: `call-${calls}`, output: { data: { call: calls } } } };
+		},
+	};
+	const args = {
+		_: [],
+		provider: "cache-dir-sync-test",
+		prompt: "Decide",
+		"state-key": "cache-directory-sync-failure",
+	};
+
+	try {
+		await fsp.mkdir(cacheNamespaceDir, { recursive: true });
+		Object.defineProperty(fsp, "open", {
+			configurable: true,
+			writable: true,
+			async value(...openArgs: any[]) {
+				const handle = await (originalOpen as any)(...openArgs);
+				if (
+					failNextCacheDirectorySync &&
+					String(openArgs[0]) === cacheNamespaceDir &&
+					openArgs[1] === "r"
+				) {
+					failNextCacheDirectorySync = false;
+					return new Proxy(handle, {
+						get(target, property, receiver) {
+							if (property === "sync") return async () => Promise.reject(fault);
+							const value = Reflect.get(target, property, receiver);
+							return typeof value === "function" ? value.bind(target) : value;
+						},
+					});
+				}
+				return handle;
+			},
+		});
+
+		await assert.rejects(
+			cmd.run({
+				input: streamOf([]),
+				args,
+				ctx: {
+					...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+					llmAdapters: { "cache-dir-sync-test": adapter },
+				},
+			} as any),
+			/cache directory sync failed/,
+		);
+	} finally {
+		Object.defineProperty(fsp, "open", {
+			configurable: true,
+			writable: true,
+			value: originalOpen,
+		});
+	}
+
+	const retried = await cmd.run({
+		input: streamOf([]),
+		args,
+		ctx: {
+			...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+			llmAdapters: { "cache-dir-sync-test": adapter },
+		},
+	} as any);
+	const items = await collect(retried.output!);
+	assert.equal(calls, 2, "a failed publication must not be reused from cache or run state");
+	assert.equal(items[0]?.source, "cache-dir-sync-test");
+	await rm(cacheDir, { recursive: true, force: true });
+});
+
+test("llm.invoke reads a populated cache when lock creation is forbidden", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-readonly-cache-"));
+	const originalMkdir = fsp.mkdir;
+	let calls = 0;
+	const adapter = {
+		source: "readonly-cache-test",
+		async invoke() {
+			calls += 1;
+			return { ok: true, result: { runId: `call-${calls}`, output: { data: { call: calls } } } };
+		},
+	};
+	const args = { _: [], provider: "readonly-cache-test", prompt: "Decide" };
+
+	try {
+		const first = await cmd.run({
+			input: streamOf([]),
+			args,
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir }, registry),
+				llmAdapters: { "readonly-cache-test": adapter },
+			},
+		} as any);
+		await collect(first.output!);
+
+		Object.defineProperty(fsp, "mkdir", {
+			configurable: true,
+			writable: true,
+			async value(
+				filePath: Parameters<typeof fsp.mkdir>[0],
+				options?: Parameters<typeof fsp.mkdir>[1],
+			) {
+				if (String(filePath).endsWith(".lock")) {
+					throw Object.assign(new Error("read-only cache directory"), { code: "EACCES" });
+				}
+				return originalMkdir(filePath, options);
+			},
+		});
+
+		const cached = await cmd.run({
+			input: streamOf([]),
+			args,
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir }, registry),
+				llmAdapters: { "readonly-cache-test": adapter },
+			},
+		} as any);
+		const items = await collect(cached.output!);
+		assert.equal(calls, 1);
+		assert.equal(items[0]?.source, "cache");
+	} finally {
+		Object.defineProperty(fsp, "mkdir", {
+			configurable: true,
+			writable: true,
+			value: originalMkdir,
+		});
+		await rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
 function baseCtx(envOverrides: Record<string, string>, registry?: any) {
 	return {
 		stdin: process.stdin,

@@ -74,7 +74,7 @@ function markAtomicWritePublished(err: unknown) {
 	return err;
 }
 
-function atomicWriteWasPublished(err: unknown): err is PublishedAtomicWriteError {
+export function atomicWriteWasPublished(err: unknown): err is PublishedAtomicWriteError {
 	return Boolean((err as PublishedAtomicWriteError | undefined)?.atomicWritePublished);
 }
 
@@ -1068,7 +1068,8 @@ export async function diffAndStore({
 				// A caller can publish another resource while this state lock is held.
 				// If that coordinated publication fails, restore the state snapshot before
 				// releasing the lock so readers never reuse a cancelled result.
-				if (stored && (signal?.aborted || afterStore)) {
+				const stateWasPublished = stored || atomicWriteWasPublished(err);
+				if (stateWasPublished && (signal?.aborted || afterStore || atomicWriteWasPublished(err))) {
 					if (!beforeExists) {
 						await deleteStateJsonUnlocked({ env, key });
 					} else {

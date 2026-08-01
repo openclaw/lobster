@@ -2661,7 +2661,11 @@ test(
 			const command = [process.execPath, mockGog, "gmail", "search"]
 				.map((arg) => JSON.stringify(arg))
 				.join(" ");
-			await writeFile(workflow, JSON.stringify({ steps: [{ id: "shell", run: command }] }), "utf8");
+			await writeFile(
+				workflow,
+				JSON.stringify({ steps: [{ id: "shell", run: command, timeout_ms: 10_000 }] }),
+				"utf8",
+			);
 
 			cli = spawn(
 				process.execPath,
@@ -2723,7 +2727,11 @@ test(
 			const command = [process.execPath, mockGog, "gmail", "search"]
 				.map((arg) => JSON.stringify(arg))
 				.join(" ");
-			await writeFile(workflow, JSON.stringify({ steps: [{ id: "shell", run: command }] }), "utf8");
+			await writeFile(
+				workflow,
+				JSON.stringify({ steps: [{ id: "shell", run: command, timeout_ms: 10_000 }] }),
+				"utf8",
+			);
 
 			cli = spawn(
 				process.execPath,

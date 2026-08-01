@@ -56,6 +56,7 @@ export const gogGmailSearchCommand = {
 			env: { ...process.env, ...ctx.env },
 			cwd: process.cwd(),
 			signal: ctx.signal,
+			forceTerminationSignal: ctx.forceTerminationSignal,
 			notFoundMessage: "gog not found on PATH (install: https://github.com/steipete/gogcli)",
 		});
 		if (res.code !== 0) {

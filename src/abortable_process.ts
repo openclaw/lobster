@@ -16,6 +16,7 @@ type RunAbortableProcessOptions = {
 	cwd?: string;
 	stdin?: string | null;
 	signal?: AbortSignal;
+	forceTerminationSignal?: AbortSignal;
 	killSignal?: NodeJS.Signals | (() => NodeJS.Signals | undefined);
 	maxOutputBytes?: number;
 	outputLimitMessage?: string;
@@ -65,6 +66,7 @@ export function runAbortableProcess({
 	cwd,
 	stdin,
 	signal,
+	forceTerminationSignal,
 	killSignal,
 	maxOutputBytes,
 	outputLimitMessage,
@@ -104,12 +106,14 @@ export function runAbortableProcess({
 		let forceKillRequested = false;
 		let forceKillIssued = false;
 		let settled = false;
-		let forceTerminationListeners: Set<() => void> | undefined;
+		const forceTerminationRegistrations: Set<() => void>[] = [];
 		let forceTerminate: (() => void) | undefined;
 		const cleanup = () => {
 			signal?.removeEventListener("abort", onAbort);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
-			if (forceTerminate) forceTerminationListeners?.delete(forceTerminate);
+			if (forceTerminate) {
+				for (const listeners of forceTerminationRegistrations) listeners.delete(forceTerminate);
+			}
 		};
 		const failTerminationWhenTreeIsStopped = () => {
 			if (!terminationError || !processClosed || !forceKillIssued || settled) return;
@@ -210,13 +214,21 @@ export function runAbortableProcess({
 			resolve({ stdout, stderr, code });
 		});
 
-		if (signal) {
-			forceTerminationListeners = forceTerminationCallbacks.get(signal);
-			if (!forceTerminationListeners) {
-				forceTerminationListeners = new Set();
-				forceTerminationCallbacks.set(signal, forceTerminationListeners);
+		for (const registrationSignal of new Set(
+			[signal, forceTerminationSignal].filter(
+				(candidate): candidate is AbortSignal => candidate !== undefined,
+			),
+		)) {
+			let listeners = forceTerminationCallbacks.get(registrationSignal);
+			if (!listeners) {
+				listeners = new Set();
+				forceTerminationCallbacks.set(registrationSignal, listeners);
 			}
-			forceTerminationListeners.add(forceTerminate);
+			listeners.add(forceTerminate);
+			forceTerminationRegistrations.push(listeners);
+		}
+
+		if (signal) {
 			signal.addEventListener("abort", onAbort, { once: true });
 			if (signal.aborted) onAbort();
 		}

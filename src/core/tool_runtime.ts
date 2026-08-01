@@ -35,6 +35,7 @@ type ToolRunContext = {
 	stdout?: NodeJS.WritableStream;
 	stderr?: NodeJS.WritableStream;
 	signal?: AbortSignal;
+	forceTerminationSignal?: AbortSignal;
 	registry?: any;
 	llmAdapters?: Record<string, any>;
 };
@@ -138,6 +139,7 @@ export async function runToolRequest({
 			cwd: runtime.cwd,
 			llmAdapters: runtime.llmAdapters,
 			signal: runtime.signal,
+			forceTerminationSignal: runtime.forceTerminationSignal,
 			haltAfterStageOnAbort: true,
 		});
 
@@ -382,6 +384,7 @@ export async function resumeToolRequest({
 			cwd: runtime.cwd,
 			llmAdapters: runtime.llmAdapters,
 			signal: runtime.signal,
+			forceTerminationSignal: runtime.forceTerminationSignal,
 			haltAfterStageOnAbort: true,
 			input,
 			requestInputResume,
@@ -475,6 +478,7 @@ export function createToolContext(ctx: ToolRunContext = {}) {
 		stdout: ctx.stdout ?? createCaptureStream(),
 		stderr: ctx.stderr ?? createCaptureStream(),
 		signal: ctx.signal,
+		forceTerminationSignal: ctx.forceTerminationSignal,
 		registry: ctx.registry ?? createDefaultRegistry(),
 		llmAdapters: ctx.llmAdapters,
 	};

@@ -12,7 +12,7 @@ import { forceTerminateAbortableProcesses } from "./abortable_process.js";
 export async function runCli(argv) {
 	const cancellation = createCliCancellation();
 	try {
-		await runCliWithSignal(argv, cancellation.signal);
+		await runCliWithSignal(argv, cancellation.signal, cancellation.signal);
 	} finally {
 		if (cancellation.exitCode !== undefined) {
 			process.exitCode = cancellation.exitCode;
@@ -21,7 +21,11 @@ export async function runCli(argv) {
 	}
 }
 
-async function runCliWithSignal(argv, signal: AbortSignal) {
+async function runCliWithSignal(
+	argv,
+	signal: AbortSignal,
+	forceTerminationSignal: AbortSignal = signal,
+) {
 	const registry = createDefaultRegistry();
 
 	if (argv.length === 0 || argv.includes("-h") || argv.includes("--help")) {
@@ -51,7 +55,7 @@ async function runCliWithSignal(argv, signal: AbortSignal) {
 	}
 
 	if (argv[0] === "doctor") {
-		await handleDoctor({ argv: argv.slice(1), registry, signal });
+		await handleDoctor({ argv: argv.slice(1), registry, signal, forceTerminationSignal });
 		return;
 	}
 
@@ -61,17 +65,17 @@ async function runCliWithSignal(argv, signal: AbortSignal) {
 	}
 
 	if (argv[0] === "run") {
-		await handleRun({ argv: argv.slice(1), registry, signal });
+		await handleRun({ argv: argv.slice(1), registry, signal, forceTerminationSignal });
 		return;
 	}
 
 	if (argv[0] === "resume") {
-		await handleResume({ argv: argv.slice(1), registry, signal });
+		await handleResume({ argv: argv.slice(1), registry, signal, forceTerminationSignal });
 		return;
 	}
 
 	// Default: treat argv as a pipeline string.
-	await handleRun({ argv, registry, signal });
+	await handleRun({ argv, registry, signal, forceTerminationSignal });
 }
 
 function createCliCancellation() {
@@ -175,7 +179,17 @@ function isWorkflowGraphFormat(value: string): value is WorkflowGraphFormat {
 	return value === "mermaid" || value === "dot" || value === "ascii";
 }
 
-async function handleRun({ argv, registry, signal }: { argv; registry; signal: AbortSignal }) {
+async function handleRun({
+	argv,
+	registry,
+	signal,
+	forceTerminationSignal,
+}: {
+	argv;
+	registry;
+	signal: AbortSignal;
+	forceTerminationSignal: AbortSignal;
+}) {
 	const parsed = parseRunArgs(argv);
 	const { mode, argsJson } = parsed;
 	const normalizedMode = normalizeMode(mode);
@@ -217,6 +231,7 @@ async function handleRun({ argv, registry, signal }: { argv; registry; signal: A
 					registry,
 					dryRun,
 					signal,
+					forceTerminationSignal,
 				},
 			});
 
@@ -321,6 +336,7 @@ async function handleRun({ argv, registry, signal }: { argv; registry; signal: A
 			mode: normalizedMode,
 			dryRun,
 			signal,
+			forceTerminationSignal,
 			haltAfterStageOnAbort: true,
 		});
 
@@ -551,7 +567,17 @@ async function resolveWorkflowFile(candidate) {
 	return resolved;
 }
 
-async function handleResume({ argv, registry, signal }: { argv; registry; signal: AbortSignal }) {
+async function handleResume({
+	argv,
+	registry,
+	signal,
+	forceTerminationSignal,
+}: {
+	argv;
+	registry;
+	signal: AbortSignal;
+	forceTerminationSignal: AbortSignal;
+}) {
 	let parsed;
 	try {
 		parsed = parseResumeArgs(argv);
@@ -581,6 +607,7 @@ async function handleResume({ argv, registry, signal }: { argv; registry; signal
 				stderr: process.stderr,
 				registry,
 				signal,
+				forceTerminationSignal,
 			},
 		});
 	} catch (err: any) {
@@ -606,7 +633,17 @@ async function readVersion() {
 	return pkg.version ?? "0.0.0";
 }
 
-async function handleDoctor({ argv, registry, signal }: { argv; registry; signal: AbortSignal }) {
+async function handleDoctor({
+	argv,
+	registry,
+	signal,
+	forceTerminationSignal,
+}: {
+	argv;
+	registry;
+	signal: AbortSignal;
+	forceTerminationSignal: AbortSignal;
+}) {
 	const mode = "tool";
 	const pipeline = "exec --json --shell 'echo [1]'";
 	const output: any = await (async () => {
@@ -622,6 +659,7 @@ async function handleDoctor({ argv, registry, signal }: { argv; registry; signal
 				env: process.env,
 				mode,
 				signal,
+				forceTerminationSignal,
 				haltAfterStageOnAbort: true,
 			});
 		} catch (err: any) {

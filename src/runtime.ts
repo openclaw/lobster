@@ -20,6 +20,7 @@ export async function runPipeline({
 	cwd = undefined,
 	llmAdapters = undefined,
 	signal = undefined,
+	forceTerminationSignal = undefined,
 	haltAfterStageOnAbort = false,
 	dryRun = false,
 	requestInputResume = undefined,
@@ -37,6 +38,7 @@ export async function runPipeline({
 	cwd?: string | undefined;
 	llmAdapters?: Record<string, any> | undefined;
 	signal?: AbortSignal | undefined;
+	forceTerminationSignal?: AbortSignal | undefined;
 	haltAfterStageOnAbort?: boolean;
 	dryRun?: boolean;
 	requestInputResume?: CommandInputResume | undefined;
@@ -73,6 +75,7 @@ export async function runPipeline({
 		cwd,
 		llmAdapters,
 		signal,
+		forceTerminationSignal,
 	};
 
 	for (let idx = 0; idx < pipeline.length; idx++) {
