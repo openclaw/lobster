@@ -721,6 +721,7 @@ export async function runWorkflowFile({
 		: (resume ?? null);
 	let resumedExecutionStarted = false;
 	let resumeStateConsumed = false;
+	let executionBoundaryStarted = false;
 	const executionSignalListeners: Array<{ signal: AbortSignal; onAbort: () => void }> = [];
 	let executionStart: Promise<void> | undefined;
 	const markExecutionStarted = async (signal?: AbortSignal) => {
@@ -752,6 +753,7 @@ export async function runWorkflowFile({
 				resumedExecutionStarted = true;
 			}
 			await ctx._onExecutionStarted?.();
+			executionBoundaryStarted = true;
 			if (!signal) return;
 			const onAbort = () => {
 				ctx._onExecutionInterrupted?.();
@@ -763,7 +765,15 @@ export async function runWorkflowFile({
 			signal.addEventListener("abort", onAbort, { once: true });
 			executionSignalListeners.push({ signal, onAbort });
 		})();
-		return executionStart;
+		try {
+			await executionStart;
+		} catch (err) {
+			// A per-attempt timeout can abort while this invocation is only waiting
+			// to claim its resume state. Keep the successful boundary memoized, but
+			// let the workflow retry make a fresh claim after that pre-dispatch wait.
+			if (!resumeStateConsumed && !executionBoundaryStarted) executionStart = undefined;
+			throw err;
+		}
 	};
 	if (resumeState?.approvalStepId && resumeState?.inputStepId) {
 		throw new Error("Invalid workflow resume state");

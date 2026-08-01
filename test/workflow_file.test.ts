@@ -8,7 +8,7 @@ import os from "node:os";
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { runWorkflowFile } from "../src/workflows/file.js";
 import { decodeResumeToken } from "../src/resume.js";
-import { readStateJson } from "../src/state/store.js";
+import { keyToPath, readStateJson } from "../src/state/store.js";
 
 function streamOf(items: unknown[]) {
 	return (async function* () {
@@ -577,6 +577,72 @@ test("workflow resume retries a timed-out effect before consuming its capability
 	assert.deepEqual(resumed.output, ["retried"]);
 	assert.equal(await fsp.readFile(attemptsPath, "utf8"), "2");
 	assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+});
+
+test("workflow resume retries a claim blocked by a state lock before dispatch", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-claim-retry-"));
+	try {
+		const stateDir = path.join(tmpDir, "state");
+		const filePath = path.join(tmpDir, "workflow.lobster");
+		await fsp.writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "approve", approval: "Proceed?" },
+					{
+						id: "effect",
+						run: "printf ran",
+						condition: "$approve.approved",
+						timeout_ms: 150,
+						retry: { max: 2, delay_ms: 220 },
+					},
+				],
+			}),
+			"utf8",
+		);
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const first = await runWorkflowFile({
+			filePath,
+			ctx: {
+				stdin: process.stdin,
+				stdout: process.stdout,
+				stderr: process.stderr,
+				env,
+				mode: "tool",
+			},
+		});
+		assert.equal(first.status, "needs_approval");
+		const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+		assert.equal(payload.kind, "workflow-file");
+		assert.ok(payload.stateKey);
+
+		const lockPath = `${keyToPath(stateDir, payload.stateKey!)}.lock`;
+		await fsp.mkdir(lockPath);
+		await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+		const release = setTimeout(() => void fsp.rm(lockPath, { recursive: true, force: true }), 190);
+		try {
+			const resumed = await runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			});
+			assert.equal(resumed.status, "ok");
+			assert.deepEqual(resumed.output, ["ran"]);
+			assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+		} finally {
+			clearTimeout(release);
+			await fsp.rm(lockPath, { recursive: true, force: true });
+		}
+	} finally {
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
 });
 
 test("workflow resume consumes its capability after a parallel timeout starts an effect", async () => {

@@ -513,6 +513,23 @@ export async function readStateJson({ env, key }) {
 	}
 }
 
+/**
+ * Read a state record only after any in-progress publish-or-rollback transition
+ * for the same key has settled. Callers that compose state with another durable
+ * resource use this to avoid observing a value that cancellation may undo.
+ */
+export async function readStateJsonWithLock({
+	env,
+	key,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	signal?: AbortSignal;
+}) {
+	return withStateKeyLock({ env, key, signal, task: () => readStateJson({ env, key }) });
+}
+
 async function writeStateJsonUnlocked({
 	env,
 	key,
@@ -979,12 +996,14 @@ export async function diffAndStore({
 	value,
 	signal = undefined,
 	atomicWriteOptions = undefined,
+	afterStore = undefined,
 }: {
 	env: Record<string, string | undefined>;
 	key: string;
 	value: unknown;
 	signal?: AbortSignal;
 	atomicWriteOptions?: Omit<AtomicWriteOptions, "signal">;
+	afterStore?: (snapshot: { before: unknown; after: unknown; changed: boolean }) => Promise<void>;
 }) {
 	return withStateKeyLock({
 		env,
@@ -1004,12 +1023,19 @@ export async function diffAndStore({
 				throw err;
 			});
 			const changed = stableStringify(before) !== stableStringify(value);
+			const snapshot = { before, after: value, changed };
+			let stored = false;
 			try {
 				signal?.throwIfAborted();
 				await writeStateJsonUnlocked({ env, key, value, signal, atomicWriteOptions });
+				stored = true;
 				signal?.throwIfAborted();
+				await afterStore?.(snapshot);
 			} catch (err) {
-				if (signal?.aborted) {
+				// A caller can publish another resource while this state lock is held.
+				// If that coordinated publication fails, restore the state snapshot before
+				// releasing the lock so readers never reuse a cancelled result.
+				if (stored && (signal?.aborted || afterStore)) {
 					if (!beforeExists) {
 						await deleteStateJsonUnlocked({ env, key });
 					} else {
@@ -1018,7 +1044,7 @@ export async function diffAndStore({
 				}
 				throw err;
 			}
-			return { before, after: value, changed };
+			return snapshot;
 		},
 	});
 }

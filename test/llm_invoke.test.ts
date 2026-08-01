@@ -234,7 +234,12 @@ test("llm.invoke does not publish a reusable cache entry when cancellation races
 			};
 		},
 	};
-	const args = { _: [], provider: "cache-cancel-test", prompt: "Decide" };
+	const args = {
+		_: [],
+		provider: "cache-cancel-test",
+		prompt: "Decide",
+		"state-key": "cancelled-cache-publication",
+	};
 
 	try {
 		Object.defineProperty(fsp, "rename", {
@@ -242,7 +247,10 @@ test("llm.invoke does not publish a reusable cache entry when cancellation races
 			writable: true,
 			async value(from: Parameters<typeof fsp.rename>[0], to: Parameters<typeof fsp.rename>[1]) {
 				const result = await originalRename(from, to);
-				if (!cacheCommitAborted && String(to).startsWith(`${cacheDir}${path.sep}`)) {
+				if (
+					!cacheCommitAborted &&
+					String(to).startsWith(`${path.join(cacheDir, "llm.invoke")}${path.sep}`)
+				) {
 					cacheCommitAborted = true;
 					controller.abort(new Error("cancelled during cache publication"));
 				}
@@ -279,7 +287,11 @@ test("llm.invoke does not publish a reusable cache entry when cancellation races
 		},
 	} as any);
 	const retriedItems = await collect(retried.output!);
-	assert.equal(calls, 2, "a cancelled invocation must not satisfy a later request from cache");
+	assert.equal(
+		calls,
+		2,
+		"a cancelled invocation must not satisfy a later request from cache or run state",
+	);
 	assert.equal(retriedItems[0]?.source, "cache-cancel-test");
 
 	await rm(cacheDir, { recursive: true, force: true });
@@ -305,7 +317,12 @@ test("llm.invoke restores the previous cache entry when a refresh is cancelled a
 			};
 		},
 	};
-	const args = { _: [], provider: "cache-refresh-cancel-test", prompt: "Decide" };
+	const args = {
+		_: [],
+		provider: "cache-refresh-cancel-test",
+		prompt: "Decide",
+		"state-key": "refresh-cache-publication",
+	};
 
 	try {
 		const first = await cmd.run({
@@ -367,9 +384,21 @@ test("llm.invoke restores the previous cache entry when a refresh is cancelled a
 			},
 		} as any);
 		const recoveredItems = await collect(recovered.output!);
-		assert.equal(calls, 2, "the cancelled refresh must restore the existing cache entry");
-		assert.equal(recoveredItems[0]?.source, "cache");
+		assert.equal(calls, 2, "the cancelled refresh must restore the existing run state");
+		assert.equal(recoveredItems[0]?.source, "run_state");
 		assert.deepEqual(recoveredItems[0]?.output.data, { call: 1 });
+
+		const recoveredCache = await cmd.run({
+			input: streamOf([]),
+			args: { _: [], provider: "cache-refresh-cancel-test", prompt: "Decide" },
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+				llmAdapters: { "cache-refresh-cancel-test": adapter },
+			},
+		} as any);
+		const recoveredCacheItems = await collect(recoveredCache.output!);
+		assert.equal(recoveredCacheItems[0]?.source, "cache");
+		assert.deepEqual(recoveredCacheItems[0]?.output.data, { call: 1 });
 	} finally {
 		await rm(cacheDir, { recursive: true, force: true });
 	}

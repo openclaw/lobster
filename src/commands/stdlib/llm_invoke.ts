@@ -8,7 +8,7 @@ import {
 	diffAndStore,
 	ensureDirectory,
 	isJsonSyntaxError,
-	readStateJson,
+	readStateJsonWithLock,
 	stableStringify,
 	withFileLock,
 	writeFileAtomic,
@@ -477,10 +477,10 @@ async function runLlmInvoke({
 				items: normalized,
 				stateType: config.stateType,
 				signal: ctx.signal,
+				afterStore: disableCache
+					? undefined
+					: () => writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace, ctx.signal),
 			});
-			ctx.signal?.throwIfAborted();
-			if (!disableCache)
-				await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace, ctx.signal);
 			return { output: streamOf(normalized) };
 		}
 
@@ -494,10 +494,10 @@ async function runLlmInvoke({
 				items: normalized,
 				stateType: config.stateType,
 				signal: ctx.signal,
+				afterStore: disableCache
+					? undefined
+					: () => writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace, ctx.signal),
 			});
-			ctx.signal?.throwIfAborted();
-			if (!disableCache)
-				await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace, ctx.signal);
 			return { output: streamOf(normalized) };
 		}
 
@@ -907,6 +907,7 @@ async function persistOutputs({
 	items,
 	stateType,
 	signal,
+	afterStore,
 }: {
 	env: any;
 	stateKey: string | null;
@@ -914,8 +915,12 @@ async function persistOutputs({
 	items: NormalizedInvocationItem[];
 	stateType: string;
 	signal?: AbortSignal;
+	afterStore?: () => Promise<void>;
 }) {
-	if (!stateKey) return;
+	if (!stateKey) {
+		await afterStore?.();
+		return;
+	}
 	const record = {
 		type: stateType,
 		version: STATE_VERSION,
@@ -923,12 +928,18 @@ async function persistOutputs({
 		items,
 		storedAt: new Date().toISOString(),
 	};
-	await diffAndStore({ env, key: stateKey, value: record, signal });
+	await diffAndStore({
+		env,
+		key: stateKey,
+		value: record,
+		signal,
+		afterStore: afterStore ? () => afterStore() : undefined,
+	});
 }
 
 async function readReusableLlmState(env: any, stateKey: string) {
 	try {
-		return await readStateJson({ env, key: stateKey });
+		return await readStateJsonWithLock({ env, key: stateKey });
 	} catch (err: any) {
 		if (isJsonSyntaxError(err)) return null;
 		throw err;
