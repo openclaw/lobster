@@ -7,7 +7,7 @@ import { decodeResumeToken, kindFromStateKey } from "../resume.js";
 import { runPipeline } from "../runtime.js";
 import { encodeToken } from "../token.js";
 import {
-	deleteStateJson,
+	deleteStateJsonWithBoundedResumeCleanup,
 	deleteUnconsumedResumeState,
 	deleteApprovalId,
 	findStateKeyByApprovalId,
@@ -436,7 +436,10 @@ export async function resumeToolRequest({
 		}
 		if (pipelineExecutionStarted && !pipelineResumeStateRestored) {
 			if (abortedResume && !abortedBeforeResume) {
-				await deleteStateJson({ env: runtime.env, key: payload.stateKey }).catch(() => {});
+				await deleteStateJsonWithBoundedResumeCleanup({
+					env: runtime.env,
+					key: payload.stateKey,
+				}).catch(() => {});
 			}
 			// Keep the short approval ID through the pre-dispatch claim window. Once
 			// the unsafe stage has actually been entered, the tombstone makes retry

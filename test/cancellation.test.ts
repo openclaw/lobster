@@ -4599,6 +4599,104 @@ test("terminal workflow resume cleanup stops waiting for a state lock", async ()
 	}
 });
 
+test("started pipeline and workflow cleanup never retries an interrupted state lock without its signal", async () => {
+	for (const workflow of [false, true]) {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-started-cleanup-lock-abort-"));
+		try {
+			const stateDir = join(dir, "state");
+			const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+			let lockPath = "";
+			let effectFinished!: () => void;
+			const effectFinishedPromise = new Promise<void>((resolve) => {
+				effectFinished = resolve;
+			});
+			let invocations = 0;
+			const effect = {
+				name: "test.started-cleanup-effect",
+				async run({ input }: { input: AsyncIterable<unknown> }) {
+					for await (const _item of input) {
+						// Drain the approval output before returning the effect result.
+					}
+					invocations += 1;
+					await fsp.mkdir(lockPath);
+					await fsp.writeFile(join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+					effectFinished();
+					return { output: streamOf([{ ok: true }]) };
+				},
+			};
+			const registry = withCommands(createDefaultRegistry(), effect);
+			const filePath = join(dir, "workflow.lobster");
+			if (workflow) {
+				await writeFile(
+					filePath,
+					JSON.stringify({
+						steps: [
+							{ id: "approve", approval: "Continue?" },
+							{ id: "effect", pipeline: "test.started-cleanup-effect" },
+						],
+					}),
+					"utf8",
+				);
+			}
+			const first = await (workflow
+				? runToolRequest({ filePath, ctx: { cwd: dir, env, registry } })
+				: runToolRequest({
+						pipeline: "approve --prompt Continue? | test.started-cleanup-effect",
+						ctx: { cwd: dir, env, registry },
+					}));
+			assert.equal(first.status, "needs_approval");
+			assert.ok(first.requiresApproval?.resumeToken);
+			assert.ok(first.requiresApproval?.approvalId);
+			const payload = decodeResumeToken(first.requiresApproval.resumeToken!);
+			lockPath = `${keyToPath(stateDir, payload.stateKey)}.lock`;
+			const approvalIndexPath = join(
+				stateDir,
+				`approval_${first.requiresApproval.approvalId}.json`,
+			);
+
+			const controller = new AbortController();
+			const pending = resumeToolRequest({
+				token: first.requiresApproval.resumeToken,
+				approved: true,
+				ctx: { cwd: dir, env, registry, signal: controller.signal },
+			});
+			await effectFinishedPromise;
+			controller.abort(new Error("started cleanup stopped while waiting for a state lock"));
+			const settled = await observeSettlement(pending, 500);
+
+			assert.equal(
+				settled.settled,
+				true,
+				`${workflow ? "workflow" : "pipeline"} cleanup must not re-enter a held lock after cancellation`,
+			);
+			if (settled.settled) {
+				assert.equal(settled.value.ok, false);
+				assert.match(
+					settled.value.error?.message ?? "",
+					/started cleanup stopped while waiting for a state lock/,
+				);
+			}
+			assert.equal(invocations, 1);
+			assert.equal(
+				await fileExists(approvalIndexPath),
+				false,
+				"a started effect must retire its approval ID even when tombstone cleanup times out",
+			);
+			await rm(lockPath, { recursive: true, force: true });
+
+			const replay = await resumeToolRequest({
+				token: first.requiresApproval.resumeToken,
+				approved: true,
+				ctx: { cwd: dir, env, registry },
+			});
+			assert.equal(replay.ok, false);
+			assert.match(replay.error?.message ?? "", /resume state not found/i);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	}
+});
+
 test("workflow gate replacement stops waiting for a state lock", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-workflow-gate-lock-abort-"));
 	try {

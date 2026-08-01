@@ -13,6 +13,7 @@ import {
 	cleanupApprovalIndexByStateKey,
 	consumeResumeState,
 	createApprovalIndex,
+	deleteStateJsonWithBoundedResumeCleanup,
 	deleteResumeStateWithRollback,
 	deleteStateJson,
 	deleteUnconsumedResumeState,
@@ -1682,15 +1683,24 @@ export async function runWorkflowFile({
 	} catch (err) {
 		if (resumedExecutionStarted && consumedResumeStateKey) {
 			try {
-				await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
-				await cleanupApprovalIndexByStateKey({
-					env: ctx.env,
-					stateKey: consumedResumeStateKey,
-				});
+				if (ctx.signal?.aborted) {
+					await deleteStateJsonWithBoundedResumeCleanup({
+						env: ctx.env,
+						key: consumedResumeStateKey,
+					});
+				} else {
+					await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
+				}
 			} catch {
 				// Leave the tombstone in place if cleanup fails: it is the durable
 				// record that prevents the consumed token from replaying an effect.
 			}
+			// A consumed marker remains non-replayable even when its bounded cleanup
+			// times out, so its short approval ID can be retired independently.
+			await cleanupApprovalIndexByStateKey({
+				env: ctx.env,
+				stateKey: consumedResumeStateKey,
+			}).catch(() => {});
 		}
 		throw err;
 	} finally {

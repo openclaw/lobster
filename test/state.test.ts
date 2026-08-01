@@ -9,6 +9,8 @@ import { diffLast, diffAndStoreValue } from "../src/sdk/primitives/diff.js";
 import { stateSet, readState, writeState } from "../src/sdk/primitives/state.js";
 import {
 	createApprovalIndex,
+	consumeResumeState,
+	deleteResumeStateWithRollback,
 	diffAndStore,
 	keyToPath,
 	withFileLock,
@@ -191,6 +193,94 @@ test("writeFileAtomic propagates parent directory sync failures", async () => {
 	assert.equal(await fsp.readFile(target, "utf8"), '{"ok":true}\n');
 	const leftovers = (await fsp.readdir(tmp)).filter((f) => f.includes(".tmp"));
 	assert.deepEqual(leftovers, []);
+});
+
+test("consumeResumeState restores a published marker when parent sync fails", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-consume-dir-sync-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	const expectedState = { haltType: "approval_request", pipeline: [] };
+	const fault = Object.assign(new Error("dir sync failed after resume claim"), { code: "EIO" });
+	const originalOpen = fsp.open;
+	let failNextDirectorySync = true;
+
+	await writeStateJson({ env, key: "resume", value: expectedState });
+	Object.defineProperty(fsp, "open", {
+		configurable: true,
+		writable: true,
+		async value(...args: any[]) {
+			const handle = await (originalOpen as any)(...args);
+			if (failNextDirectorySync && String(args[0]) === tmp && args[1] === "r") {
+				failNextDirectorySync = false;
+				return new Proxy(handle, {
+					get(target, property) {
+						if (property === "sync") return async () => Promise.reject(fault);
+						const value = Reflect.get(target, property);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+				});
+			}
+			return handle;
+		},
+	});
+
+	try {
+		await assert.rejects(
+			() => consumeResumeState({ env, key: "resume", expectedState }),
+			(err: NodeJS.ErrnoException) => err?.code === "EIO",
+		);
+		assert.deepEqual(await readStateJson({ env, key: "resume" }), expectedState);
+	} finally {
+		Object.defineProperty(fsp, "open", {
+			configurable: true,
+			writable: true,
+			value: originalOpen,
+		});
+	}
+});
+
+test("deleteResumeStateWithRollback restores a published marker when parent sync fails", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-delete-resume-dir-sync-"));
+	const env = { LOBSTER_STATE_DIR: tmp };
+	const expectedState = { haltType: "input_request", pipeline: [] };
+	const fault = Object.assign(new Error("dir sync failed after terminal resume claim"), {
+		code: "EIO",
+	});
+	const originalOpen = fsp.open;
+	let failNextDirectorySync = true;
+
+	await writeStateJson({ env, key: "resume", value: expectedState });
+	Object.defineProperty(fsp, "open", {
+		configurable: true,
+		writable: true,
+		async value(...args: any[]) {
+			const handle = await (originalOpen as any)(...args);
+			if (failNextDirectorySync && String(args[0]) === tmp && args[1] === "r") {
+				failNextDirectorySync = false;
+				return new Proxy(handle, {
+					get(target, property) {
+						if (property === "sync") return async () => Promise.reject(fault);
+						const value = Reflect.get(target, property);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+				});
+			}
+			return handle;
+		},
+	});
+
+	try {
+		await assert.rejects(
+			() => deleteResumeStateWithRollback({ env, key: "resume", expectedState }),
+			(err: NodeJS.ErrnoException) => err?.code === "EIO",
+		);
+		assert.deepEqual(await readStateJson({ env, key: "resume" }), expectedState);
+	} finally {
+		Object.defineProperty(fsp, "open", {
+			configurable: true,
+			writable: true,
+			value: originalOpen,
+		});
+	}
 });
 
 test("readStateJson surfaces malformed authoritative state", async () => {

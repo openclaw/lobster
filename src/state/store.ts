@@ -60,9 +60,28 @@ type AtomicExclusiveWriteOptions = {
 	syncParentDir?: (filePath: string) => Promise<void>;
 };
 
+type PublishedAtomicWriteError = NodeJS.ErrnoException & {
+	atomicWritePublished?: true;
+};
+
+function markAtomicWritePublished(err: unknown) {
+	if (err && (typeof err === "object" || typeof err === "function")) {
+		Object.defineProperty(err, "atomicWritePublished", {
+			value: true,
+			configurable: true,
+		});
+	}
+	return err;
+}
+
+function atomicWriteWasPublished(err: unknown): err is PublishedAtomicWriteError {
+	return Boolean((err as PublishedAtomicWriteError | undefined)?.atomicWritePublished);
+}
+
 const STATE_LOCK_RETRY_MS = 10;
 const STATE_LOCK_ORPHAN_MS = 30_000;
 const STATE_LOCK_HEARTBEAT_MS = 250;
+const TERMINAL_RESUME_CLEANUP_TIMEOUT_MS = STATE_LOCK_RETRY_MS * 10;
 
 function isDirectorySyncUnsupportedError(err: any): boolean {
 	return [
@@ -420,11 +439,15 @@ export async function writeFileAtomic(filePath, data, options: AtomicWriteOption
 		handle = undefined;
 		options.signal?.throwIfAborted();
 		await renameFile(tmpPath, filePath);
-		// The rename is the irreversible publication point. Callers that need to
-		// compensate an aborted write must decide from the returned commit status;
-		// throwing here would hide that the replacement is already visible.
-		await syncDir(filePath);
 		cleanup = false;
+		// The rename is the irreversible publication point. Keep propagating a
+		// directory-sync failure, but mark it so a state transition can reconcile
+		// the visible replacement before deciding whether dispatch is safe.
+		try {
+			await syncDir(filePath);
+		} catch (err) {
+			throw markAtomicWritePublished(err);
+		}
 		return { signalAbortedAfterCommit: options.signal?.aborted === true };
 	} finally {
 		if (handle) await handle.close().catch(() => {});
@@ -563,21 +586,31 @@ export async function consumeResumeState({
 				return { consumed: false as const };
 			}
 			const claimId = randomBytes(16).toString("hex");
-			const result = await writeStateJsonUnlocked({
-				env,
-				key,
-				value: {
-					type: CONSUMED_RESUME_STATE_TYPE,
-					consumedAt: new Date().toISOString(),
+			try {
+				const result = await writeStateJsonUnlocked({
+					env,
+					key,
+					value: {
+						type: CONSUMED_RESUME_STATE_TYPE,
+						consumedAt: new Date().toISOString(),
+						claimId,
+					},
+					signal,
+				});
+				return {
+					consumed: true as const,
 					claimId,
-				},
-				signal,
-			});
-			return {
-				consumed: true as const,
-				claimId,
-				signalAbortedAfterCommit: result?.signalAbortedAfterCommit === true,
-			};
+					signalAbortedAfterCommit: result?.signalAbortedAfterCommit === true,
+				};
+			} catch (err) {
+				if (atomicWriteWasPublished(err)) {
+					const latest = await readStateJson({ env, key });
+					if (isConsumedResumeState(latest) && latest.claimId === claimId) {
+						await writeStateJsonUnlocked({ env, key, value: expectedState });
+					}
+				}
+				throw err;
+			}
 		},
 	});
 }
@@ -641,18 +674,25 @@ export async function deleteResumeStateWithRollback({
 
 			const claimId = randomBytes(16).toString("hex");
 			let claimPublished = false;
+			let claimMayBePublished = false;
 			let deleted = false;
 			try {
-				const result = await writeStateJsonUnlocked({
-					env,
-					key,
-					value: {
-						type: CONSUMED_RESUME_STATE_TYPE,
-						consumedAt: new Date().toISOString(),
-						claimId,
-					},
-					signal,
-				});
+				let result;
+				try {
+					result = await writeStateJsonUnlocked({
+						env,
+						key,
+						value: {
+							type: CONSUMED_RESUME_STATE_TYPE,
+							consumedAt: new Date().toISOString(),
+							claimId,
+						},
+						signal,
+					});
+				} catch (err) {
+					claimMayBePublished = atomicWriteWasPublished(err);
+					throw err;
+				}
 				claimPublished = true;
 				if (result?.signalAbortedAfterCommit) signal?.throwIfAborted();
 				signal?.throwIfAborted();
@@ -661,7 +701,7 @@ export async function deleteResumeStateWithRollback({
 				signal?.throwIfAborted();
 				return true;
 			} catch (err) {
-				if (signal?.aborted && claimPublished) {
+				if ((signal?.aborted && claimPublished) || claimMayBePublished) {
 					const latest = await readStateJson({ env, key });
 					if (
 						(deleted && latest === null) ||
@@ -723,6 +763,27 @@ export async function deleteStateJson({
 		signal,
 		task: () => deleteStateJsonUnlocked({ env, key }),
 	});
+}
+
+/**
+ * After an effect has started, its consumed marker already prevents replay.
+ * Give terminal cleanup a small, bounded opportunity to remove that marker,
+ * but never let a live state writer turn cancellation into an unbounded wait.
+ */
+export async function deleteStateJsonWithBoundedResumeCleanup({
+	env,
+	key,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+}) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), TERMINAL_RESUME_CLEANUP_TIMEOUT_MS);
+	try {
+		await deleteStateJson({ env, key, signal: controller.signal });
+	} finally {
+		clearTimeout(timeout);
+	}
 }
 
 /**
