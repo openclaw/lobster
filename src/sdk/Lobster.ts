@@ -3,7 +3,7 @@ import { runPipelineInternal } from "./runtime.js";
 import { encodeToken, decodeToken } from "./token.js";
 import { compileCached } from "../validation.js";
 import { validateCommandInputState, type CommandInputState } from "../input_request.js";
-import { deleteStateJson, readStateJson, writeStateJson } from "../state/store.js";
+import { deleteStateJson, readStateJsonWithLock, writeStateJson } from "../state/store.js";
 
 type SdkResumePayload = {
 	protocolVersion: 1;
@@ -449,7 +449,11 @@ async function loadSdkCommandInputResumeState(
 	options: any,
 	stateKey: string,
 ): Promise<SdkCommandInputResumeState> {
-	const stored = await readStateJson({ env: sdkStateEnv(options), key: stateKey });
+	const stored = await readStateJsonWithLock({
+		env: sdkStateEnv(options),
+		key: stateKey,
+		signal: options?.signal,
+	});
 	if (!stored || typeof stored !== "object") throw new Error("SDK resume state not found");
 	const data = stored as Partial<SdkCommandInputResumeState>;
 	if (

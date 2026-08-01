@@ -15,7 +15,7 @@
  *   .pipe(stateSet('my-key'));
  */
 
-import { readStateJson, writeStateJson } from "../../state/store.js";
+import { readStateJsonWithLock, writeStateJson } from "../../state/store.js";
 
 function stateEnv(ctx) {
 	return ctx?.stateDir
@@ -42,7 +42,7 @@ export function stateGet(key) {
 				// no-op
 			}
 
-			const value = await readStateJson({ env: stateEnv(ctx), key });
+			const value = await readStateJsonWithLock({ env: stateEnv(ctx), key, signal: ctx?.signal });
 
 			return {
 				output: (async function* () {
@@ -108,8 +108,8 @@ export const state = {
  * @param {Object} [ctx]
  * @returns {Promise<any>}
  */
-export async function readState(key, ctx = {}) {
-	return readStateJson({ env: stateEnv(ctx), key });
+export async function readState(key, ctx: any = {}) {
+	return readStateJsonWithLock({ env: stateEnv(ctx), key, signal: ctx?.signal });
 }
 
 /**

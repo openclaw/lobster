@@ -8,7 +8,7 @@ import os from "node:os";
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { runWorkflowFile } from "../src/workflows/file.js";
 import { decodeResumeToken } from "../src/resume.js";
-import { keyToPath, readStateJson } from "../src/state/store.js";
+import { keyToPath, readStateJsonWithLock as readStateJson } from "../src/state/store.js";
 
 function streamOf(items: unknown[]) {
 	return (async function* () {
@@ -593,8 +593,8 @@ test("workflow resume retries a claim blocked by a state lock before dispatch", 
 						id: "effect",
 						run: "printf ran",
 						condition: "$approve.approved",
-						timeout_ms: 150,
-						retry: { max: 2, delay_ms: 220 },
+						timeout_ms: 1000,
+						retry: { max: 2, delay_ms: 250 },
 					},
 				],
 			}),
@@ -617,11 +617,31 @@ test("workflow resume retries a claim blocked by a state lock before dispatch", 
 		assert.ok(payload.stateKey);
 
 		const lockPath = `${keyToPath(stateDir, payload.stateKey!)}.lock`;
-		await fsp.mkdir(lockPath);
-		await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
-		const release = setTimeout(() => void fsp.rm(lockPath, { recursive: true, force: true }), 190);
+		const originalRm = fsp.rm;
+		let releasedInitialReadLocks = 0;
+		let lockReplaced!: () => void;
+		const replacedInitialReadLocks = new Promise<void>((resolve) => {
+			lockReplaced = resolve;
+		});
+		Object.defineProperty(fsp, "rm", {
+			configurable: true,
+			writable: true,
+			async value(pathArg: Parameters<typeof fsp.rm>[0], options?: Parameters<typeof fsp.rm>[1]) {
+				const result = await originalRm(pathArg, options);
+				if (String(pathArg) === lockPath && ++releasedInitialReadLocks === 2) {
+					await fsp.mkdir(lockPath);
+					await fsp.writeFile(
+						path.join(lockPath, "owner"),
+						`${process.pid}::live-writer\n`,
+						"utf8",
+					);
+					lockReplaced();
+				}
+				return result;
+			},
+		});
 		try {
-			const resumed = await runWorkflowFile({
+			const resumedRun = runWorkflowFile({
 				filePath,
 				ctx: {
 					stdin: process.stdin,
@@ -633,11 +653,22 @@ test("workflow resume retries a claim blocked by a state lock before dispatch", 
 				resume: payload,
 				approved: true,
 			});
+			await replacedInitialReadLocks;
+			const release = setTimeout(
+				() => void originalRm(lockPath, { recursive: true, force: true }),
+				1200,
+			);
+			const resumed = await resumedRun;
+			clearTimeout(release);
 			assert.equal(resumed.status, "ok");
 			assert.deepEqual(resumed.output, ["ran"]);
 			assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
 		} finally {
-			clearTimeout(release);
+			Object.defineProperty(fsp, "rm", {
+				configurable: true,
+				writable: true,
+				value: originalRm,
+			});
 			await fsp.rm(lockPath, { recursive: true, force: true });
 		}
 	} finally {

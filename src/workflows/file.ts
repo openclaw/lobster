@@ -18,7 +18,7 @@ import {
 	deleteStateJson,
 	deleteUnconsumedResumeState,
 	isConsumedResumeState,
-	readStateJson,
+	readStateJsonWithLock,
 	restoreConsumedResumeState,
 	writeStateJson,
 } from "../state/store.js";
@@ -713,11 +713,11 @@ export async function runWorkflowFile({
 }): Promise<WorkflowRunResult> {
 	const consumedResumeStateKey =
 		resume?.stateKey && typeof resume.stateKey === "string"
-			? await resolveWorkflowResumeStateKey(ctx.env, resume.stateKey)
+			? await resolveWorkflowResumeStateKey(ctx.env, resume.stateKey, ctx.signal)
 			: null;
 	if (consumedResumeStateKey) ctx._onResumeStateResolved?.(consumedResumeStateKey);
 	const resumeState = resume?.stateKey
-		? await loadWorkflowResumeState(ctx.env, consumedResumeStateKey ?? resume.stateKey)
+		? await loadWorkflowResumeState(ctx.env, consumedResumeStateKey ?? resume.stateKey, ctx.signal)
 		: (resume ?? null);
 	let resumedExecutionStarted = false;
 	let resumeStateConsumed = false;
@@ -2113,7 +2113,7 @@ async function cleanupSupersededWorkflowResumeStates(
 ) {
 	for (const stateKey of stateKeys ?? []) {
 		try {
-			if (isConsumedResumeState(await readStateJson({ env, key: stateKey }))) {
+			if (isConsumedResumeState(await readStateJsonWithLock({ env, key: stateKey }))) {
 				await deleteStateJson({ env, key: stateKey });
 			}
 		} catch {
@@ -2143,8 +2143,9 @@ export function alternateWorkflowResumeStateKey(stateKey: string): string | null
 async function resolveWorkflowResumeStateKey(
 	env: Record<string, string | undefined>,
 	stateKey: string,
+	signal?: AbortSignal,
 ): Promise<string> {
-	const stored = await readStateJson({ env, key: stateKey });
+	const stored = await readStateJsonWithLock({ env, key: stateKey, signal });
 	if (stored && typeof stored === "object") {
 		return stateKey;
 	}
@@ -2152,22 +2153,26 @@ async function resolveWorkflowResumeStateKey(
 	if (!altKey) {
 		return stateKey;
 	}
-	const altStored = await readStateJson({ env, key: altKey });
+	const altStored = await readStateJsonWithLock({ env, key: altKey, signal });
 	if (altStored && typeof altStored === "object") {
 		return altKey;
 	}
 	return stateKey;
 }
 
-async function loadWorkflowResumeState(env: Record<string, string | undefined>, stateKey: string) {
-	let stored = await readStateJson({ env, key: stateKey });
+async function loadWorkflowResumeState(
+	env: Record<string, string | undefined>,
+	stateKey: string,
+	signal?: AbortSignal,
+) {
+	let stored = await readStateJsonWithLock({ env, key: stateKey, signal });
 	if (isConsumedResumeState(stored)) {
 		throw new Error("Workflow resume state not found");
 	}
 	if ((!stored || typeof stored !== "object") && typeof stateKey === "string") {
 		const altKey = alternateWorkflowResumeStateKey(stateKey);
 		if (altKey) {
-			stored = await readStateJson({ env, key: altKey });
+			stored = await readStateJsonWithLock({ env, key: altKey, signal });
 			if (isConsumedResumeState(stored)) {
 				throw new Error("Workflow resume state not found");
 			}

@@ -8,7 +8,7 @@ import {
 	deleteResumeStateWithRollback,
 	deleteStateJson,
 	isConsumedResumeState,
-	readStateJson,
+	readStateJsonWithLock,
 	restoreConsumedResumeState,
 	writeStateJson,
 } from "./state/store.js";
@@ -360,7 +360,7 @@ async function restorePreviousPipelineResumeState({
 	// Safe terminal cleanup restores its own claimed marker while still holding
 	// the state lock. Never recreate a missing snapshot here: this caller may
 	// have only observed it before another resume completed.
-	if ((await readStateJson({ env, key: previousStateKey })) !== null) {
+	if ((await readStateJsonWithLock({ env, key: previousStateKey, signal })) !== null) {
 		onPreviousStateRestored?.();
 	}
 }
@@ -395,7 +395,7 @@ async function cleanupSupersededPipelineResumeStates(
 		try {
 			// Retire only a non-executable marker after the successor itself has
 			// committed. A restored state must remain available for retry.
-			if (isConsumedResumeState(await readStateJson({ env, key: stateKey }))) {
+			if (isConsumedResumeState(await readStateJsonWithLock({ env, key: stateKey }))) {
 				await deleteStateJson({ env, key: stateKey });
 			}
 		} catch {
@@ -415,8 +415,9 @@ async function discardPipelineResumeState(
 export async function loadPipelineResumeState(
 	env: Record<string, string | undefined>,
 	stateKey: string,
+	signal?: AbortSignal,
 ) {
-	const stored = await readStateJson({ env, key: stateKey });
+	const stored = await readStateJsonWithLock({ env, key: stateKey, signal });
 	if (!stored || typeof stored !== "object" || isConsumedResumeState(stored)) {
 		throw new Error("Pipeline resume state not found");
 	}

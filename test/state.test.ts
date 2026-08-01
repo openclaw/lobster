@@ -15,7 +15,7 @@ import {
 	keyToPath,
 	withFileLock,
 	writeStateJson,
-	readStateJson,
+	readStateJsonWithLock as readStateJson,
 	writeFileAtomic,
 	writeFileAtomicExclusive,
 } from "../src/state/store.js";
@@ -578,6 +578,51 @@ test("diffAndStore serializes cancellation rollback before a concurrent snapshot
 		(file) => file.includes(".tmp") || file.endsWith(".lock"),
 	);
 	assert.deepEqual(leftovers, []);
+});
+
+test("state.get waits for a diff publication to commit or roll back", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-state-read-transaction-"));
+	const env = { ...process.env, LOBSTER_STATE_DIR: tmp };
+	await writeStateJson({ env, key: "snapshot", value: { version: "before" } });
+	let markPublished!: () => void;
+	const published = new Promise<void>((resolve) => {
+		markPublished = resolve;
+	});
+	let release!: () => void;
+	const releasePublication = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const transaction = diffAndStore({
+		env,
+		key: "snapshot",
+		value: { version: "new" },
+		afterStore: async () => {
+			markPublished();
+			await releasePublication;
+			throw new Error("paired publication failed");
+		},
+	});
+	await published;
+
+	const getCmd = createDefaultRegistry().get("state.get");
+	const pendingRead = getCmd.run({
+		input: streamOf([]),
+		args: { _: ["snapshot"] },
+		ctx: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env },
+	});
+	const early = await Promise.race([
+		pendingRead.then(() => "settled" as const),
+		new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 25)),
+	]);
+	assert.equal(early, "pending", "state.get must not expose a snapshot pending rollback");
+
+	release();
+	await assert.rejects(transaction, /paired publication failed/);
+	const result = await pendingRead;
+	const items = [];
+	for await (const item of result.output) items.push(item);
+	assert.deepEqual(items, [{ version: "before" }]);
+	await fsp.rm(tmp, { recursive: true, force: true });
 });
 
 test("state.set stops waiting for a live state lock when its signal is aborted", async () => {

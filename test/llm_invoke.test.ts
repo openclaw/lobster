@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
+import { keyToPath } from "../src/state/store.js";
 
 function streamOf(items: any[]) {
 	return (async function* () {
@@ -209,6 +210,68 @@ test("llm.invoke does not retry schema validation after adapter cancellation", a
 		/adapter cancelled during validation/,
 	);
 	assert.equal(calls, 1, "cancellation after an invalid response must suppress retries");
+});
+
+test("llm.invoke aborts while waiting for its reusable run-state lock", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-llm-state-lock-abort-"));
+	const stateDir = path.join(cacheDir, "state");
+	const stateKey = "blocked-run-state";
+	const lockPath = `${keyToPath(stateDir, stateKey)}.lock`;
+	await fsp.mkdir(lockPath, { recursive: true });
+	await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+	try {
+		const controller = new AbortController();
+		const pending = cmd.run({
+			input: streamOf([]),
+			args: {
+				_: [],
+				provider: "state-lock-abort-test",
+				prompt: "Decide",
+				"state-key": stateKey,
+			},
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+				signal: controller.signal,
+				llmAdapters: {
+					"state-lock-abort-test": {
+						source: "state-lock-abort-test",
+						async invoke() {
+							throw new Error("adapter must not run while the state read is locked");
+						},
+					},
+				},
+			},
+		} as any);
+		const completion = pending.then(
+			() => ({ kind: "success" as const }),
+			(error) => ({ kind: "error" as const, error }),
+		);
+		await new Promise((resolve) => setImmediate(resolve));
+		controller.abort(new Error("LLM state read cancelled"));
+		const early = await Promise.race([
+			completion,
+			new Promise<{ kind: "timeout" }>((resolve) =>
+				setTimeout(() => resolve({ kind: "timeout" }), 75),
+			),
+		]);
+		if (early.kind === "timeout") await fsp.rm(lockPath, { recursive: true, force: true });
+		const settled = early.kind === "timeout" ? await completion : early;
+		assert.notEqual(
+			early.kind,
+			"timeout",
+			"state-key reads must observe cancellation while locked",
+		);
+		assert.equal(settled.kind, "error");
+		if (settled.kind === "error") {
+			assert.match(settled.error?.message ?? "", /LLM state read cancelled/);
+		}
+	} finally {
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
 });
 
 test("llm.invoke does not publish a reusable cache entry when cancellation races cache commit", async () => {

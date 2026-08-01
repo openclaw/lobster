@@ -295,8 +295,18 @@ export async function resumeToolRequest({
 
 	let resumeState;
 	try {
-		resumeState = await loadPipelineResumeState(runtime.env, payload.stateKey);
+		// A pre-aborted resume must still load its safe snapshot so the normal
+		// pre-execution rollback path can preserve that capability for retry.
+		resumeState = await loadPipelineResumeState(
+			runtime.env,
+			payload.stateKey,
+			runtime.signal?.aborted ? undefined : runtime.signal,
+		);
 	} catch (err: any) {
+		// Approval rejection historically reaches the signal-aware deletion path
+		// below. Keep its direct cancellation propagation while other resume modes
+		// retain their structured tool envelope.
+		if (runtime.signal?.aborted && approved === false) throw err;
 		return errorEnvelope("runtime_error", err?.message ?? String(err));
 	}
 

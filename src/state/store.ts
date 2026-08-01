@@ -500,7 +500,7 @@ export async function writeFileAtomicExclusive(
 	}
 }
 
-export async function readStateJson({ env, key }) {
+async function readStateJson({ env, key }) {
 	const stateDir = defaultStateDir(env);
 	const filePath = keyToPath(stateDir, key);
 

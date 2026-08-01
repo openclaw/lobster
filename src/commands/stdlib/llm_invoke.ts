@@ -389,7 +389,7 @@ async function runLlmInvoke({
 	});
 
 	if (stateKey && !forceRefresh) {
-		const stored = await readReusableLlmState(env, stateKey);
+		const stored = await readReusableLlmState(env, stateKey, ctx.signal);
 		const reused = pickReusableState(stored, cacheKey, config.stateType);
 		if (reused) {
 			return {
@@ -937,9 +937,9 @@ async function persistOutputs({
 	});
 }
 
-async function readReusableLlmState(env: any, stateKey: string) {
+async function readReusableLlmState(env: any, stateKey: string, signal?: AbortSignal) {
 	try {
-		return await readStateJsonWithLock({ env, key: stateKey });
+		return await readStateJsonWithLock({ env, key: stateKey, signal });
 	} catch (err: any) {
 		if (isJsonSyntaxError(err)) return null;
 		throw err;

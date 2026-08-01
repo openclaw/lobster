@@ -1,6 +1,4 @@
-import { promises as fsp } from "node:fs";
-
-import { defaultStateDir, keyToPath, writeStateJson } from "../../state/store.js";
+import { readStateJsonWithLock, writeStateJson } from "../../state/store.js";
 
 export const stateGetCommand = {
 	name: "state.get",
@@ -22,20 +20,7 @@ export const stateGetCommand = {
 		const key = args._[0];
 		if (!key) throw new Error("state.get requires a key");
 
-		const stateDir = defaultStateDir(ctx.env);
-		const filePath = keyToPath(stateDir, key);
-
-		let value = null;
-		try {
-			const text = await fsp.readFile(filePath, "utf8");
-			value = JSON.parse(text);
-		} catch (err) {
-			if (err?.code === "ENOENT") {
-				value = null;
-			} else {
-				throw err;
-			}
-		}
+		const value = await readStateJsonWithLock({ env: ctx.env, key, signal: ctx.signal });
 
 		return { output: asStream([value]) };
 	},
