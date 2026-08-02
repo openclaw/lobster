@@ -91,6 +91,219 @@ test("llm.invoke auto-detects OpenClaw provider and normalizes output", async ()
 	}
 });
 
+test("llm.invoke re-invokes the adapter when --temperature changes", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+
+	const requestLog: any[] = [];
+	const server = http.createServer((req, res) => {
+		if (req.method !== "POST" || req.url !== "/invoke") {
+			res.writeHead(404);
+			res.end("nope");
+			return;
+		}
+		let buf = "";
+		req.setEncoding("utf8");
+		req.on("data", (d) => (buf += d));
+		req.on("end", () => {
+			const parsed = JSON.parse(buf || "{}");
+			requestLog.push(parsed);
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					result: {
+						runId: `pi_${requestLog.length}`,
+						model: parsed.model,
+						prompt: parsed.prompt,
+						output: { format: "text", text: `temperature=${parsed.temperature}` },
+					},
+				}),
+			);
+		});
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+	const ctxEnv = {
+		LOBSTER_PI_LLM_ADAPTER_URL: `http://127.0.0.1:${port}`,
+		LOBSTER_CACHE_DIR: cacheDir,
+	};
+
+	try {
+		const runWith = async (temperature: number) => {
+			const result = await cmd.run({
+				input: streamOf([]),
+				args: {
+					_: [],
+					provider: "pi",
+					model: "test-model",
+					prompt: "Sampling parameters matter",
+					"schema-version": "v1",
+					temperature,
+				},
+				ctx: baseCtx(ctxEnv, registry),
+			} as any);
+			return collect(result.output!);
+		};
+
+		const cold = await runWith(0.1);
+		assert.equal(cold[0].source, "pi");
+		assert.equal(requestLog.length, 1);
+		assert.equal(requestLog[0].temperature, 0.1);
+
+		const changed = await runWith(0.9);
+		assert.equal(changed[0].source, "pi");
+		assert.equal(requestLog.length, 2);
+		assert.equal(requestLog[1].temperature, 0.9);
+		assert.notEqual(changed[0].cacheKey, cold[0].cacheKey);
+
+		const replay = await runWith(0.1);
+		assert.equal(replay[0].source, "cache");
+		assert.equal(replay[0].cacheKey, cold[0].cacheKey);
+		assert.equal(requestLog.length, 2);
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
+		await closeServer(server);
+	}
+});
+
+test("llm.invoke re-invokes the adapter when --max-output-tokens changes", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+
+	const requestLog: any[] = [];
+	const server = http.createServer((req, res) => {
+		if (req.method !== "POST" || req.url !== "/invoke") {
+			res.writeHead(404);
+			res.end("nope");
+			return;
+		}
+		let buf = "";
+		req.setEncoding("utf8");
+		req.on("data", (d) => (buf += d));
+		req.on("end", () => {
+			const parsed = JSON.parse(buf || "{}");
+			requestLog.push(parsed);
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					result: {
+						runId: `pi_${requestLog.length}`,
+						output: { format: "text", text: `budget=${parsed.maxOutputTokens}` },
+					},
+				}),
+			);
+		});
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+	const ctxEnv = {
+		LOBSTER_PI_LLM_ADAPTER_URL: `http://127.0.0.1:${port}`,
+		LOBSTER_CACHE_DIR: cacheDir,
+	};
+
+	try {
+		const runWith = async (maxOutputTokens: number) => {
+			const result = await cmd.run({
+				input: streamOf([]),
+				args: {
+					_: [],
+					provider: "pi",
+					model: "test-model",
+					prompt: "Token budget matters",
+					"schema-version": "v1",
+					"max-output-tokens": maxOutputTokens,
+				},
+				ctx: baseCtx(ctxEnv, registry),
+			} as any);
+			return collect(result.output!);
+		};
+
+		const cold = await runWith(64);
+		assert.equal(cold[0].source, "pi");
+		assert.equal(requestLog.length, 1);
+		assert.equal(requestLog[0].maxOutputTokens, 64);
+
+		const changed = await runWith(4096);
+		assert.equal(changed[0].source, "pi");
+		assert.equal(requestLog.length, 2);
+		assert.equal(requestLog[1].maxOutputTokens, 4096);
+		assert.notEqual(changed[0].cacheKey, cold[0].cacheKey);
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
+		await closeServer(server);
+	}
+});
+
+test("llm.invoke keeps its established cache key when sampling parameters are unset", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+
+	const server = http.createServer((req, res) => {
+		if (req.method !== "POST" || req.url !== "/invoke") {
+			res.writeHead(404);
+			res.end("nope");
+			return;
+		}
+		req.resume();
+		req.on("end", () => {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					result: { runId: "pi_1", output: { format: "text", text: "ok" } },
+				}),
+			);
+		});
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+
+	try {
+		const result = await cmd.run({
+			input: streamOf([]),
+			args: {
+				_: [],
+				provider: "pi",
+				model: "test-model",
+				prompt: "Cache key stability",
+				"schema-version": "v1",
+			},
+			ctx: baseCtx(
+				{
+					LOBSTER_PI_LLM_ADAPTER_URL: `http://127.0.0.1:${port}`,
+					LOBSTER_CACHE_DIR: cacheDir,
+				},
+				registry,
+			),
+		} as any);
+
+		const items = await collect(result.output!);
+		// Pinned so cache entries written before sampling parameters were hashed keep
+		// resolving. If this value moves, every existing on-disk cache entry is orphaned.
+		assert.equal(
+			items[0].cacheKey,
+			"b137c449800e145fa522ea974ad5d9d079a4dad96263f991ab3b2a9efe262912",
+		);
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
+		await closeServer(server);
+	}
+});
+
 test("llm.invoke uses Pi adapter over local HTTP bridge", async () => {
 	const registry = createDefaultRegistry();
 	const cmd = registry.get("llm.invoke");

@@ -389,6 +389,8 @@ async function runLlmInvoke({
 		schemaVersion,
 		artifactHashes,
 		outputSchema: userOutputSchema,
+		temperature,
+		maxOutputTokens,
 	});
 
 	if (stateKey && !forceRefresh) {
@@ -834,6 +836,8 @@ function computeCacheKey({
 	schemaVersion,
 	artifactHashes,
 	outputSchema,
+	temperature,
+	maxOutputTokens,
 }: {
 	provider: SupportedProvider;
 	prompt: string;
@@ -841,8 +845,10 @@ function computeCacheKey({
 	schemaVersion: string;
 	artifactHashes: string[];
 	outputSchema: any;
+	temperature: number | null;
+	maxOutputTokens: number | null;
 }) {
-	const payload = {
+	const payload: Record<string, any> = {
 		provider,
 		prompt,
 		model: model || `${provider}-default`,
@@ -850,6 +856,11 @@ function computeCacheKey({
 		artifactHashes,
 		outputSchema: outputSchema ?? null,
 	};
+	// Guard on the same predicates that decide whether each parameter is sent to
+	// the adapter, so keys for invocations that omit them stay byte-identical and
+	// caches written by earlier releases remain valid.
+	if (Number.isFinite(temperature ?? NaN)) payload.temperature = Number(temperature);
+	if (Number.isFinite(maxOutputTokens ?? NaN)) payload.maxOutputTokens = Number(maxOutputTokens);
 	return createHash("sha256").update(stableStringify(payload)).digest("hex");
 }
 
