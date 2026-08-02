@@ -488,7 +488,7 @@ async function runLlmInvoke({
 		}
 
 		lastValidationErrors = collectAjvErrors(validator.errors);
-		if (attempt > maxValidationRetries + 1) {
+		if (attempt > maxValidationRetries) {
 			throw new Error(
 				`${config.name} output failed schema validation: ${lastValidationErrors.join("; ")}`,
 			);
