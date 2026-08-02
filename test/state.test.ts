@@ -14,6 +14,7 @@ import {
 	diffAndStore,
 	keyToPath,
 	withFileLock,
+	ensureDirectory,
 	writeStateJson,
 	readStateJsonWithLock as readStateJson,
 	writeFileAtomic,
@@ -1025,4 +1026,16 @@ test("SDK writeState removes temp files when replacement fails", async () => {
 	await assert.rejects(() => writeState("sdk-state", { ok: true }, ctx));
 	const leftovers = (await fsp.readdir(tmp)).filter((f) => f.includes(".tmp"));
 	assert.deepEqual(leftovers, []);
+});
+
+test("ensureDirectory creates missing parent directories", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-ensure-dir-"));
+	const nested = path.join(tmp, "alpha", "beta", "gamma");
+
+	await ensureDirectory(nested);
+	assert.equal((await fsp.stat(nested)).isDirectory(), true);
+
+	// Re-running must stay a no-op once the whole chain already exists.
+	await ensureDirectory(nested);
+	assert.equal((await fsp.stat(nested)).isDirectory(), true);
 });

@@ -118,9 +118,22 @@ async function syncDirectory(dir: string) {
 	}
 }
 
+/**
+ * On Windows, `fs.mkdir(..., { recursive: true })` reports the first created
+ * directory as an extended-length path (`\\?\C:\...`). `path.resolve` keeps
+ * that prefix, so such a path never compares equal to the plain drive path we
+ * walk toward and `path.relative` between the two yields an absolute path.
+ * Strip the prefix so both ends of the chain share one root form.
+ */
+function stripExtendedLengthPrefix(target: string) {
+	if (target.startsWith("\\\\?\\UNC\\")) return `\\\\${target.slice(8)}`;
+	if (target.startsWith("\\\\?\\")) return target.slice(4);
+	return target;
+}
+
 async function syncCreatedDirectoryChain(firstCreated: string, finalDir: string) {
-	const final = path.resolve(finalDir);
-	let current = path.resolve(firstCreated);
+	const final = path.resolve(stripExtendedLengthPrefix(finalDir));
+	let current = path.resolve(stripExtendedLengthPrefix(firstCreated));
 
 	await syncDirectory(path.dirname(current));
 	while (current !== final) {
