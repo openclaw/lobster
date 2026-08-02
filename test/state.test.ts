@@ -15,6 +15,7 @@ import {
 	keyToPath,
 	withFileLock,
 	ensureDirectory,
+	stripExtendedLengthPrefix,
 	writeStateJson,
 	readStateJsonWithLock as readStateJson,
 	writeFileAtomic,
@@ -1038,4 +1039,19 @@ test("ensureDirectory creates missing parent directories", async () => {
 	// Re-running must stay a no-op once the whole chain already exists.
 	await ensureDirectory(nested);
 	assert.equal((await fsp.stat(nested)).isDirectory(), true);
+});
+
+test("stripExtendedLengthPrefix maps only namespaces with a plain equivalent", () => {
+	assert.equal(stripExtendedLengthPrefix("\\\\?\\C:\\lobster\\state"), "C:\\lobster\\state");
+	assert.equal(
+		stripExtendedLengthPrefix("\\\\?\\UNC\\server\\share\\state"),
+		"\\\\server\\share\\state",
+	);
+
+	// A device namespace has no drive-letter form, so stripping it would leave a
+	// relative path and break an explicitly configured state directory.
+	const volume = "\\\\?\\Volume{6f4c2b1a-0000-0000-0000-000000000000}\\lobster\\state";
+	assert.equal(stripExtendedLengthPrefix(volume), volume);
+
+	assert.equal(stripExtendedLengthPrefix("/tmp/lobster/state"), "/tmp/lobster/state");
 });
