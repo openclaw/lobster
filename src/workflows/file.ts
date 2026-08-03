@@ -2246,12 +2246,20 @@ function trackStepCost(costTracker: CostTracker, stepId: string, result: Workflo
 	const items = Array.isArray(json) ? json : [json];
 	for (const item of items) {
 		if (!item || typeof item !== "object") continue;
-		const usage = (item as Record<string, unknown>).usage;
+		const record = item as Record<string, unknown>;
+		// A replayed result carries the usage of the call that produced it, so counting it
+		// again charges a run for tokens no provider was asked to spend.
+		if (isReplayedResult(record)) continue;
+		const usage = record.usage;
 		if (!usage || typeof usage !== "object") continue;
-		const modelValue = (item as Record<string, unknown>).model;
+		const modelValue = record.model;
 		const model = typeof modelValue === "string" ? modelValue : null;
 		costTracker.recordUsage(stepId, model, usage as Record<string, unknown>);
 	}
+}
+
+function isReplayedResult(item: Record<string, unknown>) {
+	return item.source === "cache" || item.source === "run_state";
 }
 
 function parseJson(stdout: string) {

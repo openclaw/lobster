@@ -281,3 +281,71 @@ test("CostTracker escapes unknown model ids in warnings", () => {
 	assert.equal(stderr.output().includes("\u2028"), false);
 	assert.equal(stderr.output().includes("\u2029"), false);
 });
+
+// The step payloads are written to files rather than passed with `node -e`, because
+// `cmd /s /c` hands the inline quoting to node verbatim and the JSON never reaches stdout.
+async function emitJsonCommand(payload: unknown) {
+	const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-emit-"));
+	const filePath = path.join(dir, "emit.mjs");
+	const literal = JSON.stringify(JSON.stringify(payload));
+	await fsp.writeFile(filePath, `process.stdout.write(${literal});\n`, "utf8");
+	return `node ${filePath}`;
+}
+
+function invocationItem(source: string) {
+	return {
+		model: "gpt-4o",
+		source,
+		cached: source !== "http",
+		usage: { inputTokens: 1000, outputTokens: 500 },
+	};
+}
+
+test("workflow cost tracking bills a replayed result only once", async () => {
+	const { result } = await runWorkflow({
+		steps: [
+			{ id: "live", command: await emitJsonCommand(invocationItem("http")) },
+			{ id: "from-cache", command: await emitJsonCommand(invocationItem("cache")) },
+			{ id: "from-run-state", command: await emitJsonCommand(invocationItem("run_state")) },
+		],
+	});
+
+	assert.equal(result.status, "ok");
+	assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+	assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+	assert.equal(result._meta?.cost?.estimatedCostUsd, 0.0075);
+	assert.deepEqual(
+		result._meta?.cost?.byStep.map((step) => step.stepId),
+		["live"],
+	);
+});
+
+test("cost_limit stop is not tripped by replayed results", async () => {
+	const { result } = await runWorkflow({
+		cost_limit: { max_usd: 0.01, action: "stop" },
+		steps: [
+			{ id: "live", command: await emitJsonCommand(invocationItem("http")) },
+			{ id: "from-cache", command: await emitJsonCommand(invocationItem("cache")) },
+			{ id: "from-run-state", command: await emitJsonCommand(invocationItem("run_state")) },
+			{ id: "after", command: await emitJsonCommand({ done: true }) },
+		],
+	});
+
+	assert.equal(result.status, "ok");
+	assert.equal(result._meta?.cost?.estimatedCostUsd, 0.0075);
+});
+
+test("cost_limit stop still trips on repeated live calls", async () => {
+	const live = await emitJsonCommand(invocationItem("http"));
+	await assert.rejects(
+		() =>
+			runWorkflow({
+				cost_limit: { max_usd: 0.01, action: "stop" },
+				steps: [
+					{ id: "live", command: live },
+					{ id: "live-again", command: live },
+				],
+			}).then((x) => x.result),
+		/Cost limit exceeded/,
+	);
+});
