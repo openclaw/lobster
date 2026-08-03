@@ -167,6 +167,93 @@ test("llm.invoke uses Pi adapter over local HTTP bridge", async () => {
 	}
 });
 
+test(
+	"llm.invoke aborts the in-flight adapter request when ctx.signal aborts",
+	{ timeout: 20_000 },
+	async () => {
+		const registry = createDefaultRegistry();
+		const cmd = registry.get("llm.invoke");
+		assert.ok(cmd);
+
+		const stalled = createStalledAdapter();
+		await stalled.listen();
+
+		const controller = new AbortController();
+		try {
+			const pending = cmd.run({
+				input: streamOf([]),
+				args: { _: [], provider: "http", prompt: "Summarize", "disable-cache": true },
+				ctx: {
+					...baseCtx(
+						{ LOBSTER_LLM_ADAPTER_URL: `http://127.0.0.1:${stalled.port}/invoke` },
+						registry,
+					),
+					signal: controller.signal,
+				},
+			} as any);
+
+			await stalled.requestReceived;
+			controller.abort();
+
+			const err = await pending.then(
+				() => null,
+				(e: any) => e,
+			);
+			assert.ok(err, "llm.invoke should reject once the run is aborted");
+			assert.ok(
+				err.name === "AbortError" || err.code === "ABORT_ERR",
+				`expected an abort error, got ${err.name}: ${err.message}`,
+			);
+			// The abort must stay recognizable; wrapping it hides the cancellation from
+			// workflow timeout and abort handling.
+			assert.doesNotMatch(String(err.message), /request failed/);
+			await stalled.requestClosed;
+		} finally {
+			controller.abort();
+			await stalled.close();
+		}
+	},
+);
+
+test("llm.invoke does not call the adapter when ctx.signal is already aborted", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+
+	let requests = 0;
+	const server = http.createServer((req, res) => {
+		requests += 1;
+		req.resume();
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(JSON.stringify({ ok: true, result: { runId: "r1", output: { data: {} } } }));
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+
+	try {
+		const controller = new AbortController();
+		controller.abort();
+
+		await assert.rejects(
+			() =>
+				cmd.run({
+					input: streamOf([]),
+					args: { _: [], provider: "http", prompt: "Summarize", "disable-cache": true },
+					ctx: {
+						...baseCtx({ LOBSTER_LLM_ADAPTER_URL: `http://127.0.0.1:${port}/invoke` }, registry),
+						signal: controller.signal,
+					},
+				} as any),
+			(err: any) => err?.name === "AbortError" || err?.code === "ABORT_ERR",
+		);
+		assert.equal(requests, 0, "an already-cancelled run must not reach the adapter");
+	} finally {
+		await closeServer(server);
+	}
+});
+
 function baseCtx(envOverrides: Record<string, string>, registry?: any) {
 	return {
 		stdin: process.stdin,
@@ -176,6 +263,44 @@ function baseCtx(envOverrides: Record<string, string>, registry?: any) {
 		registry: registry ?? null,
 		mode: "tool",
 		render: { json() {}, lines() {} },
+	};
+}
+
+// An adapter that accepts the request and never answers, so the only thing that
+// can end the call is the caller cancelling it.
+function createStalledAdapter() {
+	const sockets = new Set<import("node:net").Socket>();
+	let markReceived = () => {};
+	let markClosed = () => {};
+	const requestReceived = new Promise<void>((resolve) => (markReceived = resolve));
+	const requestClosed = new Promise<void>((resolve) => (markClosed = resolve));
+
+	const server = http.createServer((req, res) => {
+		req.resume();
+		req.on("end", () => {
+			res.on("close", () => markClosed());
+			markReceived();
+		});
+	});
+	server.on("connection", (socket) => {
+		sockets.add(socket);
+		socket.on("close", () => sockets.delete(socket));
+	});
+
+	return {
+		requestReceived,
+		requestClosed,
+		port: 0,
+		async listen() {
+			await new Promise<void>((resolve) => server.listen(0, resolve));
+			const addr = server.address();
+			this.port = typeof addr === "object" && addr ? addr.port : 0;
+		},
+		async close() {
+			for (const socket of sockets) socket.destroy();
+			if (!server.listening) return;
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		},
 	};
 }
 

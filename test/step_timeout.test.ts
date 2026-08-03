@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { promises as fsp } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -13,6 +14,7 @@ async function runWorkflow(
 	opts?: {
 		signal?: AbortSignal;
 		dryRun?: boolean;
+		env?: Record<string, string>;
 	},
 ) {
 	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-step-timeout-"));
@@ -30,7 +32,7 @@ async function runWorkflow(
 			stdin: process.stdin,
 			stdout: process.stdout,
 			stderr,
-			env: { ...process.env, LOBSTER_STATE_DIR: stateDir },
+			env: { ...process.env, LOBSTER_STATE_DIR: stateDir, ...opts?.env },
 			mode: "tool",
 			signal: opts?.signal,
 			dryRun: opts?.dryRun,
@@ -186,6 +188,51 @@ test("external abort still propagates when timeout is configured", async () => {
 			),
 		(err: any) => err?.name === "AbortError" || err?.code === "ABORT_ERR",
 	);
+});
+
+test("timed-out llm.invoke step stops waiting for the adapter", { timeout: 20_000 }, async () => {
+	const sockets = new Set<import("node:net").Socket>();
+	let markClosed = () => {};
+	const requestClosed = new Promise<void>((resolve) => (markClosed = resolve));
+
+	// An adapter that accepts the request and never answers.
+	const server = http.createServer((req, res) => {
+		req.resume();
+		req.on("end", () => res.on("close", () => markClosed()));
+	});
+	server.on("connection", (socket) => {
+		sockets.add(socket);
+		socket.on("close", () => sockets.delete(socket));
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+
+	try {
+		const started = Date.now();
+		await assert.rejects(
+			() =>
+				runWorkflow(
+					{
+						steps: [
+							{
+								id: "ask",
+								pipeline: 'llm.invoke --prompt "Summarize" --disable-cache',
+								timeout_ms: 300,
+							},
+						],
+					},
+					{ env: { LOBSTER_LLM_ADAPTER_URL: `http://127.0.0.1:${port}/invoke` } },
+				),
+			/timed out after 300ms/,
+		);
+		assert.ok(Date.now() - started < 10_000, "the step must not wait for the adapter");
+		await requestClosed;
+	} finally {
+		for (const socket of sockets) socket.destroy();
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
 });
 
 test("dry-run renders timeout and on_error details", async () => {

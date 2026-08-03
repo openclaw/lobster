@@ -326,6 +326,7 @@ async function runLlmInvoke({
 	config: CommandConfig;
 }) {
 	const env = ctx.env ?? process.env;
+	const signal: AbortSignal | undefined = ctx?.signal;
 	const provider = resolveProvider(args, env, config.defaultProvider, ctx);
 	const adapter = resolveAdapter({ provider, env, args, config, ctx });
 	const prompt = extractPrompt(args);
@@ -426,6 +427,7 @@ async function runLlmInvoke({
 	let lastValidationErrors: string[] = [];
 
 	while (true) {
+		signal?.throwIfAborted();
 		attempt += 1;
 		if (attempt > 1) {
 			payload.retryContext = {
@@ -440,6 +442,9 @@ async function runLlmInvoke({
 		try {
 			responseEnvelope = await adapter.invoke({ env, args, payload });
 		} catch (err: any) {
+			// Cancellation is the caller's error, not an adapter failure: rethrow it
+			// unwrapped so workflow timeout and abort handling still recognizes it.
+			if (signal?.aborted) throw err;
 			throw new Error(`${config.name} request failed: ${err?.message ?? String(err)}`);
 		}
 
@@ -541,6 +546,7 @@ function resolveAdapter({
 	config: CommandConfig;
 	ctx: any;
 }): Adapter {
+	const signal: AbortSignal | undefined = ctx?.signal;
 	const direct = getDirectAdapter(ctx, provider);
 	if (direct) {
 		const invoke = typeof direct === "function" ? direct : direct.invoke;
@@ -564,7 +570,7 @@ function resolveAdapter({
 			provider,
 			source: config.sourceForProvider?.(provider) ?? "openclaw",
 			async invoke({ payload }) {
-				return invokeOpenClawAdapter({ endpoint, token, payload });
+				return invokeOpenClawAdapter({ endpoint, token, payload, signal });
 			},
 		};
 	}
@@ -579,7 +585,12 @@ function resolveAdapter({
 			provider,
 			source: config.sourceForProvider?.(provider) ?? "pi",
 			async invoke({ payload }) {
-				return invokeHttpAdapter({ endpoint: buildAdapterEndpoint(adapterUrl), token, payload });
+				return invokeHttpAdapter({
+					endpoint: buildAdapterEndpoint(adapterUrl),
+					token,
+					payload,
+					signal,
+				});
 			},
 		};
 	}
@@ -593,7 +604,12 @@ function resolveAdapter({
 		provider,
 		source: config.sourceForProvider?.(provider) ?? "http",
 		async invoke({ payload }) {
-			return invokeHttpAdapter({ endpoint: buildAdapterEndpoint(adapterUrl), token, payload });
+			return invokeHttpAdapter({
+				endpoint: buildAdapterEndpoint(adapterUrl),
+				token,
+				payload,
+				signal,
+			});
 		},
 	};
 }
@@ -621,13 +637,16 @@ async function invokeOpenClawAdapter({
 	endpoint,
 	token,
 	payload,
+	signal,
 }: {
 	endpoint: URL;
 	token: string;
 	payload: any;
+	signal?: AbortSignal | undefined;
 }) {
 	const res = await fetch(endpoint, {
 		method: "POST",
+		...(signal ? { signal } : null),
 		headers: {
 			"content-type": "application/json",
 			...(token ? { authorization: `Bearer ${token}` } : null),
@@ -670,13 +689,16 @@ async function invokeHttpAdapter({
 	endpoint,
 	token,
 	payload,
+	signal,
 }: {
 	endpoint: URL;
 	token: string;
 	payload: any;
+	signal?: AbortSignal | undefined;
 }) {
 	const res = await fetch(endpoint, {
 		method: "POST",
+		...(signal ? { signal } : null),
 		headers: {
 			"content-type": "application/json",
 			...(token ? { authorization: `Bearer ${token}` } : null),
