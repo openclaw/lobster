@@ -298,6 +298,9 @@ function liveItem(source = "http") {
 		model: "gpt-4o",
 		source,
 		cached: source !== "http",
+		cacheKey: "b3f1c0",
+		status: "completed",
+		createdAt: "2026-08-03T00:00:00.000Z",
 		usage: { inputTokens: 1000, outputTokens: 500 },
 	};
 }
@@ -368,5 +371,48 @@ test("workflow cost tracking bills a live call from an adapter named like a repl
 	assert.deepEqual(
 		result._meta?.cost?.byStep.map((step) => step.stepId),
 		["live-cache-provider", "live-run-state-provider"],
+	);
+});
+
+test("workflow cost tracking bills command output that only looks replayed", async () => {
+	const { result } = await runWorkflow({
+		steps: [
+			{
+				id: "reporting-command",
+				command: await emitJsonCommand({
+					replayed: true,
+					model: "gpt-4o",
+					usage: { inputTokens: 1000, outputTokens: 500 },
+				}),
+			},
+		],
+	});
+
+	assert.equal(result.status, "ok");
+	assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+	assert.deepEqual(
+		result._meta?.cost?.byStep.map((step) => step.stepId),
+		["reporting-command"],
+	);
+});
+
+test("cost_limit stop cannot be bypassed by a replay marker outside the LLM contract", async () => {
+	const live = await emitJsonCommand(liveItem());
+	const looksReplayed = await emitJsonCommand({
+		...liveItem(),
+		replayed: true,
+		kind: "report.emit",
+	});
+
+	await assert.rejects(
+		() =>
+			runWorkflow({
+				cost_limit: { max_usd: 0.01, action: "stop" },
+				steps: [
+					{ id: "live", command: live },
+					{ id: "looks-replayed", command: looksReplayed },
+				],
+			}).then((x) => x.result),
+		/Cost limit exceeded/,
 	);
 });

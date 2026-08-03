@@ -154,6 +154,29 @@ type NormalizedInvocationItem = {
 	attemptCount: number;
 };
 
+// The item kinds Lobster's own LLM commands emit. Workflow cost accounting trusts the
+// replay marker only on these.
+const REPLAYABLE_LLM_ITEM_KINDS = new Set(["llm.invoke", "llm_task.invoke"]);
+
+/**
+ * True only for a normalized item this module re-emitted from run state or the response
+ * cache. A replayed item is exempt from workflow cost accounting, so the marker alone is
+ * not enough: arbitrary command output carrying `replayed` beside a real `usage` object
+ * still describes spend that a provider was asked for.
+ */
+export function isReplayedLlmItem(value: unknown): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	if (record.replayed !== true || record.cached !== true) return false;
+	if (typeof record.kind !== "string" || !REPLAYABLE_LLM_ITEM_KINDS.has(record.kind)) return false;
+	return (
+		typeof record.cacheKey === "string" &&
+		typeof record.status === "string" &&
+		typeof record.createdAt === "string" &&
+		typeof record.source === "string"
+	);
+}
+
 type CacheEntry = {
 	items: NormalizedInvocationItem[];
 	cacheKey: string;

@@ -18,6 +18,7 @@ import {
 import { readLineFromStream } from "../read_line.js";
 import { resolveInlineShellCommand } from "../shell.js";
 import { compileCached } from "../validation.js";
+import { isReplayedLlmItem } from "../commands/stdlib/llm_invoke.js";
 import { CostTracker } from "../core/cost_tracker.js";
 import type { CostLimit, CostSummary } from "../core/cost_tracker.js";
 import { withRetry, resolveRetryConfig } from "../core/retry.js";
@@ -2247,9 +2248,10 @@ function trackStepCost(costTracker: CostTracker, stepId: string, result: Workflo
 	for (const item of items) {
 		if (!item || typeof item !== "object") continue;
 		const record = item as Record<string, unknown>;
-		// A replayed result carries the usage of the call that produced it, so counting it
-		// again charges a run for tokens no provider was asked to spend.
-		if (record.replayed === true) continue;
+		// A replayed LLM result carries the usage of the call that produced it, so counting
+		// it again charges a run for tokens no provider was asked to spend. Only Lobster's own
+		// replay contract is exempt; any other command output stays billed.
+		if (isReplayedLlmItem(record)) continue;
 		const usage = record.usage;
 		if (!usage || typeof usage !== "object") continue;
 		const modelValue = record.model;
