@@ -327,6 +327,9 @@ async function runLlmInvoke({
 }) {
 	const env = ctx.env ?? process.env;
 	const signal: AbortSignal | undefined = ctx?.signal;
+	// Run-state and cache hits return before any adapter call, so a cancelled run
+	// would otherwise still finish as a success.
+	signal?.throwIfAborted();
 	const provider = resolveProvider(args, env, config.defaultProvider, ctx);
 	const adapter = resolveAdapter({ provider, env, args, config, ctx });
 	const prompt = extractPrompt(args);
