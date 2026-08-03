@@ -2249,17 +2249,13 @@ function trackStepCost(costTracker: CostTracker, stepId: string, result: Workflo
 		const record = item as Record<string, unknown>;
 		// A replayed result carries the usage of the call that produced it, so counting it
 		// again charges a run for tokens no provider was asked to spend.
-		if (isReplayedResult(record)) continue;
+		if (record.replayed === true) continue;
 		const usage = record.usage;
 		if (!usage || typeof usage !== "object") continue;
 		const modelValue = record.model;
 		const model = typeof modelValue === "string" ? modelValue : null;
 		costTracker.recordUsage(stepId, model, usage as Record<string, unknown>);
 	}
-}
-
-function isReplayedResult(item: Record<string, unknown>) {
-	return item.source === "cache" || item.source === "run_state";
 }
 
 function parseJson(stdout: string) {

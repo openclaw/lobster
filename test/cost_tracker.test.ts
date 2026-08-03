@@ -292,8 +292,9 @@ async function emitJsonCommand(payload: unknown) {
 	return `node ${filePath}`;
 }
 
-function invocationItem(source: string) {
+function liveItem(source = "http") {
 	return {
+		kind: "llm.invoke",
 		model: "gpt-4o",
 		source,
 		cached: source !== "http",
@@ -301,12 +302,16 @@ function invocationItem(source: string) {
 	};
 }
 
+function replayedItem(source: "cache" | "run_state") {
+	return { ...liveItem(source), replayed: true };
+}
+
 test("workflow cost tracking bills a replayed result only once", async () => {
 	const { result } = await runWorkflow({
 		steps: [
-			{ id: "live", command: await emitJsonCommand(invocationItem("http")) },
-			{ id: "from-cache", command: await emitJsonCommand(invocationItem("cache")) },
-			{ id: "from-run-state", command: await emitJsonCommand(invocationItem("run_state")) },
+			{ id: "live", command: await emitJsonCommand(liveItem()) },
+			{ id: "from-cache", command: await emitJsonCommand(replayedItem("cache")) },
+			{ id: "from-run-state", command: await emitJsonCommand(replayedItem("run_state")) },
 		],
 	});
 
@@ -324,9 +329,9 @@ test("cost_limit stop is not tripped by replayed results", async () => {
 	const { result } = await runWorkflow({
 		cost_limit: { max_usd: 0.01, action: "stop" },
 		steps: [
-			{ id: "live", command: await emitJsonCommand(invocationItem("http")) },
-			{ id: "from-cache", command: await emitJsonCommand(invocationItem("cache")) },
-			{ id: "from-run-state", command: await emitJsonCommand(invocationItem("run_state")) },
+			{ id: "live", command: await emitJsonCommand(liveItem()) },
+			{ id: "from-cache", command: await emitJsonCommand(replayedItem("cache")) },
+			{ id: "from-run-state", command: await emitJsonCommand(replayedItem("run_state")) },
 			{ id: "after", command: await emitJsonCommand({ done: true }) },
 		],
 	});
@@ -336,7 +341,7 @@ test("cost_limit stop is not tripped by replayed results", async () => {
 });
 
 test("cost_limit stop still trips on repeated live calls", async () => {
-	const live = await emitJsonCommand(invocationItem("http"));
+	const live = await emitJsonCommand(liveItem());
 	await assert.rejects(
 		() =>
 			runWorkflow({
@@ -347,5 +352,21 @@ test("cost_limit stop still trips on repeated live calls", async () => {
 				],
 			}).then((x) => x.result),
 		/Cost limit exceeded/,
+	);
+});
+
+test("workflow cost tracking bills a live call from an adapter named like a replay source", async () => {
+	const { result } = await runWorkflow({
+		steps: [
+			{ id: "live-cache-provider", command: await emitJsonCommand(liveItem("cache")) },
+			{ id: "live-run-state-provider", command: await emitJsonCommand(liveItem("run_state")) },
+		],
+	});
+
+	assert.equal(result.status, "ok");
+	assert.equal(result._meta?.cost?.totalInputTokens, 2000);
+	assert.deepEqual(
+		result._meta?.cost?.byStep.map((step) => step.stepId),
+		["live-cache-provider", "live-run-state-provider"],
 	);
 });

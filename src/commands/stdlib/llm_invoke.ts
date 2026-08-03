@@ -148,6 +148,9 @@ type NormalizedInvocationItem = {
 	createdAt: string;
 	source: string;
 	cached: boolean;
+	// Set only when a stored item is re-emitted, so consumers can tell a replay from a live
+	// call. `source` cannot carry that: a direct adapter's source is its provider name.
+	replayed?: boolean;
 	attemptCount: number;
 };
 
@@ -390,7 +393,12 @@ async function runLlmInvoke({
 		if (reused) {
 			return {
 				output: streamOf(
-					reused.items.map((item) => ({ ...item, source: "run_state", cached: true })),
+					reused.items.map((item) => ({
+						...item,
+						source: "run_state",
+						cached: true,
+						replayed: true,
+					})),
 				),
 			};
 		}
@@ -400,7 +408,9 @@ async function runLlmInvoke({
 		const cache = await readCacheEntry(env, cacheKey, config.cacheNamespace);
 		if (cache) {
 			return {
-				output: streamOf(cache.items.map((item) => ({ ...item, source: "cache", cached: true }))),
+				output: streamOf(
+					cache.items.map((item) => ({ ...item, source: "cache", cached: true, replayed: true })),
+				),
 			};
 		}
 	}
