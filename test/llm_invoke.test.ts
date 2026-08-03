@@ -215,6 +215,52 @@ test(
 	},
 );
 
+test(
+	"llm.invoke stops waiting for a direct adapter that ignores ctx.signal",
+	{ timeout: 20_000 },
+	async () => {
+		const registry = createDefaultRegistry();
+		const cmd = registry.get("llm.invoke");
+		assert.ok(cmd);
+
+		let invoked = () => {};
+		const adapterInvoked = new Promise<void>((resolve) => (invoked = resolve));
+		// A supported ctx.llmAdapters adapter that never resolves and never looks
+		// at ctx.signal.
+		const stubborn = {
+			invoke() {
+				invoked();
+				return new Promise<never>(() => {});
+			},
+		};
+
+		const controller = new AbortController();
+		const pending = cmd.run({
+			input: streamOf([]),
+			args: { _: [], provider: "stubborn", prompt: "Summarize", "disable-cache": true },
+			ctx: {
+				...baseCtx({}, registry),
+				llmAdapters: { stubborn },
+				signal: controller.signal,
+			},
+		} as any);
+
+		await adapterInvoked;
+		controller.abort();
+
+		const err = await pending.then(
+			() => null,
+			(e: any) => e,
+		);
+		assert.ok(err, "llm.invoke should reject once the run is aborted");
+		assert.ok(
+			err.name === "AbortError" || err.code === "ABORT_ERR",
+			`expected an abort error, got ${err.name}: ${err.message}`,
+		);
+		assert.doesNotMatch(String(err.message), /request failed/);
+	},
+);
+
 test("llm.invoke does not call the adapter when ctx.signal is already aborted", async () => {
 	const registry = createDefaultRegistry();
 	const cmd = registry.get("llm.invoke");

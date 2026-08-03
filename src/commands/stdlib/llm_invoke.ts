@@ -440,7 +440,7 @@ async function runLlmInvoke({
 
 		let responseEnvelope: LlmResponseEnvelope;
 		try {
-			responseEnvelope = await adapter.invoke({ env, args, payload });
+			responseEnvelope = await abortable(adapter.invoke({ env, args, payload }), signal);
 		} catch (err: any) {
 			// Cancellation is the caller's error, not an adapter failure: rethrow it
 			// unwrapped so workflow timeout and abort handling still recognizes it.
@@ -499,6 +499,27 @@ async function runLlmInvoke({
 			);
 		}
 	}
+}
+
+/**
+ * Reject as soon as the run is cancelled instead of waiting for `promise`.
+ * HTTP adapters are cancelled at the socket, but an injected `ctx.llmAdapters`
+ * adapter may ignore `ctx.signal` entirely; without this, one of those keeps a
+ * timed-out step waiting for as long as it likes.
+ */
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return promise;
+	return new Promise<T>((resolve, reject) => {
+		const abortError = () =>
+			signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+		if (signal.aborted) {
+			reject(abortError());
+			return;
+		}
+		const onAbort = () => reject(abortError());
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+	});
 }
 
 function resolveProvider(
