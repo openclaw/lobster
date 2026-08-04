@@ -708,3 +708,96 @@ test("workflow cost tracking bills a projected step that prints the full replay 
 		["forged-picked", "forged-picked-rendered"],
 	);
 });
+
+// A command that fails the first time it runs and succeeds afterwards, so a step carrying it
+// takes exactly two attempts under `retry`.
+async function failsOnceCommand() {
+	const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-flaky-"));
+	const marker = JSON.stringify(path.join(dir, "attempted"));
+	const filePath = path.join(dir, "flaky.mjs");
+	await fsp.writeFile(
+		filePath,
+		`import fs from "node:fs";\n` +
+			`if (fs.existsSync(${marker})) process.stdout.write("ok");\n` +
+			`else { fs.writeFileSync(${marker}, "1"); process.exit(1); }\n`,
+		"utf8",
+	);
+	return `node ${filePath}`;
+}
+
+// `llm.invoke` stores the live answer before it returns, and a step's cost is recorded only
+// once the step succeeds. So when a later part of a retried step fails, the provider has
+// already been paid and the retry replays that answer: the replay is the only place the spend
+// can still be recorded, and exempting it would report $0 for a call that really happened.
+test("workflow cost tracking bills a replay standing in for a retried step's live call", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const flaky = await failsOnceCommand();
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "invoke-then-fail",
+						retry: { max: 2, delay_ms: 1 },
+						parallel: {
+							branches: [
+								{ id: "invoke", pipeline: "llm.invoke --model gpt-4o --prompt Summarize" },
+								{ id: "flaky", command: flaky },
+							],
+						},
+					},
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["invoke"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+// The spend a retried step recovers is real money, so it has to reach `cost_limit` too.
+test("cost_limit stop counts the live call a retried step's replay stands in for", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const flaky = await failsOnceCommand();
+	try {
+		await assert.rejects(
+			() =>
+				runWorkflow(
+					{
+						cost_limit: { max_usd: 0.001, action: "stop" },
+						steps: [
+							{
+								id: "invoke-then-fail",
+								retry: { max: 2, delay_ms: 1 },
+								parallel: {
+									branches: [
+										{ id: "invoke", pipeline: "llm.invoke --model gpt-4o --prompt Summarize" },
+										{ id: "flaky", command: flaky },
+									],
+								},
+							},
+							{ id: "after", command: "echo done" },
+						],
+					},
+					{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+				).then((x) => x.result),
+			/Cost limit exceeded/,
+		);
+		assert.equal(provider.requests(), 1);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});

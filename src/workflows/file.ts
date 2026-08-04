@@ -18,7 +18,7 @@ import {
 import { readLineFromStream } from "../read_line.js";
 import { resolveInlineShellCommand } from "../shell.js";
 import { compileCached } from "../validation.js";
-import { isReplayedLlmItem, isReplayedLlmUsage } from "../commands/stdlib/llm_invoke.js";
+import { claimUnbilledLiveInvocation, llmProvenanceOf } from "../commands/stdlib/llm_invoke.js";
 import { CostTracker } from "../core/cost_tracker.js";
 import type { CostLimit, CostSummary } from "../core/cost_tracker.js";
 import { withRetry, resolveRetryConfig } from "../core/retry.js";
@@ -2272,16 +2272,24 @@ function trackStepCost(costTracker: CostTracker, stepId: string, result: Workflo
 	for (const item of items) {
 		if (!item || typeof item !== "object") continue;
 		const record = item as Record<string, unknown>;
-		// A replayed LLM result carries the usage of the call that produced it, so counting
-		// it again charges a run for tokens no provider was asked to spend. The exemption keys
-		// off provenance the LLM commands attach in-process, not off fields in the JSON: a step
-		// that prints a replay-shaped object stays billed, so `cost_limit` cannot be evaded.
-		if (isReplayedLlmItem(record)) continue;
 		const usage = record.usage;
 		if (!usage || typeof usage !== "object") continue;
-		// A projection can drop the item's own mark while carrying its usage record across, so
-		// the record is checked too. Both marks are symbol keys built in this process.
-		if (isReplayedLlmUsage(usage)) continue;
+		// Provenance the LLM commands attach in-process, never a field in the JSON: a step that
+		// prints a replay-shaped object stays billed, so `cost_limit` cannot be evaded. A
+		// projection can drop the item's own mark while carrying its usage record across, so the
+		// record is read too — both marks are symbol keys built in this process.
+		const provenance = llmProvenanceOf(record) ?? llmProvenanceOf(usage);
+		if (provenance) {
+			// Claiming settles the charge for the live call this item belongs to, and succeeds
+			// for exactly one of the live item and its replays.
+			const claimed = claimUnbilledLiveInvocation(provenance.cacheKey);
+			// A replay carries the usage of the call that produced it, so counting it again
+			// charges a run for tokens no provider was asked to spend. It is billed only when
+			// the call it replays is still unpaid for: a step is costed once it succeeds, so a
+			// step that failed after its LLM call and was retried leaves its real spend riding
+			// on the replay the retry produced.
+			if (provenance.replayed && !claimed) continue;
+		}
 		const modelValue = record.model;
 		const model = typeof modelValue === "string" ? modelValue : null;
 		costTracker.recordUsage(stepId, model, usage as Record<string, unknown>);

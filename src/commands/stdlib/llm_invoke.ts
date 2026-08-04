@@ -154,54 +154,89 @@ type NormalizedInvocationItem = {
 	attemptCount: number;
 };
 
-// Provenance for an item this module re-emitted from run state or the response cache.
+// Provenance for an item this module emitted: which stored answer it belongs to, and whether
+// it came from a provider call or from run state / the response cache.
 // A symbol key cannot come out of `JSON.parse`, so the JSON a workflow step reads from a
-// command's stdout can never carry it: only objects built here, in this process, are exempt
-// from workflow cost accounting.
-const REPLAYED_LLM_ITEM = Symbol("lobster.llm.replayed");
+// command's stdout can never carry it: only objects built here, in this process, take part in
+// the replay exemption in workflow cost accounting.
+const LLM_PROVENANCE = Symbol("lobster.llm.provenance");
+
+export type LlmProvenance = { cacheKey: string; replayed: boolean };
 
 /**
- * Stamps replay provenance on a value this module is re-emitting. The property is
- * enumerable so a downstream `{ ...value }` keeps it, and `JSON.stringify` ignores symbol
- * keys, so serialized output is unchanged.
+ * Stamps provenance on a value this module is emitting. The property is enumerable so a
+ * downstream `{ ...value }` keeps it, and `JSON.stringify` ignores symbol keys, so serialized
+ * output — including what is written to the cache — is unchanged.
  */
-function markReplayed<T extends object>(value: T): T {
-	return Object.defineProperty(value, REPLAYED_LLM_ITEM, {
-		value: true,
+function markProvenance<T extends object>(value: T, provenance: LlmProvenance): T {
+	return Object.defineProperty(value, LLM_PROVENANCE, {
+		value: provenance,
 		enumerable: true,
 		configurable: true,
 	});
 }
 
 /**
- * Marks an item this module is re-emitting, and its usage record with it. A projection such
- * as `pick model,usage` builds a new object out of named fields, so the item's own mark does
- * not reach the consumer — but the usage record crosses by reference, and the usage record is
- * what gets billed. Marking both means the exemption survives an in-process projection
- * without the consumer having to recognize every command that can build one.
+ * Marks an item this module is emitting, and its usage record with it. A projection such as
+ * `pick model,usage` builds a new object out of named fields, so the item's own mark does not
+ * reach the consumer — but the usage record crosses by reference, and the usage record is what
+ * gets billed. Marking both means provenance survives an in-process projection without the
+ * consumer having to recognize every command that can build one.
  */
-function markReplayedLlmItem(item: NormalizedInvocationItem): NormalizedInvocationItem {
-	if (item.usage && typeof item.usage === "object") markReplayed(item.usage as object);
-	return markReplayed(item);
+function markLlmItem(
+	item: NormalizedInvocationItem,
+	provenance: LlmProvenance,
+): NormalizedInvocationItem {
+	if (item.usage && typeof item.usage === "object") {
+		markProvenance(item.usage as object, provenance);
+	}
+	return markProvenance(item, provenance);
 }
 
 /**
- * True only for an item this module replayed in the current process. The public `replayed`
- * field is deliberately not consulted: any command can print it beside a real `usage`
- * object, and honoring that would drop real spend from `_meta.cost` and `cost_limit`.
+ * The provenance of an item — or of a usage record — this module produced in the current
+ * process, and null for anything else. The public `replayed` field is deliberately not
+ * consulted: any command can print it beside a real `usage` object, and honoring that would
+ * drop real spend from `_meta.cost` and `cost_limit`.
  */
-export function isReplayedLlmItem(value: unknown): boolean {
-	if (!value || typeof value !== "object") return false;
-	return (value as Record<symbol, unknown>)[REPLAYED_LLM_ITEM] === true;
+export function llmProvenanceOf(value: unknown): LlmProvenance | null {
+	if (!value || typeof value !== "object") return null;
+	const provenance = (value as Record<symbol, unknown>)[LLM_PROVENANCE];
+	if (!provenance || typeof provenance !== "object") return null;
+	const { cacheKey, replayed } = provenance as LlmProvenance;
+	if (typeof cacheKey !== "string" || typeof replayed !== "boolean") return null;
+	return { cacheKey, replayed };
+}
+
+// Live calls this process paid for that nothing has billed yet. A workflow records a step's
+// cost only once the step succeeds, so a step that fails *after* its LLM call — and is then
+// retried — never bills the live item. The retry replays the stored answer, and that replay is
+// the only carrier left for a charge that really happened, so it is billed there instead.
+// Keyed by cache key: that is what a live item and every replay of it share across the JSON
+// round trip through run state and the response cache.
+const UNBILLED_LIVE_INVOCATIONS = new Set<string>();
+// An invocation nothing ever bills — a run that failed outright, or a call made outside a
+// workflow — leaves its key behind, so the oldest are dropped to keep the ledger bounded in a
+// long-lived process.
+const MAX_UNBILLED_LIVE_INVOCATIONS = 256;
+
+function recordLiveInvocation(cacheKey: string) {
+	if (!cacheKey) return;
+	UNBILLED_LIVE_INVOCATIONS.delete(cacheKey);
+	UNBILLED_LIVE_INVOCATIONS.add(cacheKey);
+	for (const oldest of UNBILLED_LIVE_INVOCATIONS) {
+		if (UNBILLED_LIVE_INVOCATIONS.size <= MAX_UNBILLED_LIVE_INVOCATIONS) break;
+		UNBILLED_LIVE_INVOCATIONS.delete(oldest);
+	}
 }
 
 /**
- * True only for a usage record this module replayed in the current process, whatever object
- * is carrying it now. `JSON.parse` cannot produce the key, so a usage record a workflow step
- * printed is never exempt.
+ * Claims the outstanding charge for a live call this process made, returning true for the one
+ * caller that must bill it. A live item and every replay of it settle the same charge, so a
+ * provider call is billed exactly once however many steps go on to re-emit its answer.
  */
-export function isReplayedLlmUsage(value: unknown): boolean {
-	return isReplayedLlmItem(value);
+export function claimUnbilledLiveInvocation(cacheKey: string): boolean {
+	return UNBILLED_LIVE_INVOCATIONS.delete(cacheKey);
 }
 
 type CacheEntry = {
@@ -441,10 +476,11 @@ async function runLlmInvoke({
 		const stored = await readReusableLlmState(env, stateKey);
 		const reused = pickReusableState(stored, cacheKey, config.stateType);
 		if (reused) {
+			const replay: LlmProvenance = { cacheKey, replayed: true };
 			return {
 				output: streamOf(
 					reused.items.map((item) =>
-						markReplayedLlmItem({ ...item, source: "run_state", cached: true, replayed: true }),
+						markLlmItem({ ...item, source: "run_state", cached: true, replayed: true }, replay),
 					),
 				),
 			};
@@ -454,10 +490,11 @@ async function runLlmInvoke({
 	if (!disableCache && !forceRefresh) {
 		const cache = await readCacheEntry(env, cacheKey, config.cacheNamespace);
 		if (cache) {
+			const replay: LlmProvenance = { cacheKey, replayed: true };
 			return {
 				output: streamOf(
 					cache.items.map((item) =>
-						markReplayedLlmItem({ ...item, source: "cache", cached: true, replayed: true }),
+						markLlmItem({ ...item, source: "cache", cached: true, replayed: true }, replay),
 					),
 				),
 			};
@@ -520,6 +557,8 @@ async function runLlmInvoke({
 			attempt,
 			itemKind: config.itemKind,
 		});
+		const live: LlmProvenance = { cacheKey, replayed: false };
+		for (const item of normalized) markLlmItem(item, live);
 
 		if (!validator) {
 			await persistOutputs({
@@ -530,6 +569,7 @@ async function runLlmInvoke({
 				stateType: config.stateType,
 			});
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
+			recordLiveInvocation(cacheKey);
 			return { output: streamOf(normalized) };
 		}
 
@@ -543,6 +583,7 @@ async function runLlmInvoke({
 				stateType: config.stateType,
 			});
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
+			recordLiveInvocation(cacheKey);
 			return { output: streamOf(normalized) };
 		}
 
