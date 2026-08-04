@@ -45,6 +45,7 @@ export async function runPipeline({
 
 	let stream = input ?? [];
 	let rendered = false;
+	const renderedItems: unknown[] = [];
 	let halted = false;
 	let haltedAt = null;
 	let pipelineOutputStarted = false;
@@ -88,7 +89,7 @@ export async function runPipeline({
 		const ctx = {
 			...baseCtx,
 			stdout: stageStdout,
-			render: createJsonRenderer(stageStdout),
+			render: createRecordingJsonRenderer(stageStdout, renderedItems),
 		};
 		const stageCtx = {
 			...ctx,
@@ -172,7 +173,7 @@ export async function runPipeline({
 	}
 	assertRequestInputResumeConsumed(requestInputResume);
 
-	return { items, rendered, halted, haltedAt };
+	return { items, rendered, renderedItems, halted, haltedAt };
 
 	function haltForInputRequest(err: unknown) {
 		if (!(err instanceof InputRequestSuspension)) return false;
@@ -214,7 +215,7 @@ function dryRunPipeline({
 	lines.push("");
 	stderr.write(lines.join("\n"));
 	// Return rendered:true so the CLI does not print an empty JSON array to stdout.
-	return { items: [], rendered: true, halted: false, haltedAt: null };
+	return { items: [], rendered: true, renderedItems: [], halted: false, haltedAt: null };
 }
 
 function formatStageArgs(args: Record<string, unknown>) {
@@ -230,6 +231,25 @@ function formatStageArgs(args: Record<string, unknown>) {
 		}
 	}
 	return parts.join(", ");
+}
+
+/**
+ * Wraps the stage renderer so the pipeline keeps the objects a renderer was handed. A renderer
+ * writes them to stdout and returns no items, so a caller that reads the pipeline back from that
+ * text only ever sees what JSON can express. Provenance a consumer must not take from the text
+ * itself — whether an LLM result was replayed rather than paid for — lives on these originals.
+ * They stay in this process and are never written or serialized.
+ */
+function createRecordingJsonRenderer(stdout: any, collected: unknown[]) {
+	const renderer = createJsonRenderer(stdout);
+	return {
+		...renderer,
+		json(items: unknown) {
+			if (Array.isArray(items)) collected.push(...items);
+			else collected.push(items);
+			return renderer.json(items);
+		},
+	};
 }
 
 function streamFromItems(items: unknown[]) {

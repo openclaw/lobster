@@ -2240,8 +2240,32 @@ function parseBoolLike(value: unknown): boolean | undefined {
 	return undefined;
 }
 
+// The objects a step's pipeline produced, held apart from the serializable step result.
+// A rendered pipeline such as `llm.invoke | json` prints its items and returns an empty
+// stream, so the step's `json` is parsed back out of stdout and only carries what JSON can
+// express. A symbol key survives neither `JSON.stringify` nor `JSON.parse`, so this holds
+// exactly the items this process made, and no workflow input can put one here.
+const PIPELINE_SOURCE_ITEMS = Symbol("lobster.workflow.pipelineSourceItems");
+
+function attachPipelineSourceItems(result: WorkflowStepResult, items: unknown[]) {
+	Object.defineProperty(result, PIPELINE_SOURCE_ITEMS, {
+		value: items,
+		enumerable: false,
+		configurable: true,
+	});
+	return result;
+}
+
+function pipelineSourceItems(result: WorkflowStepResult): unknown[] | undefined {
+	const items = (result as Record<symbol, unknown>)[PIPELINE_SOURCE_ITEMS];
+	return Array.isArray(items) ? items : undefined;
+}
+
 function trackStepCost(costTracker: CostTracker, stepId: string, result: WorkflowStepResult) {
-	const json = result.json;
+	// Bill the items the pipeline produced rather than the JSON re-read from its stdout: a
+	// renderer serializes them, and replay provenance does not survive that round trip. Steps
+	// without a pipeline (shell commands) have no such items and are read from `json` as before.
+	const json = pipelineSourceItems(result) ?? result.json;
 	if (!json || typeof json !== "object") return;
 
 	const items = Array.isArray(json) ? json : [json];
@@ -2960,11 +2984,16 @@ async function runPipelineStep({
 			: result.items
 		: parseJson(renderedStdout);
 
-	return {
+	const stepResult: WorkflowStepResult = {
 		id: stepId,
 		stdout: normalizedStdout,
 		json,
-	} satisfies WorkflowStepResult;
+	};
+	// Only when a renderer consumed the pipeline: otherwise `json` already is those items.
+	if (!result.items.length && result.renderedItems.length) {
+		attachPipelineSourceItems(stepResult, result.renderedItems);
+	}
+	return stepResult;
 }
 
 function createSyntheticStepResult(stepId: string, value: unknown): WorkflowStepResult {

@@ -505,3 +505,129 @@ test("cost_limit stop cannot be bypassed by a step that prints the full replay s
 		/Cost limit exceeded/,
 	);
 });
+
+// `... | json` is a supported step shape: the renderer prints the items and returns an empty
+// stream, so the workflow reads the step's JSON back from stdout. Accounting must still tell a
+// replay from a live call there, and must still bill output that only looks replayed.
+async function emitJsonPath(payload: unknown) {
+	const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-emit-"));
+	const filePath = path.join(dir, "emit.mjs");
+	const literal = JSON.stringify(JSON.stringify(payload));
+	await fsp.writeFile(filePath, `process.stdout.write(${literal});\n`, "utf8");
+	return filePath.split(path.sep).join("/");
+}
+
+test("workflow cost tracking bills a cached llm.invoke replay only once behind a renderer", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const step = "llm.invoke --model gpt-4o --prompt Summarize | json";
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{ id: "live", pipeline: step },
+					{ id: "from-cache", pipeline: step },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["live"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow cost tracking bills a run-state llm.invoke replay only once behind a renderer", async () => {
+	const provider = await startFakeProvider();
+	const step = "llm.invoke --disable-cache --model gpt-4o --prompt Summarize | json";
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{ id: "live", pipeline: step },
+					{ id: "from-run-state", pipeline: step },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_RUN_STATE_KEY: "cost-tracker-rendered-replay" },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["live"],
+		);
+	} finally {
+		await provider.close();
+	}
+});
+
+test("cost_limit stop is not tripped by a replayed llm.invoke behind a renderer", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const step = "llm.invoke --model gpt-4o --prompt Summarize | json";
+	try {
+		const { result } = await runWorkflow(
+			{
+				cost_limit: { max_usd: 0.01, action: "stop" },
+				steps: [
+					{ id: "live", pipeline: step },
+					{ id: "from-cache", pipeline: step },
+					{ id: "after", command: "echo done" },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(result._meta?.cost?.estimatedCostUsd, 0.0075);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow cost tracking bills a rendered step that prints the full replay shape", async () => {
+	const forgedCache = await emitJsonPath(forgedReplayItem("cache"));
+	const forgedRunState = await emitJsonPath(forgedReplayItem("run_state"));
+	const { result } = await runWorkflow({
+		steps: [
+			{ id: "forged-cache", pipeline: `exec --json=true node ${forgedCache} | json` },
+			{ id: "forged-run-state", pipeline: `exec --json=true node ${forgedRunState} | json` },
+		],
+	});
+
+	assert.equal(result.status, "ok");
+	assert.equal(result._meta?.cost?.totalInputTokens, 2000);
+	assert.deepEqual(
+		result._meta?.cost?.byStep.map((entry) => entry.stepId),
+		["forged-cache", "forged-run-state"],
+	);
+});
+
+test("cost_limit stop cannot be bypassed by a rendered step that prints the replay shape", async () => {
+	const live = await emitJsonCommand(liveItem());
+	const forged = await emitJsonPath(forgedReplayItem());
+
+	await assert.rejects(
+		() =>
+			runWorkflow({
+				cost_limit: { max_usd: 0.01, action: "stop" },
+				steps: [
+					{ id: "live", command: live },
+					{ id: "forged-replay", pipeline: `exec --json=true node ${forged} | json` },
+				],
+			}).then((x) => x.result),
+		/Cost limit exceeded/,
+	);
+});
