@@ -271,6 +271,8 @@ Built-in providers today:
 - `pi` via `LOBSTER_PI_LLM_ADAPTER_URL` (typically supplied by the Pi extension)
 - `http` via `LOBSTER_LLM_ADAPTER_URL`
 
+A host embedding Lobster can supply its own adapters through `ctx.llmAdapters`. Step `timeout_ms` and workflow cancellation reach an adapter as `ctx.signal`: Lobster stops waiting as soon as that signal aborts, so the step fails or retries on time either way, but it cannot cancel work an adapter has already started. An injected adapter should observe `ctx.signal` and abort its own request — otherwise a timed-out step can leave a model call running, and billed, in the background.
+
 Workflow `_meta.cost` and `cost_limit` use a static pricing table plus optional overrides from `LOBSTER_LLM_PRICING_JSON`, for example `{"my-model":{"input":1.0,"output":2.0}}` in USD per million tokens. Unknown or missing model IDs still record token counts with zero estimated cost, but Lobster warns on stderr so stale or missing pricing does not fail silently.
 
 `llm_task.invoke` remains available as a backward-compatible alias for the OpenClaw provider.
