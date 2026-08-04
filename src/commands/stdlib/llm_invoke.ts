@@ -217,7 +217,13 @@ export function llmProvenanceOf(value: unknown): LlmProvenance | null {
 export type LlmSpendLedger = {
 	record: (cacheKey: string) => void;
 	claim: (cacheKey: string) => boolean;
+	outstanding: () => LlmOutstandingCharge[];
+	restore: (charges: readonly LlmOutstandingCharge[] | undefined) => void;
 };
+
+// A charge a run has opened and not yet billed. Carried in the run's own resume state so a
+// workflow that pauses mid-pipeline keeps it, and only that workflow can settle it.
+export type LlmOutstandingCharge = { cacheKey: string; count: number };
 
 // A call nothing ever bills — a step that failed outright — leaves its key behind, so the
 // oldest are dropped to keep a long run's ledger bounded.
@@ -255,6 +261,25 @@ export function createLlmSpendLedger(): LlmSpendLedger {
 			if (outstanding === 1) unbilled.delete(cacheKey);
 			else unbilled.set(cacheKey, outstanding - 1);
 			return true;
+		},
+		outstanding() {
+			return [...unbilled].map(([cacheKey, count]) => ({ cacheKey, count }));
+		},
+		/**
+		 * Reopens charges a paused run had not billed. A pipeline can suspend mid-step — at an
+		 * `ask` gate — after its LLM call has been paid for but before the step succeeded, so
+		 * without this the charge would exist in no run: the paused one never billed it, and the
+		 * resumed one would exempt the replay that stands in for it.
+		 */
+		restore(charges: readonly LlmOutstandingCharge[] | undefined) {
+			if (!Array.isArray(charges)) return;
+			for (const charge of charges) {
+				if (!charge || typeof charge !== "object") continue;
+				if (typeof charge.cacheKey !== "string" || !charge.cacheKey) continue;
+				const count = Math.floor(Number(charge.count ?? 0));
+				if (!Number.isFinite(count) || count < 1) continue;
+				for (let i = 0; i < count; i++) this.record(charge.cacheKey);
+			}
 		},
 	};
 }

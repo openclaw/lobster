@@ -976,3 +976,67 @@ test("workflow cost tracking carries spend across an approval resume", async () 
 		await fsp.rm(tmpDir, { recursive: true, force: true });
 	}
 });
+
+// A pipeline can pause *between* paying for a call and billing it: `llm.invoke | ask` in tool
+// mode suspends after the model answered, and `ask` consumes the items, so the usage never
+// reaches accounting. The charge exists only as an outstanding entry in the paused run's
+// ledger — if that does not travel with the resume state, the replay a later step produces is
+// exempt and the call is billed nowhere.
+test("workflow cost tracking carries an unbilled call across a pipeline input resume", async () => {
+	const provider = await startFakeProvider();
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-input-"));
+	const cacheDir = path.join(tmpDir, "cache");
+	const stateDir = path.join(tmpDir, "state");
+	await fsp.mkdir(cacheDir, { recursive: true });
+	const invoke = "llm.invoke --model gpt-4o --prompt Summarize";
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{ id: "ask-after-invoke", pipeline: `${invoke} | ask --prompt Continue?` },
+				{ id: "replay", pipeline: invoke },
+			],
+		}),
+		"utf8",
+	);
+
+	const env = {
+		...process.env,
+		LOBSTER_STATE_DIR: stateDir,
+		LOBSTER_CACHE_DIR: cacheDir,
+		OPENCLAW_URL: provider.url,
+	};
+	const ctx = () => ({
+		stdin: process.stdin,
+		stdout: process.stdout,
+		stderr: new PassThrough(),
+		env,
+		mode: "tool" as const,
+		registry: createDefaultRegistry(),
+	});
+
+	try {
+		const paused = await runWorkflowFile({ filePath, ctx: ctx() });
+		assert.equal(paused.status, "needs_input");
+		const token = paused.requiresInput?.resumeToken;
+		assert.equal(typeof token, "string");
+
+		const resumed = await runWorkflowFile({
+			filePath,
+			ctx: ctx(),
+			resume: decodeToken(token as string),
+			response: { decision: "approve" },
+		});
+
+		assert.equal(resumed.status, "ok");
+		assert.equal(provider.requests(), 1);
+		// `ask` swallowed the item that carried the usage, so the replay in the next step is
+		// the only carrier left for a call the provider really answered.
+		assert.equal(resumed._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(resumed._meta?.cost?.totalOutputTokens, 500);
+	} finally {
+		await provider.close();
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
+});

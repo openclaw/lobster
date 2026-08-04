@@ -19,7 +19,7 @@ import { readLineFromStream } from "../read_line.js";
 import { resolveInlineShellCommand } from "../shell.js";
 import { compileCached } from "../validation.js";
 import { createLlmSpendLedger, llmProvenanceOf } from "../commands/stdlib/llm_invoke.js";
-import type { LlmSpendLedger } from "../commands/stdlib/llm_invoke.js";
+import type { LlmOutstandingCharge, LlmSpendLedger } from "../commands/stdlib/llm_invoke.js";
 import { CostTracker } from "../core/cost_tracker.js";
 import type { CostLimit, CostSummary } from "../core/cost_tracker.js";
 import { withRetry, resolveRetryConfig } from "../core/retry.js";
@@ -205,6 +205,8 @@ type WorkflowResumeState = {
 	pipelineInput?: WorkflowPipelineInputResumeState;
 	// What the paused run had spent, so the run that resumes it does not start from zero.
 	cost?: CostSummary;
+	// Calls it had paid for but not yet billed — a pipeline can pause between the two.
+	llmSpend?: LlmOutstandingCharge[];
 	createdAt: string;
 };
 
@@ -865,6 +867,12 @@ export async function runWorkflowFile({
 		// One ledger per run: a live call this run paid for can be recovered from the replay a
 		// retry produced, and a cache entry written by any other run has nothing to claim here.
 		const llmSpendLedger = createLlmSpendLedger();
+		// A pipeline that paused at an `ask` gate had already paid for its LLM call without
+		// billing it, so the charge travels in the same resume state and reopens here. It is the
+		// same run continuing, which is why this cannot hand a charge to an unrelated one.
+		llmSpendLedger.restore(
+			resumeState && "llmSpend" in resumeState ? resumeState.llmSpend : undefined,
+		);
 		let lastStepId: string | null =
 			resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
 
@@ -904,6 +912,9 @@ export async function runWorkflowFile({
 						// envelope may contain a truncated preview to stay within size limits.
 						inputSubject: subject,
 						...(costTracker.hasUsage() ? { cost: costTracker.getSummary() } : null),
+						...(llmSpendLedger.outstanding().length
+							? { llmSpend: llmSpendLedger.outstanding() }
+							: null),
 						createdAt: new Date().toISOString(),
 					});
 
@@ -1371,6 +1382,9 @@ export async function runWorkflowFile({
 						inputSubject: err.request.subject,
 						pipelineInput: err.pipelineInput,
 						...(costTracker.hasUsage() ? { cost: costTracker.getSummary() } : null),
+						...(llmSpendLedger.outstanding().length
+							? { llmSpend: llmSpendLedger.outstanding() }
+							: null),
 						createdAt: new Date().toISOString(),
 					});
 
@@ -1460,6 +1474,9 @@ export async function runWorkflowFile({
 						approvalStepId: step.id,
 						approvalIdentity,
 						...(costTracker.hasUsage() ? { cost: costTracker.getSummary() } : null),
+						...(llmSpendLedger.outstanding().length
+							? { llmSpend: llmSpendLedger.outstanding() }
+							: null),
 						createdAt: new Date().toISOString(),
 					});
 
