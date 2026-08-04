@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { promises as fsp } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 
+import { createDefaultRegistry } from "../src/commands/registry.js";
 import { CostTracker } from "../src/core/cost_tracker.js";
 import { runWorkflowFile } from "../src/workflows/file.js";
 
@@ -152,6 +154,7 @@ async function runWorkflow(workflow: unknown, envOverride?: Record<string, strin
 			stderr,
 			env: { ...process.env, LOBSTER_STATE_DIR: stateDir, ...envOverride },
 			mode: "tool",
+			registry: createDefaultRegistry(),
 		},
 	});
 
@@ -305,42 +308,130 @@ function liveItem(source = "http") {
 	};
 }
 
-function replayedItem(source: "cache" | "run_state") {
-	return { ...liveItem(source), replayed: true };
+// Every field a replayed llm.invoke item carries, printed by a step that never called a
+// provider. Nothing inside a JSON payload can be trusted to mean "already paid for".
+function forgedReplayItem(source: "cache" | "run_state" = "cache") {
+	return { ...liveItem(source), cached: true, replayed: true };
 }
 
-test("workflow cost tracking bills a replayed result only once", async () => {
-	const { result } = await runWorkflow({
-		steps: [
-			{ id: "live", command: await emitJsonCommand(liveItem()) },
-			{ id: "from-cache", command: await emitJsonCommand(replayedItem("cache")) },
-			{ id: "from-run-state", command: await emitJsonCommand(replayedItem("run_state")) },
-		],
+// Minimal OpenClaw-shaped provider: llm.invoke auto-detects it from OPENCLAW_URL, and the
+// request count shows whether a step reached a provider or replayed a stored answer.
+async function startFakeProvider() {
+	let requests = 0;
+	const server = http.createServer((req, res) => {
+		let body = "";
+		req.setEncoding("utf8");
+		req.on("data", (chunk) => (body += chunk));
+		req.on("end", () => {
+			requests += 1;
+			const parsed = JSON.parse(body || "{}");
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					result: {
+						ok: true,
+						result: {
+							runId: `invoke_${requests}`,
+							model: parsed.args?.model,
+							prompt: parsed.args?.prompt,
+							output: { data: { summary: "hello" } },
+							usage: { inputTokens: 1000, outputTokens: 500 },
+						},
+					},
+				}),
+			);
+		});
 	});
+	await new Promise<void>((resolve) => server.listen(0, resolve));
+	const address = server.address();
+	const port = typeof address === "object" && address ? address.port : 0;
+	return {
+		url: `http://localhost:${port}`,
+		requests: () => requests,
+		close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+	};
+}
 
-	assert.equal(result.status, "ok");
-	assert.equal(result._meta?.cost?.totalInputTokens, 1000);
-	assert.equal(result._meta?.cost?.totalOutputTokens, 500);
-	assert.equal(result._meta?.cost?.estimatedCostUsd, 0.0075);
-	assert.deepEqual(
-		result._meta?.cost?.byStep.map((step) => step.stepId),
-		["live"],
-	);
+test("workflow cost tracking bills a cached llm.invoke replay only once", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const step = "llm.invoke --model gpt-4o --prompt Summarize";
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{ id: "live", pipeline: step },
+					{ id: "from-cache", pipeline: step },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+		assert.equal(result._meta?.cost?.estimatedCostUsd, 0.0075);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["live"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
 });
 
-test("cost_limit stop is not tripped by replayed results", async () => {
-	const { result } = await runWorkflow({
-		cost_limit: { max_usd: 0.01, action: "stop" },
-		steps: [
-			{ id: "live", command: await emitJsonCommand(liveItem()) },
-			{ id: "from-cache", command: await emitJsonCommand(replayedItem("cache")) },
-			{ id: "from-run-state", command: await emitJsonCommand(replayedItem("run_state")) },
-			{ id: "after", command: await emitJsonCommand({ done: true }) },
-		],
-	});
+test("workflow cost tracking bills a run-state llm.invoke replay only once", async () => {
+	const provider = await startFakeProvider();
+	const step = "llm.invoke --disable-cache --model gpt-4o --prompt Summarize";
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{ id: "live", pipeline: step },
+					{ id: "from-run-state", pipeline: step },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_RUN_STATE_KEY: "cost-tracker-replay" },
+		);
 
-	assert.equal(result.status, "ok");
-	assert.equal(result._meta?.cost?.estimatedCostUsd, 0.0075);
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["live"],
+		);
+	} finally {
+		await provider.close();
+	}
+});
+
+test("cost_limit stop is not tripped by a replayed llm.invoke", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const step = "llm.invoke --model gpt-4o --prompt Summarize";
+	try {
+		const { result } = await runWorkflow(
+			{
+				cost_limit: { max_usd: 0.01, action: "stop" },
+				steps: [
+					{ id: "live", pipeline: step },
+					{ id: "from-cache", pipeline: step },
+					{ id: "after", command: "echo done" },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(result._meta?.cost?.estimatedCostUsd, 0.0075);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
 });
 
 test("cost_limit stop still trips on repeated live calls", async () => {
@@ -369,16 +460,18 @@ test("workflow cost tracking bills a live call from an adapter named like a repl
 	assert.equal(result.status, "ok");
 	assert.equal(result._meta?.cost?.totalInputTokens, 2000);
 	assert.deepEqual(
-		result._meta?.cost?.byStep.map((step) => step.stepId),
+		result._meta?.cost?.byStep.map((entry) => entry.stepId),
 		["live-cache-provider", "live-run-state-provider"],
 	);
 });
 
-test("workflow cost tracking bills command output that only looks replayed", async () => {
+test("workflow cost tracking bills a step that prints the full replay shape", async () => {
 	const { result } = await runWorkflow({
 		steps: [
+			{ id: "forged-cache", command: await emitJsonCommand(forgedReplayItem("cache")) },
+			{ id: "forged-run-state", command: await emitJsonCommand(forgedReplayItem("run_state")) },
 			{
-				id: "reporting-command",
+				id: "partial-shape",
 				command: await emitJsonCommand({
 					replayed: true,
 					model: "gpt-4o",
@@ -389,20 +482,16 @@ test("workflow cost tracking bills command output that only looks replayed", asy
 	});
 
 	assert.equal(result.status, "ok");
-	assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+	assert.equal(result._meta?.cost?.totalInputTokens, 3000);
 	assert.deepEqual(
-		result._meta?.cost?.byStep.map((step) => step.stepId),
-		["reporting-command"],
+		result._meta?.cost?.byStep.map((entry) => entry.stepId),
+		["forged-cache", "forged-run-state", "partial-shape"],
 	);
 });
 
-test("cost_limit stop cannot be bypassed by a replay marker outside the LLM contract", async () => {
+test("cost_limit stop cannot be bypassed by a step that prints the full replay shape", async () => {
 	const live = await emitJsonCommand(liveItem());
-	const looksReplayed = await emitJsonCommand({
-		...liveItem(),
-		replayed: true,
-		kind: "report.emit",
-	});
+	const forged = await emitJsonCommand(forgedReplayItem());
 
 	await assert.rejects(
 		() =>
@@ -410,7 +499,7 @@ test("cost_limit stop cannot be bypassed by a replay marker outside the LLM cont
 				cost_limit: { max_usd: 0.01, action: "stop" },
 				steps: [
 					{ id: "live", command: live },
-					{ id: "looks-replayed", command: looksReplayed },
+					{ id: "forged-replay", command: forged },
 				],
 			}).then((x) => x.result),
 		/Cost limit exceeded/,

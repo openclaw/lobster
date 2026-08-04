@@ -2249,8 +2249,9 @@ function trackStepCost(costTracker: CostTracker, stepId: string, result: Workflo
 		if (!item || typeof item !== "object") continue;
 		const record = item as Record<string, unknown>;
 		// A replayed LLM result carries the usage of the call that produced it, so counting
-		// it again charges a run for tokens no provider was asked to spend. Only Lobster's own
-		// replay contract is exempt; any other command output stays billed.
+		// it again charges a run for tokens no provider was asked to spend. The exemption keys
+		// off provenance the LLM commands attach in-process, not off fields in the JSON: a step
+		// that prints a replay-shaped object stays billed, so `cost_limit` cannot be evaded.
 		if (isReplayedLlmItem(record)) continue;
 		const usage = record.usage;
 		if (!usage || typeof usage !== "object") continue;

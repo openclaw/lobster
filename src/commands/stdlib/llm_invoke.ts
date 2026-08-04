@@ -154,27 +154,33 @@ type NormalizedInvocationItem = {
 	attemptCount: number;
 };
 
-// The item kinds Lobster's own LLM commands emit. Workflow cost accounting trusts the
-// replay marker only on these.
-const REPLAYABLE_LLM_ITEM_KINDS = new Set(["llm.invoke", "llm_task.invoke"]);
+// Provenance for an item this module re-emitted from run state or the response cache.
+// A symbol key cannot come out of `JSON.parse`, so the JSON a workflow step reads from a
+// command's stdout can never carry it: only objects built here, in this process, are exempt
+// from workflow cost accounting.
+const REPLAYED_LLM_ITEM = Symbol("lobster.llm.replayed");
 
 /**
- * True only for a normalized item this module re-emitted from run state or the response
- * cache. A replayed item is exempt from workflow cost accounting, so the marker alone is
- * not enough: arbitrary command output carrying `replayed` beside a real `usage` object
- * still describes spend that a provider was asked for.
+ * Stamps replay provenance on an item this module is re-emitting. The property is
+ * enumerable so a downstream `{ ...item }` keeps it, and `JSON.stringify` ignores symbol
+ * keys, so serialized output is unchanged.
+ */
+function markReplayedLlmItem(item: NormalizedInvocationItem): NormalizedInvocationItem {
+	return Object.defineProperty(item, REPLAYED_LLM_ITEM, {
+		value: true,
+		enumerable: true,
+		configurable: true,
+	});
+}
+
+/**
+ * True only for an item this module replayed in the current process. The public `replayed`
+ * field is deliberately not consulted: any command can print it beside a real `usage`
+ * object, and honoring that would drop real spend from `_meta.cost` and `cost_limit`.
  */
 export function isReplayedLlmItem(value: unknown): boolean {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const record = value as Record<string, unknown>;
-	if (record.replayed !== true || record.cached !== true) return false;
-	if (typeof record.kind !== "string" || !REPLAYABLE_LLM_ITEM_KINDS.has(record.kind)) return false;
-	return (
-		typeof record.cacheKey === "string" &&
-		typeof record.status === "string" &&
-		typeof record.createdAt === "string" &&
-		typeof record.source === "string"
-	);
+	if (!value || typeof value !== "object") return false;
+	return (value as Record<symbol, unknown>)[REPLAYED_LLM_ITEM] === true;
 }
 
 type CacheEntry = {
@@ -416,12 +422,9 @@ async function runLlmInvoke({
 		if (reused) {
 			return {
 				output: streamOf(
-					reused.items.map((item) => ({
-						...item,
-						source: "run_state",
-						cached: true,
-						replayed: true,
-					})),
+					reused.items.map((item) =>
+						markReplayedLlmItem({ ...item, source: "run_state", cached: true, replayed: true }),
+					),
 				),
 			};
 		}
@@ -432,7 +435,9 @@ async function runLlmInvoke({
 		if (cache) {
 			return {
 				output: streamOf(
-					cache.items.map((item) => ({ ...item, source: "cache", cached: true, replayed: true })),
+					cache.items.map((item) =>
+						markReplayedLlmItem({ ...item, source: "cache", cached: true, replayed: true }),
+					),
 				),
 			};
 		}
