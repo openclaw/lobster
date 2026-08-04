@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import http from "node:http";
 import { promises as fsp } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
-import { keyToPath } from "../src/state/store.js";
+import { keyToPath, stableStringify } from "../src/state/store.js";
 
 function streamOf(items: any[]) {
 	return (async function* () {
@@ -244,25 +245,52 @@ test("llm.invoke re-invokes the adapter when --max-output-tokens changes", async
 	}
 });
 
-test("llm.invoke keeps its established cache key when sampling parameters are unset", async () => {
+test("llm.invoke does not replay a cache entry written before sampling was keyed", async () => {
 	const registry = createDefaultRegistry();
 	const cmd = registry.get("llm.invoke");
 	assert.ok(cmd);
 	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+	const args = {
+		_: [],
+		provider: "pi",
+		model: "test-model",
+		prompt: "Cache key stability",
+		"schema-version": "v1",
+	};
 
+	// The identity earlier releases hashed: sampling parameters were absent from the payload,
+	// so an answer sampled at temperature 0.9 was stored under the same key a request that
+	// omits sampling computes. Reading that entry back would serve sampling nobody asked for.
+	const legacyKey = createHash("sha256")
+		.update(
+			stableStringify({
+				provider: "pi",
+				prompt: "Cache key stability",
+				model: "test-model",
+				schemaVersion: "v1",
+				artifactHashes: [],
+				outputSchema: null,
+			}),
+		)
+		.digest("hex");
+
+	const requestLog: any[] = [];
 	const server = http.createServer((req, res) => {
 		if (req.method !== "POST" || req.url !== "/invoke") {
 			res.writeHead(404);
 			res.end("nope");
 			return;
 		}
-		req.resume();
+		let buf = "";
+		req.setEncoding("utf8");
+		req.on("data", (d) => (buf += d));
 		req.on("end", () => {
+			requestLog.push(JSON.parse(buf || "{}"));
 			res.writeHead(200, { "content-type": "application/json" });
 			res.end(
 				JSON.stringify({
 					ok: true,
-					result: { runId: "pi_1", output: { format: "text", text: "ok" } },
+					result: { runId: "pi_1", output: { format: "text", text: "fresh" } },
 				}),
 			);
 		});
@@ -273,15 +301,29 @@ test("llm.invoke keeps its established cache key when sampling parameters are un
 	const port = typeof addr === "object" && addr ? addr.port : 0;
 
 	try {
+		await mkdir(path.join(cacheDir, "llm.invoke"), { recursive: true });
+		await writeFile(
+			path.join(cacheDir, "llm.invoke", `${legacyKey}.json`),
+			JSON.stringify({
+				cacheKey: legacyKey,
+				storedAt: "2026-08-01T00:00:00.000Z",
+				items: [
+					{
+						kind: "llm.invoke",
+						cacheKey: legacyKey,
+						status: "completed",
+						source: "pi",
+						cached: false,
+						output: { format: "text", text: "sampled at 0.9" },
+					},
+				],
+			}),
+			"utf8",
+		);
+
 		const result = await cmd.run({
 			input: streamOf([]),
-			args: {
-				_: [],
-				provider: "pi",
-				model: "test-model",
-				prompt: "Cache key stability",
-				"schema-version": "v1",
-			},
+			args,
 			ctx: baseCtx(
 				{
 					LOBSTER_PI_LLM_ADAPTER_URL: `http://127.0.0.1:${port}`,
@@ -292,12 +334,10 @@ test("llm.invoke keeps its established cache key when sampling parameters are un
 		} as any);
 
 		const items = await collect(result.output!);
-		// Pinned so cache entries written before sampling parameters were hashed keep
-		// resolving. If this value moves, every existing on-disk cache entry is orphaned.
-		assert.equal(
-			items[0].cacheKey,
-			"b137c449800e145fa522ea974ad5d9d079a4dad96263f991ab3b2a9efe262912",
-		);
+		assert.equal(requestLog.length, 1);
+		assert.equal(items[0].source, "pi");
+		assert.equal(items[0].output.text, "fresh");
+		assert.notEqual(items[0].cacheKey, legacyKey);
 	} finally {
 		await rm(cacheDir, { recursive: true, force: true });
 		await closeServer(server);

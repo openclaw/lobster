@@ -107,6 +107,8 @@ const validateResponseEnvelope = ajv.compile(responseSchema);
 
 const DEFAULT_MAX_VALIDATION_RETRIES = 1;
 const STATE_VERSION = 1;
+// Identity version of the response cache key. See computeCacheKey.
+const CACHE_KEY_VERSION = 2;
 
 type BuiltInProvider = "openclaw" | "pi" | "http";
 type SupportedProvider = BuiltInProvider | string;
@@ -848,19 +850,24 @@ function computeCacheKey({
 	temperature: number | null;
 	maxOutputTokens: number | null;
 }) {
-	const payload: Record<string, any> = {
+	// `null` is the identity of an omitted parameter, distinct from any value a caller can
+	// pass, so an omitted request can never resolve to an entry written with an explicit one.
+	// The version separates this identity from the keys earlier releases wrote, where the two
+	// parameters were absent from the payload and a sampled answer therefore shared a key with
+	// an unsampled request. Bump it whenever the fields below change: entries under older
+	// versions become unreachable, which costs one re-invocation and never a wrong replay.
+	const payload = {
+		cacheKeyVersion: CACHE_KEY_VERSION,
 		provider,
 		prompt,
 		model: model || `${provider}-default`,
 		schemaVersion,
 		artifactHashes,
 		outputSchema: outputSchema ?? null,
+		// The same predicate that decides whether each parameter is sent to the adapter.
+		temperature: Number.isFinite(temperature ?? NaN) ? Number(temperature) : null,
+		maxOutputTokens: Number.isFinite(maxOutputTokens ?? NaN) ? Number(maxOutputTokens) : null,
 	};
-	// Guard on the same predicates that decide whether each parameter is sent to
-	// the adapter, so keys for invocations that omit them stay byte-identical and
-	// caches written by earlier releases remain valid.
-	if (Number.isFinite(temperature ?? NaN)) payload.temperature = Number(temperature);
-	if (Number.isFinite(maxOutputTokens ?? NaN)) payload.maxOutputTokens = Number(maxOutputTokens);
 	return createHash("sha256").update(stableStringify(payload)).digest("hex");
 }
 
