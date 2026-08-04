@@ -208,35 +208,54 @@ export function llmProvenanceOf(value: unknown): LlmProvenance | null {
 	return { cacheKey, replayed };
 }
 
-// Live calls this process paid for that nothing has billed yet. A workflow records a step's
-// cost only once the step succeeds, so a step that fails *after* its LLM call — and is then
-// retried — never bills the live item. The retry replays the stored answer, and that replay is
-// the only carrier left for a charge that really happened, so it is billed there instead.
-// Keyed by cache key: that is what a live item and every replay of it share across the JSON
+// Live calls a run has paid for that nothing has billed yet. A workflow records a step's cost
+// only once the step succeeds, so a step that fails *after* its LLM call — and is then retried
+// — never bills the live item. The retry replays the stored answer, and that replay is the only
+// carrier left for a charge that really happened, so it is billed there instead. Entries are
+// keyed by cache key: that is what a live item and every replay of it share across the JSON
 // round trip through run state and the response cache.
-const UNBILLED_LIVE_INVOCATIONS = new Set<string>();
-// An invocation nothing ever bills — a run that failed outright, or a call made outside a
-// workflow — leaves its key behind, so the oldest are dropped to keep the ledger bounded in a
-// long-lived process.
+export type LlmSpendLedger = {
+	record: (cacheKey: string) => void;
+	claim: (cacheKey: string) => boolean;
+};
+
+// A call nothing ever bills — a step that failed outright — leaves its key behind, so the
+// oldest are dropped to keep a long run's ledger bounded.
 const MAX_UNBILLED_LIVE_INVOCATIONS = 256;
 
-function recordLiveInvocation(cacheKey: string) {
-	if (!cacheKey) return;
-	UNBILLED_LIVE_INVOCATIONS.delete(cacheKey);
-	UNBILLED_LIVE_INVOCATIONS.add(cacheKey);
-	for (const oldest of UNBILLED_LIVE_INVOCATIONS) {
-		if (UNBILLED_LIVE_INVOCATIONS.size <= MAX_UNBILLED_LIVE_INVOCATIONS) break;
-		UNBILLED_LIVE_INVOCATIONS.delete(oldest);
-	}
+/**
+ * Creates the ledger for a single run. The run that paid for a call is the only one that can
+ * recover its charge, because no other run holds this ledger: a workflow reusing a cache entry
+ * written by an earlier run, or by an SDK caller outside cost accounting, finds nothing to
+ * claim and is billed nothing. A live call made without a ledger in `ctx` opens no charge.
+ */
+export function createLlmSpendLedger(): LlmSpendLedger {
+	const unbilled = new Set<string>();
+	return {
+		record(cacheKey: string) {
+			if (!cacheKey) return;
+			unbilled.delete(cacheKey);
+			unbilled.add(cacheKey);
+			for (const oldest of unbilled) {
+				if (unbilled.size <= MAX_UNBILLED_LIVE_INVOCATIONS) break;
+				unbilled.delete(oldest);
+			}
+		},
+		/**
+		 * Settles the charge for a live call, returning true for the one caller that must bill
+		 * it. A live item and every replay of it settle the same charge, so a provider call is
+		 * billed exactly once however many steps re-emit its answer.
+		 */
+		claim(cacheKey: string) {
+			return unbilled.delete(cacheKey);
+		},
+	};
 }
 
-/**
- * Claims the outstanding charge for a live call this process made, returning true for the one
- * caller that must bill it. A live item and every replay of it settle the same charge, so a
- * provider call is billed exactly once however many steps go on to re-emit its answer.
- */
-export function claimUnbilledLiveInvocation(cacheKey: string): boolean {
-	return UNBILLED_LIVE_INVOCATIONS.delete(cacheKey);
+function ledgerFrom(ctx: any): LlmSpendLedger | null {
+	const ledger = ctx?.llmSpendLedger;
+	if (!ledger || typeof ledger !== "object") return null;
+	return typeof ledger.record === "function" && typeof ledger.claim === "function" ? ledger : null;
 }
 
 type CacheEntry = {
@@ -569,7 +588,7 @@ async function runLlmInvoke({
 				stateType: config.stateType,
 			});
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
-			recordLiveInvocation(cacheKey);
+			ledgerFrom(ctx)?.record(cacheKey);
 			return { output: streamOf(normalized) };
 		}
 
@@ -583,7 +602,7 @@ async function runLlmInvoke({
 				stateType: config.stateType,
 			});
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
-			recordLiveInvocation(cacheKey);
+			ledgerFrom(ctx)?.record(cacheKey);
 			return { output: streamOf(normalized) };
 		}
 

@@ -18,7 +18,8 @@ import {
 import { readLineFromStream } from "../read_line.js";
 import { resolveInlineShellCommand } from "../shell.js";
 import { compileCached } from "../validation.js";
-import { claimUnbilledLiveInvocation, llmProvenanceOf } from "../commands/stdlib/llm_invoke.js";
+import { createLlmSpendLedger, llmProvenanceOf } from "../commands/stdlib/llm_invoke.js";
+import type { LlmSpendLedger } from "../commands/stdlib/llm_invoke.js";
 import { CostTracker } from "../core/cost_tracker.js";
 import type { CostLimit, CostSummary } from "../core/cost_tracker.js";
 import { withRetry, resolveRetryConfig } from "../core/retry.js";
@@ -853,6 +854,9 @@ export async function runWorkflowFile({
 			CostTracker.parsePricingFromEnv(ctx.env, ctx.stderr),
 			ctx.stderr,
 		);
+		// One ledger per run: a live call this run paid for can be recovered from the replay a
+		// retry produced, and a cache entry written by any other run has nothing to claim here.
+		const llmSpendLedger = createLlmSpendLedger();
 		let lastStepId: string | null =
 			resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
 
@@ -1011,6 +1015,7 @@ export async function runWorkflowFile({
 								pipelineText,
 								inputValue,
 								ctx,
+								llmSpendLedger,
 								env: subEnv,
 								cwd: subCwd,
 								requestInputEnabled: false,
@@ -1021,7 +1026,7 @@ export async function runWorkflowFile({
 						}
 
 						scopedResults[subStep.id] = subResult;
-						trackStepCost(costTracker, `${step.id}.${subStep.id}`, subResult);
+						trackStepCost(costTracker, `${step.id}.${subStep.id}`, subResult, llmSpendLedger);
 						if (workflow.cost_limit) {
 							costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 						}
@@ -1045,7 +1050,7 @@ export async function runWorkflowFile({
 				};
 				results[step.id] = loopResult;
 				lastStepId = step.id;
-				trackStepCost(costTracker, step.id, loopResult);
+				trackStepCost(costTracker, step.id, loopResult, llmSpendLedger);
 				if (workflow.cost_limit) {
 					costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 				}
@@ -1140,6 +1145,7 @@ export async function runWorkflowFile({
 									pipelineText,
 									inputValue,
 									ctx: { ...ctx, signal: branchSignal },
+									llmSpendLedger,
 									env: branchEnv,
 									cwd: branchCwd,
 									requestInputEnabled: false,
@@ -1284,6 +1290,7 @@ export async function runWorkflowFile({
 							pipelineText,
 							inputValue,
 							ctx: { ...ctx, signal: stepSignal },
+							llmSpendLedger,
 							env,
 							cwd,
 							resume:
@@ -1416,13 +1423,13 @@ export async function runWorkflowFile({
 			if (parallelBranchResults) {
 				for (const [branchId, branchResult] of Object.entries(parallelBranchResults)) {
 					results[branchId] = branchResult;
-					trackStepCost(costTracker, branchId, branchResult);
+					trackStepCost(costTracker, branchId, branchResult, llmSpendLedger);
 				}
 			}
 			results[step.id] = result;
 			lastStepId = step.id;
 
-			trackStepCost(costTracker, step.id, result);
+			trackStepCost(costTracker, step.id, result, llmSpendLedger);
 			if (workflow.cost_limit) {
 				costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 			}
@@ -2261,7 +2268,12 @@ function pipelineSourceItems(result: WorkflowStepResult): unknown[] | undefined 
 	return Array.isArray(items) ? items : undefined;
 }
 
-function trackStepCost(costTracker: CostTracker, stepId: string, result: WorkflowStepResult) {
+function trackStepCost(
+	costTracker: CostTracker,
+	stepId: string,
+	result: WorkflowStepResult,
+	llmSpendLedger: LlmSpendLedger,
+) {
 	// Bill the items the pipeline produced rather than the JSON re-read from its stdout: a
 	// renderer serializes them, and replay provenance does not survive that round trip. Steps
 	// without a pipeline (shell commands) have no such items and are read from `json` as before.
@@ -2282,7 +2294,7 @@ function trackStepCost(costTracker: CostTracker, stepId: string, result: Workflo
 		if (provenance) {
 			// Claiming settles the charge for the live call this item belongs to, and succeeds
 			// for exactly one of the live item and its replays.
-			const claimed = claimUnbilledLiveInvocation(provenance.cacheKey);
+			const claimed = llmSpendLedger.claim(provenance.cacheKey);
 			// A replay carries the usage of the call that produced it, so counting it again
 			// charges a run for tokens no provider was asked to spend. It is billed only when
 			// the call it replays is still unpaid for: a step is costed once it succeeds, so a
@@ -2887,6 +2899,7 @@ async function runPipelineStep({
 	pipelineText,
 	inputValue,
 	ctx,
+	llmSpendLedger,
 	env,
 	cwd,
 	resume,
@@ -2896,6 +2909,7 @@ async function runPipelineStep({
 	pipelineText: string;
 	inputValue: unknown;
 	ctx: RunContext;
+	llmSpendLedger?: LlmSpendLedger;
 	env: Record<string, string | undefined>;
 	cwd?: string;
 	resume?: {
@@ -2943,6 +2957,7 @@ async function runPipelineStep({
 		cwd,
 		signal: ctx.signal,
 		llmAdapters: ctx.llmAdapters,
+		llmSpendLedger,
 		input: resume ? resume.pipelineInput.items : inputValueToPipelineItems(inputValue),
 		requestInputEnabled,
 		requestInputResume: resume

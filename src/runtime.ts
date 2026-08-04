@@ -1,4 +1,5 @@
 import { createJsonRenderer } from "./renderers/json.js";
+import type { LlmSpendLedger } from "./commands/stdlib/llm_invoke.js";
 import {
 	InputRequestSuspension,
 	RequestInputResumeError,
@@ -19,6 +20,7 @@ export async function runPipeline({
 	input,
 	cwd = undefined,
 	llmAdapters = undefined,
+	llmSpendLedger = undefined,
 	signal = undefined,
 	dryRun = false,
 	requestInputResume = undefined,
@@ -34,6 +36,7 @@ export async function runPipeline({
 	input?: any;
 	cwd?: string | undefined;
 	llmAdapters?: Record<string, any> | undefined;
+	llmSpendLedger?: LlmSpendLedger | undefined;
 	signal?: AbortSignal | undefined;
 	dryRun?: boolean;
 	requestInputResume?: CommandInputResume | undefined;
@@ -59,6 +62,9 @@ export async function runPipeline({
 		mode,
 		cwd,
 		llmAdapters,
+		// The ledger of live LLM calls this run has not billed yet, so a replay of one of them
+		// can still be charged to the run that made it. Absent outside a cost-tracked run.
+		llmSpendLedger,
 		signal,
 	};
 

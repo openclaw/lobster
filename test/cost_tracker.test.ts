@@ -801,3 +801,53 @@ test("cost_limit stop counts the live call a retried step's replay stands in for
 		await fsp.rm(cacheDir, { recursive: true, force: true });
 	}
 });
+
+// A command that always fails, so a step carrying it never succeeds.
+async function alwaysFailsCommand() {
+	const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-fail-"));
+	const filePath = path.join(dir, "fail.mjs");
+	await fsp.writeFile(filePath, "process.exit(1);\n", "utf8");
+	return `node ${filePath}`;
+}
+
+// The charge a run opens belongs to that run. If its step never succeeds, the charge is never
+// recovered — and a later run that replays the same stored answer called no provider, so
+// billing it there would move one run's spend onto another. The ledger is per-run, so it
+// cannot: this also covers a live call made outside any cost accounting, such as the SDK
+// pipeline API, whose cache entry a workflow may later reuse.
+test("workflow cost tracking does not bill a replay of a call another run paid for", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const failing = await alwaysFailsCommand();
+	const invoke = "llm.invoke --model gpt-4o --prompt Summarize";
+	const env = { OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir };
+	try {
+		const first = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "spends",
+						on_error: "continue",
+						parallel: {
+							branches: [
+								{ id: "invoke", pipeline: invoke },
+								{ id: "fails", command: failing },
+							],
+						},
+					},
+				],
+			},
+			env,
+		);
+		assert.equal(first.result.status, "ok");
+		assert.equal(first.result._meta?.cost, undefined);
+
+		const second = await runWorkflow({ steps: [{ id: "replays", pipeline: invoke }] }, env);
+		assert.equal(second.result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(second.result._meta?.cost, undefined);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
