@@ -18,7 +18,7 @@ import {
 import { readLineFromStream } from "../read_line.js";
 import { resolveInlineShellCommand } from "../shell.js";
 import { compileCached } from "../validation.js";
-import { isReplayedLlmItem } from "../commands/stdlib/llm_invoke.js";
+import { isReplayedLlmItem, isReplayedLlmUsage } from "../commands/stdlib/llm_invoke.js";
 import { CostTracker } from "../core/cost_tracker.js";
 import type { CostLimit, CostSummary } from "../core/cost_tracker.js";
 import { withRetry, resolveRetryConfig } from "../core/retry.js";
@@ -2279,6 +2279,9 @@ function trackStepCost(costTracker: CostTracker, stepId: string, result: Workflo
 		if (isReplayedLlmItem(record)) continue;
 		const usage = record.usage;
 		if (!usage || typeof usage !== "object") continue;
+		// A projection can drop the item's own mark while carrying its usage record across, so
+		// the record is checked too. Both marks are symbol keys built in this process.
+		if (isReplayedLlmUsage(usage)) continue;
 		const modelValue = record.model;
 		const model = typeof modelValue === "string" ? modelValue : null;
 		costTracker.recordUsage(stepId, model, usage as Record<string, unknown>);

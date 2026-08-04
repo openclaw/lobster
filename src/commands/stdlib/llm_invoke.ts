@@ -161,16 +161,28 @@ type NormalizedInvocationItem = {
 const REPLAYED_LLM_ITEM = Symbol("lobster.llm.replayed");
 
 /**
- * Stamps replay provenance on an item this module is re-emitting. The property is
- * enumerable so a downstream `{ ...item }` keeps it, and `JSON.stringify` ignores symbol
+ * Stamps replay provenance on a value this module is re-emitting. The property is
+ * enumerable so a downstream `{ ...value }` keeps it, and `JSON.stringify` ignores symbol
  * keys, so serialized output is unchanged.
  */
-function markReplayedLlmItem(item: NormalizedInvocationItem): NormalizedInvocationItem {
-	return Object.defineProperty(item, REPLAYED_LLM_ITEM, {
+function markReplayed<T extends object>(value: T): T {
+	return Object.defineProperty(value, REPLAYED_LLM_ITEM, {
 		value: true,
 		enumerable: true,
 		configurable: true,
 	});
+}
+
+/**
+ * Marks an item this module is re-emitting, and its usage record with it. A projection such
+ * as `pick model,usage` builds a new object out of named fields, so the item's own mark does
+ * not reach the consumer — but the usage record crosses by reference, and the usage record is
+ * what gets billed. Marking both means the exemption survives an in-process projection
+ * without the consumer having to recognize every command that can build one.
+ */
+function markReplayedLlmItem(item: NormalizedInvocationItem): NormalizedInvocationItem {
+	if (item.usage && typeof item.usage === "object") markReplayed(item.usage as object);
+	return markReplayed(item);
 }
 
 /**
@@ -181,6 +193,15 @@ function markReplayedLlmItem(item: NormalizedInvocationItem): NormalizedInvocati
 export function isReplayedLlmItem(value: unknown): boolean {
 	if (!value || typeof value !== "object") return false;
 	return (value as Record<symbol, unknown>)[REPLAYED_LLM_ITEM] === true;
+}
+
+/**
+ * True only for a usage record this module replayed in the current process, whatever object
+ * is carrying it now. `JSON.parse` cannot produce the key, so a usage record a workflow step
+ * printed is never exempt.
+ */
+export function isReplayedLlmUsage(value: unknown): boolean {
+	return isReplayedLlmItem(value);
 }
 
 type CacheEntry = {

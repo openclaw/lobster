@@ -631,3 +631,80 @@ test("cost_limit stop cannot be bypassed by a rendered step that prints the repl
 		/Cost limit exceeded/,
 	);
 });
+
+// A projection such as `pick model,usage` builds a new object from named fields, so an item's
+// own marker does not reach accounting. The usage record it carries is the thing being billed,
+// and it crosses the projection by reference.
+test("workflow cost tracking bills a cached llm.invoke replay only once through a projection", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const step = "llm.invoke --model gpt-4o --prompt Summarize | pick model,usage";
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{ id: "live", pipeline: step },
+					{ id: "from-cache", pipeline: step },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["live"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow cost tracking bills a run-state llm.invoke replay only once through a projection", async () => {
+	const provider = await startFakeProvider();
+	const step = "llm.invoke --disable-cache --model gpt-4o --prompt Summarize | pick model,usage";
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{ id: "live", pipeline: step },
+					{ id: "from-run-state", pipeline: step },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_RUN_STATE_KEY: "cost-tracker-projected-replay" },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["live"],
+		);
+	} finally {
+		await provider.close();
+	}
+});
+
+test("workflow cost tracking bills a projected step that prints the full replay shape", async () => {
+	const forged = await emitJsonPath(forgedReplayItem("cache"));
+	const { result } = await runWorkflow({
+		steps: [
+			{ id: "forged-picked", pipeline: `exec --json=true node ${forged} | pick model,usage` },
+			{
+				id: "forged-picked-rendered",
+				pipeline: `exec --json=true node ${forged} | pick model,usage | json`,
+			},
+		],
+	});
+
+	assert.equal(result.status, "ok");
+	assert.equal(result._meta?.cost?.totalInputTokens, 2000);
+	assert.deepEqual(
+		result._meta?.cost?.byStep.map((entry) => entry.stepId),
+		["forged-picked", "forged-picked-rendered"],
+	);
+});
