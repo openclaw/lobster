@@ -316,31 +316,40 @@ function forgedReplayItem(source: "cache" | "run_state" = "cache") {
 
 // Minimal OpenClaw-shaped provider: llm.invoke auto-detects it from OPENCLAW_URL, and the
 // request count shows whether a step reached a provider or replayed a stored answer.
-async function startFakeProvider() {
+async function startFakeProvider(holdUntil = 1) {
 	let requests = 0;
+	const held: Array<() => void> = [];
+	const releaseHeld = () => {
+		while (held.length) held.shift()?.();
+	};
 	const server = http.createServer((req, res) => {
 		let body = "";
 		req.setEncoding("utf8");
 		req.on("data", (chunk) => (body += chunk));
 		req.on("end", () => {
 			requests += 1;
+			const seen = requests;
 			const parsed = JSON.parse(body || "{}");
-			res.writeHead(200, { "content-type": "application/json" });
-			res.end(
-				JSON.stringify({
-					ok: true,
-					result: {
+			const answer = () => {
+				res.writeHead(200, { "content-type": "application/json" });
+				res.end(
+					JSON.stringify({
 						ok: true,
 						result: {
-							runId: `invoke_${requests}`,
-							model: parsed.args?.model,
-							prompt: parsed.args?.prompt,
-							output: { data: { summary: "hello" } },
-							usage: { inputTokens: 1000, outputTokens: 500 },
+							ok: true,
+							result: {
+								runId: `invoke_${seen}`,
+								model: parsed.args?.model,
+								prompt: parsed.args?.prompt,
+								output: { data: { summary: "hello" } },
+								usage: { inputTokens: 1000, outputTokens: 500 },
+							},
 						},
-					},
-				}),
-			);
+					}),
+				);
+			};
+			held.push(answer);
+			if (requests >= holdUntil) releaseHeld();
 		});
 	});
 	await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -846,6 +855,48 @@ test("workflow cost tracking does not bill a replay of a call another run paid f
 		assert.equal(second.result.status, "ok");
 		assert.equal(provider.requests(), 1);
 		assert.equal(second.result._meta?.cost, undefined);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+// Two identical calls that race on a cold cache are two provider charges under one cache key.
+// If the step is then retried, both replays have to be billable: a ledger that only remembered
+// "this key is unpaid" would settle once and silently drop the second real charge.
+test("workflow cost tracking bills both live calls a retried step's replays stand in for", async () => {
+	const provider = await startFakeProvider(2);
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const flaky = await failsOnceCommand();
+	const invoke = "llm.invoke --model gpt-4o --prompt Summarize";
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "invoke-twice-then-fail",
+						retry: { max: 2, delay_ms: 1 },
+						parallel: {
+							branches: [
+								{ id: "invoke-a", pipeline: invoke },
+								{ id: "invoke-b", pipeline: invoke },
+								{ id: "flaky", command: flaky },
+							],
+						},
+					},
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 2);
+		assert.equal(result._meta?.cost?.totalInputTokens, 2000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 1000);
+		assert.deepEqual(result._meta?.cost?.byStep.map((entry) => entry.stepId).sort(), [
+			"invoke-a",
+			"invoke-b",
+		]);
 	} finally {
 		await provider.close();
 		await fsp.rm(cacheDir, { recursive: true, force: true });

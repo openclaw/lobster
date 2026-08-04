@@ -230,24 +230,31 @@ const MAX_UNBILLED_LIVE_INVOCATIONS = 256;
  * claim and is billed nothing. A live call made without a ledger in `ctx` opens no charge.
  */
 export function createLlmSpendLedger(): LlmSpendLedger {
-	const unbilled = new Set<string>();
+	// Outstanding charges per cache key, counted rather than flagged: two identical calls that
+	// race on a cold cache are two provider charges under one key, and the replays that later
+	// stand in for them have to be able to settle both.
+	const unbilled = new Map<string, number>();
 	return {
 		record(cacheKey: string) {
 			if (!cacheKey) return;
-			unbilled.delete(cacheKey);
-			unbilled.add(cacheKey);
-			for (const oldest of unbilled) {
+			unbilled.set(cacheKey, (unbilled.get(cacheKey) ?? 0) + 1);
+			for (const oldest of unbilled.keys()) {
 				if (unbilled.size <= MAX_UNBILLED_LIVE_INVOCATIONS) break;
 				unbilled.delete(oldest);
 			}
 		},
 		/**
-		 * Settles the charge for a live call, returning true for the one caller that must bill
-		 * it. A live item and every replay of it settle the same charge, so a provider call is
-		 * billed exactly once however many steps re-emit its answer.
+		 * Settles one outstanding charge, returning true for the caller that must bill it. A
+		 * live item and every replay of it draw on the same charges, so a provider call is
+		 * billed exactly once however many steps re-emit its answer — and N calls under one key
+		 * can be billed N times, never fewer.
 		 */
 		claim(cacheKey: string) {
-			return unbilled.delete(cacheKey);
+			const outstanding = unbilled.get(cacheKey) ?? 0;
+			if (outstanding < 1) return false;
+			if (outstanding === 1) unbilled.delete(cacheKey);
+			else unbilled.set(cacheKey, outstanding - 1);
+			return true;
 		},
 	};
 }
