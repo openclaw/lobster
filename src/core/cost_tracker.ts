@@ -77,6 +77,30 @@ export class CostTracker {
 		this.steps.push({ stepId, model, inputTokens, outputTokens, costUsd });
 	}
 
+	/**
+	 * Seeds this tracker with spend an earlier run of the same workflow already recorded — the
+	 * steps completed before an approval or input gate paused it. A pause is not a spend reset:
+	 * without this, `_meta.cost` after a resume would report only the steps that ran after it,
+	 * and a `cost_limit` could be walked past one gate at a time. Entries are rebuilt through
+	 * the same normalization as live usage rather than trusted verbatim, so a malformed stored
+	 * record cannot poison later totals.
+	 */
+	restore(steps: readonly StepCost[] | undefined) {
+		if (!Array.isArray(steps)) return;
+		for (const step of steps) {
+			if (!step || typeof step !== "object") continue;
+			if (typeof step.stepId !== "string" || !step.stepId) continue;
+			const costUsd = Number(step.costUsd ?? 0);
+			this.steps.push({
+				stepId: step.stepId,
+				model: typeof step.model === "string" ? step.model : null,
+				inputTokens: toTokenCount(step.inputTokens),
+				outputTokens: toTokenCount(step.outputTokens),
+				costUsd: Number.isFinite(costUsd) && costUsd > 0 ? costUsd : 0,
+			});
+		}
+	}
+
 	getSummary(): CostSummary {
 		let totalInputTokens = 0;
 		let totalOutputTokens = 0;

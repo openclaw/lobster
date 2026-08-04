@@ -203,6 +203,8 @@ type WorkflowResumeState = {
 	inputSchema?: unknown;
 	inputSubject?: unknown;
 	pipelineInput?: WorkflowPipelineInputResumeState;
+	// What the paused run had spent, so the run that resumes it does not start from zero.
+	cost?: CostSummary;
 	createdAt: string;
 };
 
@@ -854,6 +856,12 @@ export async function runWorkflowFile({
 			CostTracker.parsePricingFromEnv(ctx.env, ctx.stderr),
 			ctx.stderr,
 		);
+		// A gate pauses a run, it does not reset its spend: seed this run with what the paused
+		// run recorded, so `_meta.cost` covers the whole workflow and `cost_limit` cannot be
+		// walked past one gate at a time. A replay of a call billed before the pause then stays
+		// exempt, which is what an empty ledger already means for a charge someone else settled.
+		const pausedCost = resumeState && "cost" in resumeState ? resumeState.cost : undefined;
+		costTracker.restore(pausedCost?.byStep);
 		// One ledger per run: a live call this run paid for can be recovered from the replay a
 		// retry produced, and a cache entry written by any other run has nothing to claim here.
 		const llmSpendLedger = createLlmSpendLedger();
@@ -895,6 +903,7 @@ export async function runWorkflowFile({
 						// Preserve the full resolved subject for resume semantics; the tool
 						// envelope may contain a truncated preview to stay within size limits.
 						inputSubject: subject,
+						...(costTracker.hasUsage() ? { cost: costTracker.getSummary() } : null),
 						createdAt: new Date().toISOString(),
 					});
 
@@ -1361,6 +1370,7 @@ export async function runWorkflowFile({
 						inputSchema: err.request.responseSchema,
 						inputSubject: err.request.subject,
 						pipelineInput: err.pipelineInput,
+						...(costTracker.hasUsage() ? { cost: costTracker.getSummary() } : null),
 						createdAt: new Date().toISOString(),
 					});
 
@@ -1449,6 +1459,7 @@ export async function runWorkflowFile({
 						args: resolvedArgs,
 						approvalStepId: step.id,
 						approvalIdentity,
+						...(costTracker.hasUsage() ? { cost: costTracker.getSummary() } : null),
 						createdAt: new Date().toISOString(),
 					});
 

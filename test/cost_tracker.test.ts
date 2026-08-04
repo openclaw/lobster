@@ -9,6 +9,7 @@ import { PassThrough } from "node:stream";
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { CostTracker } from "../src/core/cost_tracker.js";
 import { runWorkflowFile } from "../src/workflows/file.js";
+import { decodeToken } from "../src/token.js";
 
 test("CostTracker records usage and computes totals", () => {
 	const tracker = new CostTracker();
@@ -900,5 +901,78 @@ test("workflow cost tracking bills both live calls a retried step's replays stan
 	} finally {
 		await provider.close();
 		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+// A gate pauses a run rather than resetting what it spent. The resume is a different run — a
+// different process, even — so the call made before the gate is only in the paused run's
+// record; if a later step repeats the prompt, it replays and correctly bills nothing. Without
+// carrying that record forward, the provider call before the gate would appear in no total at
+// all, and a `cost_limit` could be walked past one gate at a time.
+// A gate pauses a run, it does not reset what the run has spent. The resume is a separate run
+// with its own accounting, so a call made before the gate lives only in the paused run's
+// record: if a later step repeats the prompt it replays, correctly bills nothing, and the
+// provider call would end up in no total at all. Carrying the record forward also stops a
+// `cost_limit` being walked past one gate at a time.
+test("workflow cost tracking carries spend across an approval resume", async () => {
+	const provider = await startFakeProvider();
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-resume-"));
+	const cacheDir = path.join(tmpDir, "cache");
+	const stateDir = path.join(tmpDir, "state");
+	await fsp.mkdir(cacheDir, { recursive: true });
+	const invoke = "llm.invoke --model gpt-4o --prompt Summarize";
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{ id: "live", pipeline: invoke },
+				{ id: "gate", run: "echo gate", approval: "Continue?" },
+				{ id: "replay", pipeline: invoke },
+			],
+		}),
+		"utf8",
+	);
+
+	const env = {
+		...process.env,
+		LOBSTER_STATE_DIR: stateDir,
+		LOBSTER_CACHE_DIR: cacheDir,
+		OPENCLAW_URL: provider.url,
+	};
+	const ctx = () => ({
+		stdin: process.stdin,
+		stdout: process.stdout,
+		stderr: new PassThrough(),
+		env,
+		mode: "tool" as const,
+		registry: createDefaultRegistry(),
+	});
+
+	try {
+		const paused = await runWorkflowFile({ filePath, ctx: ctx() });
+		assert.equal(paused.status, "needs_approval");
+		const token = paused.requiresApproval?.resumeToken;
+		assert.equal(typeof token, "string");
+
+		const resumed = await runWorkflowFile({
+			filePath,
+			ctx: ctx(),
+			resume: decodeToken(token as string),
+			approved: true,
+		});
+
+		assert.equal(resumed.status, "ok");
+		assert.equal(provider.requests(), 1);
+		// The live call happened before the gate; the step after it only replayed.
+		assert.equal(resumed._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(resumed._meta?.cost?.totalOutputTokens, 500);
+		assert.deepEqual(
+			resumed._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["live"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(tmpDir, { recursive: true, force: true });
 	}
 });
