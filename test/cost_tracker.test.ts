@@ -1040,3 +1040,41 @@ test("workflow cost tracking carries an unbilled call across a pipeline input re
 		await fsp.rm(tmpDir, { recursive: true, force: true });
 	}
 });
+
+// The provider is paid the moment it answers, before Lobster stores anything. If a store then
+// fails — an unwritable cache directory, here a plain file where a directory belongs — the
+// step fails after run state already holds a replayable copy, and the retry succeeds from that
+// replay. The charge has to have been opened before those writes, or the replay is exempt and
+// a completed provider call is billed nowhere.
+test("workflow cost tracking bills a replay when the cache write failed after the call", async () => {
+	const provider = await startFakeProvider();
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-unwritable-"));
+	const cachePath = path.join(tmpDir, "cache-is-a-file");
+	await fsp.writeFile(cachePath, "not a directory", "utf8");
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "invoke",
+						retry: { max: 2, delay_ms: 1 },
+						pipeline: "llm.invoke --model gpt-4o --prompt Summarize",
+					},
+				],
+			},
+			{
+				OPENCLAW_URL: provider.url,
+				LOBSTER_CACHE_DIR: cachePath,
+				LOBSTER_RUN_STATE_KEY: "cost-tracker-unwritable-cache",
+			},
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+	} finally {
+		await provider.close();
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
+});

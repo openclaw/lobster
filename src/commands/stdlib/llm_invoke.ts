@@ -612,6 +612,10 @@ async function runLlmInvoke({
 		for (const item of normalized) markLlmItem(item, live);
 
 		if (!validator) {
+			// The charge exists the moment the provider answered, so it is opened before the
+			// writes that store the answer: either of them can fail after run state already holds
+			// a replayable copy, and the retry that replays it must still find a charge to settle.
+			ledgerFrom(ctx)?.record(cacheKey);
 			await persistOutputs({
 				env,
 				stateKey,
@@ -620,12 +624,15 @@ async function runLlmInvoke({
 				stateType: config.stateType,
 			});
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
-			ledgerFrom(ctx)?.record(cacheKey);
 			return { output: streamOf(normalized) };
 		}
 
 		const structured = normalized[0]?.output?.data ?? null;
 		if (validator(structured)) {
+			// The charge exists the moment the provider answered, so it is opened before the
+			// writes that store the answer: either of them can fail after run state already holds
+			// a replayable copy, and the retry that replays it must still find a charge to settle.
+			ledgerFrom(ctx)?.record(cacheKey);
 			await persistOutputs({
 				env,
 				stateKey,
@@ -634,7 +641,6 @@ async function runLlmInvoke({
 				stateType: config.stateType,
 			});
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
-			ledgerFrom(ctx)?.record(cacheKey);
 			return { output: streamOf(normalized) };
 		}
 
