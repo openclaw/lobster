@@ -2441,14 +2441,16 @@ function trackStepCost(
 			}
 			// Settles the charge this live call opened, so no replay of it is billed again.
 			llmSpendLedger.claim(provenance.cacheKey);
-		} else if (typeof record.cacheKey === "string" && record.cacheKey) {
+		} else {
 			// No mark, but numbers: a stage that JSON round-trips the stream hands on a copy that
-			// kept `model` and `usage` and lost everything this process attached. The ledger
-			// decides, because only it knows whether that call has been accounted for yet -- the
-			// copy either settles the charge and is billed as its carrier, or stands behind a
-			// call already billed and is not billed twice. A cost the run never recorded matches
-			// neither and is billed on its own account.
-			if (!llmSpendLedger.billCopy(record.cacheKey, model, usage as Record<string, unknown>)) {
+			// kept `model` and `usage` and lost everything this process attached -- sometimes the
+			// cache key with it. The ledger decides, because only it knows whether that call has
+			// been accounted for yet: the copy either settles the charge and is billed as its
+			// carrier, or stands behind a call already billed and is not billed twice. A cost the
+			// run never recorded matches neither and is billed on its own account.
+			const copiedKey =
+				typeof record.cacheKey === "string" && record.cacheKey ? record.cacheKey : null;
+			if (!llmSpendLedger.billCopy(copiedKey, model, usage as Record<string, unknown>)) {
 				continue;
 			}
 		}

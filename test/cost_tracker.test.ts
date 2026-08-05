@@ -320,7 +320,7 @@ function forgedReplayItem(source: "cache" | "run_state" = "cache") {
 // request count shows whether a step reached a provider or replayed a stored answer.
 async function startFakeProvider(
 	holdUntil = 1,
-	usageFor: (seen: number) => Record<string, number> = () => ({
+	usageFor: (seen: number) => Record<string, number> | null = () => ({
 		inputTokens: 1000,
 		outputTokens: 500,
 	}),
@@ -350,7 +350,7 @@ async function startFakeProvider(
 								model: parsed.args?.model,
 								prompt: parsed.args?.prompt,
 								output: { data: { summary: "hello" } },
-								usage: usageFor(seen),
+								...(usageFor(seen) ? { usage: usageFor(seen) } : null),
 							},
 						},
 					}),
@@ -1661,5 +1661,96 @@ test("llm spend ledger matches a copy across the token field names providers use
 	// A cost the run never recorded still settles nothing.
 	ledger.record("key-b", { model: "gpt-4o", usage: { inputTokens: 1000, outputTokens: 500 } });
 	assert.equal(ledger.billCopy("key-b", "gpt-4o", { prompt_tokens: 999 }), true);
+	assert.equal(ledger.outstanding().length, 1);
+});
+
+test("workflow cost tracking bills a call once when the copy of its item lost the cache key", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-state-"));
+	try {
+		// `state.get` reads the stored item back without its marks and `pick` projects it down to
+		// the two fields that matter, dropping the cache key as well. What is left is a copy of a
+		// call already billed, and the cost it carries is the only evidence of that.
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "store",
+						pipeline:
+							"llm.invoke --model gpt-4o --prompt Summarize | state.set probe | state.get sink",
+					},
+					{ id: "reload", pipeline: "state.get probe | pick model,usage" },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["store"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+		await fsp.rm(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow cost tracking does not let an answer that cost nothing stand in for one that did", async () => {
+	// The first answer reports no usage at all, so nothing bills it and nothing ever will. A
+	// charge for it would be the one handed to the refresh below, leaving the refresh's own
+	// charge open for the end-of-step settlement to bill on top of the item already recorded.
+	const provider = await startFakeProvider(1, (seen) =>
+		seen === 1 ? null : { inputTokens: 1000, outputTokens: 500 },
+	);
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const invoke = "llm.invoke --model gpt-4o --prompt Summarize";
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{ id: "no-usage", pipeline: `${invoke} | json` },
+					{ id: "refresh", pipeline: `${invoke} --refresh | json` },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 2);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("llm spend ledger reads a copy that kept no cache key by what it cost", () => {
+	const ledger = createLlmSpendLedger();
+	const usage = { inputTokens: 1000, outputTokens: 500 };
+	ledger.record("key-a", { model: "gpt-4o", usage });
+
+	// Without a key the cost is the only evidence, and it is enough: a cost the run never
+	// recorded still settles nothing and is billed on its own account.
+	assert.equal(ledger.billCopy(null, "gpt-4o", { inputTokens: 7 }), true);
+	assert.equal(ledger.outstanding().length, 1);
+	assert.equal(ledger.billCopy(null, "gpt-4o", { ...usage }), true);
+	assert.deepEqual(ledger.outstanding(), []);
+	assert.equal(ledger.billCopy(null, "gpt-4o", { ...usage }), false);
+});
+
+test("llm spend ledger keeps a copy naming one call from settling another", () => {
+	const ledger = createLlmSpendLedger();
+	ledger.record("key-a", { model: "gpt-4o", usage: { inputTokens: 1000, outputTokens: 500 } });
+
+	// The key a copy still carries says which call it came from, so it is read against that
+	// call rather than against whichever other charge happens to have cost the same.
+	assert.equal(ledger.billCopy("key-b", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), true);
 	assert.equal(ledger.outstanding().length, 1);
 });

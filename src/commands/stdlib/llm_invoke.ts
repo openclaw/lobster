@@ -218,7 +218,11 @@ export function llmProvenanceOf(value: unknown): LlmProvenance | null {
 export type LlmSpendLedger = {
 	record: (cacheKey: string, charge?: LlmChargeCost) => void;
 	claim: (cacheKey: string) => LlmChargeCost | null;
-	billCopy: (cacheKey: string, model: string | null, usage: Record<string, unknown>) => boolean;
+	billCopy: (
+		cacheKey: string | null,
+		model: string | null,
+		usage: Record<string, unknown>,
+	) => boolean;
 	outstanding: () => LlmOutstandingCharge[];
 	restore: (charges: readonly LlmOutstandingCharge[] | undefined) => void;
 };
@@ -296,7 +300,14 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 		claim(cacheKey: string) {
 			const open = unbilled.get(cacheKey);
 			if (!open?.length) return null;
-			const [charge] = open.splice(0, 1);
+			// A charge that records no cost settles nothing anyone can bill, so it must not be
+			// the one handed to a caller that has a real call to account for. Charges restored
+			// from resume state written before they carried a cost are the ones this can be.
+			const index = Math.max(
+				open.findIndex((charge) => charge.usage !== undefined),
+				0,
+			);
+			const [charge] = open.splice(index, 1);
 			if (!open.length) unbilled.delete(cacheKey);
 			settle(cacheKey, charge);
 			return charge ?? {};
@@ -316,23 +327,27 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 		 * item that invents a cost is billed on its own account and settles nothing, so a made-up
 		 * item can still add spend to a run, which it always could, and can never hide any.
 		 */
-		billCopy(cacheKey: string, model: string | null, usage: Record<string, unknown>) {
-			const open = unbilled.get(cacheKey);
-			const index =
-				open?.findIndex(
-					(charge) => (charge.model ?? null) === model && sameBillableUsage(charge.usage, usage),
-				) ?? -1;
-			if (open && index >= 0) {
-				settle(cacheKey, open.splice(index, 1)[0]);
-				if (!open.length) unbilled.delete(cacheKey);
+		billCopy(cacheKey: string | null, model: string | null, usage: Record<string, unknown>) {
+			const isSameCall = (charge: LlmChargeCost) =>
+				(charge.model ?? null) === model && sameBillableUsage(charge.usage, usage);
+			// A copy that still names a cache key is read against that key alone: the key is
+			// evidence of which call it came from, and honoring it keeps one call's copy from
+			// settling another call's charge. A transform can emit `{ model, usage }` and drop
+			// the key with the symbols, and then the cost is the only evidence there is.
+			const search = (ledger: Map<string, LlmChargeCost[]>) =>
+				cacheKey === null ? [...ledger.keys()] : [cacheKey];
+			for (const key of search(unbilled)) {
+				const open = unbilled.get(key);
+				const index = open?.findIndex(isSameCall) ?? -1;
+				if (!open || index < 0) continue;
+				settle(key, open.splice(index, 1)[0]);
+				if (!open.length) unbilled.delete(key);
 				return true;
 			}
-			const alreadyBilled = billed
-				.get(cacheKey)
-				?.some(
-					(charge) => (charge.model ?? null) === model && sameBillableUsage(charge.usage, usage),
-				);
-			return !alreadyBilled;
+			for (const key of search(billed)) {
+				if (billed.get(key)?.some(isSameCall)) return false;
+			}
+			return true;
 		},
 		outstanding() {
 			const charges: LlmOutstandingCharge[] = [];
@@ -375,6 +390,18 @@ function sameBillableUsage(left: unknown, right: unknown) {
 	const billed = billableTokens(left as Record<string, unknown>);
 	const other = billableTokens(right as Record<string, unknown>);
 	return billed.inputTokens === other.inputTokens && billed.outputTokens === other.outputTokens;
+}
+
+/**
+ * Opens a charge for a live call, and only for one that costs something. An answer that reports
+ * no usage is billed nowhere however many times it is replayed, so a charge for it would sit in
+ * the ledger with nothing to settle it -- and would be handed to the next caller with a real
+ * call to account for, leaving that one's charge open to be billed a second time.
+ */
+function recordLiveCharge(ctx: any, cacheKey: string, item: NormalizedInvocationItem | undefined) {
+	const cost = chargeCostOf(item);
+	if (!cost) return;
+	ledgerFrom(ctx)?.record(cacheKey, cost);
 }
 
 /** The cost of a live call, read from the item this module just built for it. */
@@ -730,7 +757,7 @@ async function runLlmInvoke({
 			// The charge exists the moment the provider answered, so it is opened before the
 			// writes that store the answer: either of them can fail after run state already holds
 			// a replayable copy, and the retry that replays it must still find a charge to settle.
-			ledgerFrom(ctx)?.record(cacheKey, chargeCostOf(normalized[0]));
+			recordLiveCharge(ctx, cacheKey, normalized[0]);
 			await persistOutputs({
 				env,
 				stateKey,
@@ -747,7 +774,7 @@ async function runLlmInvoke({
 			// The charge exists the moment the provider answered, so it is opened before the
 			// writes that store the answer: either of them can fail after run state already holds
 			// a replayable copy, and the retry that replays it must still find a charge to settle.
-			ledgerFrom(ctx)?.record(cacheKey, chargeCostOf(normalized[0]));
+			recordLiveCharge(ctx, cacheKey, normalized[0]);
 			await persistOutputs({
 				env,
 				stateKey,
