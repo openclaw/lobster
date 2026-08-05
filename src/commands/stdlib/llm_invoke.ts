@@ -2,6 +2,7 @@ import path from "node:path";
 import { promises as fsp } from "node:fs";
 import { createHash } from "node:crypto";
 import { Ajv } from "ajv";
+import { billableTokens } from "../../core/cost_tracker.js";
 import type { ErrorObject } from "ajv";
 
 import {
@@ -364,20 +365,16 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 }
 
 /**
- * Whether two usage records bill the same. Only the numbers are compared, because only the
- * numbers are billed -- and a live item's usage record carries this module's provenance symbol,
- * which a copy of it that went through JSON never can.
+ * Whether two usage records bill the same, asked of the accounting that bills them. Comparing
+ * the records themselves would answer a different question twice over: a live item's usage
+ * carries this module's provenance symbol, which a copy that went through JSON never can, and a
+ * stage that rebuilds an item can drop or recompute a field nothing is charged for.
  */
 function sameBillableUsage(left: unknown, right: unknown) {
 	if (!left || typeof left !== "object" || !right || typeof right !== "object") return false;
-	const numbersOf = (value: object) =>
-		Object.entries(value as Record<string, unknown>).filter(
-			([, entry]) => typeof entry === "number" && Number.isFinite(entry),
-		);
-	const leftNumbers = numbersOf(left);
-	const rightNumbers = new Map(numbersOf(right));
-	if (!leftNumbers.length || leftNumbers.length !== rightNumbers.size) return false;
-	return leftNumbers.every(([key, entry]) => rightNumbers.get(key) === entry);
+	const billed = billableTokens(left as Record<string, unknown>);
+	const other = billableTokens(right as Record<string, unknown>);
+	return billed.inputTokens === other.inputTokens && billed.outputTokens === other.outputTokens;
 }
 
 /** The cost of a live call, read from the item this module just built for it. */

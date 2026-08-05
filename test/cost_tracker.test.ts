@@ -1632,3 +1632,34 @@ fs.writeFileSync("${marker}", "ran");
 		await fsp.rm(tmpDir, { recursive: true, force: true });
 	}
 });
+
+test("llm spend ledger matches a copy on the token counts that are billed", () => {
+	const ledger = createLlmSpendLedger();
+	ledger.record("key-a", {
+		model: "gpt-4o",
+		usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
+	});
+
+	// A stage that rebuilds an item can drop or recompute a field nothing is charged for. The
+	// charge is the same charge, so the copy has to settle it rather than be billed beside it.
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), true);
+	assert.deepEqual(ledger.outstanding(), []);
+});
+
+test("llm spend ledger matches a copy across the token field names providers use", () => {
+	const ledger = createLlmSpendLedger();
+	ledger.record("key-a", { model: "gpt-4o", usage: { inputTokens: 1000, outputTokens: 500 } });
+
+	// `CostTracker` bills these spellings as the same tokens, so the ledger has to read them as
+	// the same charge.
+	assert.equal(
+		ledger.billCopy("key-a", "gpt-4o", { prompt_tokens: 1000, completion_tokens: 500 }),
+		true,
+	);
+	assert.deepEqual(ledger.outstanding(), []);
+
+	// A cost the run never recorded still settles nothing.
+	ledger.record("key-b", { model: "gpt-4o", usage: { inputTokens: 1000, outputTokens: 500 } });
+	assert.equal(ledger.billCopy("key-b", "gpt-4o", { prompt_tokens: 999 }), true);
+	assert.equal(ledger.outstanding().length, 1);
+});

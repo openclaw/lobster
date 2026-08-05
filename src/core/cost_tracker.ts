@@ -39,6 +39,20 @@ function toTokenCount(value: unknown): number {
 	return Math.floor(parsed);
 }
 
+/**
+ * The token counts a usage record is billed for, under any of the spellings providers use.
+ * Everything else a record carries — a `totalTokens`, a cache breakdown — costs nothing, so
+ * two records agreeing on these two numbers cost the same.
+ */
+export function billableTokens(usage: Record<string, unknown>) {
+	return {
+		inputTokens: toTokenCount(usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens),
+		outputTokens: toTokenCount(
+			usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens,
+		),
+	};
+}
+
 export class CostTracker {
 	private steps: StepCost[] = [];
 
@@ -57,12 +71,7 @@ export class CostTracker {
 	}
 
 	recordUsage(stepId: string, model: string | null, usage: Record<string, unknown>) {
-		const inputTokens = toTokenCount(
-			usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens,
-		);
-		const outputTokens = toTokenCount(
-			usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens,
-		);
+		const { inputTokens, outputTokens } = billableTokens(usage);
 		const pricingKey = typeof model === "string" && model.trim() ? model : null;
 		const pricing =
 			pricingKey && Object.prototype.hasOwnProperty.call(this.pricing, pricingKey)
