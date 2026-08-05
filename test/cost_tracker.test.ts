@@ -8,6 +8,7 @@ import { PassThrough } from "node:stream";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { CostTracker } from "../src/core/cost_tracker.js";
+import { createLlmSpendLedger } from "../src/commands/stdlib/llm_invoke.js";
 import { runWorkflowFile } from "../src/workflows/file.js";
 import { decodeToken } from "../src/token.js";
 
@@ -1412,4 +1413,74 @@ test("workflow cost tracking bills a rendered call when a later stage emits its 
 		await fsp.rm(cacheDir, { recursive: true, force: true });
 		await fsp.rm(stateDir, { recursive: true, force: true });
 	}
+});
+
+test("workflow cost tracking bills a call once when only a JSON round trip of its item survives", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-state-"));
+	try {
+		// `state.set` stores the model item and `state.get` reads it back as a plain object: the
+		// numbers survive, the in-process mark does not. Nothing bills the original -- the step
+		// ends on an unrelated key -- so the copy is the only thing billed, and the charge behind
+		// it has to be settled by that copy rather than swept a second time at the end.
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "store",
+						pipeline:
+							"llm.invoke --model gpt-4o --prompt Summarize | state.set probe | state.get sink",
+					},
+					{ id: "reload", pipeline: "state.get probe" },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["reload"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+		await fsp.rm(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("llm spend ledger settles a cloned item's charge only at the cost it recorded", () => {
+	const ledger = createLlmSpendLedger();
+	ledger.record("key-a", { model: "gpt-4o", usage: { inputTokens: 1000, outputTokens: 500 } });
+
+	// A step can print any cache key it likes, so a key alone must not settle anything: only the
+	// cost the charge recorded can, which is the cost an honest copy is billed at anyway.
+	assert.equal(
+		ledger.claimEquivalent("key-a", "gpt-4o", { inputTokens: 1, outputTokens: 1 }),
+		false,
+	);
+	assert.equal(
+		ledger.claimEquivalent("key-b", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }),
+		false,
+	);
+	assert.equal(
+		ledger.claimEquivalent("key-a", "gpt-5", { inputTokens: 1000, outputTokens: 500 }),
+		false,
+	);
+	assert.equal(ledger.outstanding().length, 1);
+
+	// Key order changes across a JSON round trip; the numbers do not.
+	assert.equal(
+		ledger.claimEquivalent("key-a", "gpt-4o", { outputTokens: 500, inputTokens: 1000 }),
+		true,
+	);
+	assert.deepEqual(ledger.outstanding(), []);
+	assert.equal(
+		ledger.claimEquivalent("key-a", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }),
+		false,
+	);
 });

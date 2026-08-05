@@ -2356,6 +2356,7 @@ function stepScopedLedger(ledger: LlmSpendLedger, stepId: string): LlmSpendLedge
 	return {
 		record: (cacheKey, charge) => ledger.record(cacheKey, { ...charge, stepId }),
 		claim: (cacheKey) => ledger.claim(cacheKey),
+		claimEquivalent: (cacheKey, model, usage) => ledger.claimEquivalent(cacheKey, model, usage),
 		outstanding: () => ledger.outstanding(),
 		restore: (charges) => ledger.restore(charges),
 	};
@@ -2420,6 +2421,14 @@ function trackStepCost(
 			}
 			// Settles the charge this live call opened, so no replay of it is billed again.
 			llmSpendLedger.claim(provenance.cacheKey);
+		} else if (typeof record.cacheKey === "string" && record.cacheKey) {
+			// No mark, but numbers: a stage that JSON round-trips the stream hands on a copy that
+			// kept `model` and `usage` and lost everything this process attached. Billing the copy
+			// is right, and it has to settle the charge behind it or the sweep below bills the
+			// same call a second time. The ledger only settles a charge whose recorded cost is
+			// the one being billed, so a step printing an invented cache key still cannot hide
+			// spend.
+			llmSpendLedger.claimEquivalent(record.cacheKey, model, usage as Record<string, unknown>);
 		}
 		costTracker.recordUsage(stepId, model, usage as Record<string, unknown>);
 	}

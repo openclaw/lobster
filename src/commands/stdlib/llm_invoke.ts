@@ -217,6 +217,11 @@ export function llmProvenanceOf(value: unknown): LlmProvenance | null {
 export type LlmSpendLedger = {
 	record: (cacheKey: string, charge?: LlmChargeCost) => void;
 	claim: (cacheKey: string) => boolean;
+	claimEquivalent: (
+		cacheKey: string,
+		model: string | null,
+		usage: Record<string, unknown>,
+	) => boolean;
 	outstanding: () => LlmOutstandingCharge[];
 	restore: (charges: readonly LlmOutstandingCharge[] | undefined) => void;
 };
@@ -281,6 +286,26 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 			if (!open.length) unbilled.delete(cacheKey);
 			return true;
 		},
+		/**
+		 * Settles the charge an item is being billed for when the item lost its in-process mark
+		 * but kept the numbers: a stage that JSON round-trips the stream hands on such a copy, and
+		 * billing it while the charge stayed open would let the run be charged twice for one call.
+		 *
+		 * The public cache key is not trusted on its own -- any step can print one -- so a charge
+		 * is settled only when the cost being billed is the cost it recorded. A made-up item can
+		 * therefore add spend to a run, which it always could, but never hide any.
+		 */
+		claimEquivalent(cacheKey: string, model: string | null, usage: Record<string, unknown>) {
+			const open = unbilled.get(cacheKey);
+			if (!open?.length) return false;
+			const index = open.findIndex(
+				(charge) => (charge.model ?? null) === model && sameBillableUsage(charge.usage, usage),
+			);
+			if (index < 0) return false;
+			open.splice(index, 1);
+			if (!open.length) unbilled.delete(cacheKey);
+			return true;
+		},
 		outstanding() {
 			const charges: LlmOutstandingCharge[] = [];
 			for (const [cacheKey, open] of unbilled) {
@@ -309,6 +334,23 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 			}
 		},
 	};
+}
+
+/**
+ * Whether two usage records bill the same. Only the numbers are compared, because only the
+ * numbers are billed -- and a live item's usage record carries this module's provenance symbol,
+ * which a copy of it that went through JSON never can.
+ */
+function sameBillableUsage(left: unknown, right: unknown) {
+	if (!left || typeof left !== "object" || !right || typeof right !== "object") return false;
+	const numbersOf = (value: object) =>
+		Object.entries(value as Record<string, unknown>).filter(
+			([, entry]) => typeof entry === "number" && Number.isFinite(entry),
+		);
+	const leftNumbers = numbersOf(left);
+	const rightNumbers = new Map(numbersOf(right));
+	if (!leftNumbers.length || leftNumbers.length !== rightNumbers.size) return false;
+	return leftNumbers.every(([key, entry]) => rightNumbers.get(key) === entry);
 }
 
 /** The cost of a live call, read from the item this module just built for it. */
