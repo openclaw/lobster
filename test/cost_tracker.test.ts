@@ -326,6 +326,7 @@ async function startFakeProvider(
 	}),
 	// Lets a case fix the order two concurrent calls reach the ledger in.
 	delayMsFor: (prompt: string) => number = () => 0,
+	dataFor: (seen: number) => unknown = () => ({ summary: "hello" }),
 ) {
 	let requests = 0;
 	const held: Array<() => void> = [];
@@ -351,7 +352,7 @@ async function startFakeProvider(
 								runId: `invoke_${seen}`,
 								model: parsed.args?.model,
 								prompt: parsed.args?.prompt,
-								output: { data: { summary: "hello" } },
+								output: { data: dataFor(seen) },
 								...(usageFor(seen) ? { usage: usageFor(seen) } : null),
 							},
 						},
@@ -1956,5 +1957,48 @@ test("workflow cost tracking still bills a state value this process never wrote"
 		await provider.close();
 		await fsp.rm(cacheDir, { recursive: true, force: true });
 		await fsp.rm(stateDir, { recursive: true, force: true });
+	}
+});
+
+// A response the local validator rejects was still answered by a provider, and paid for. The
+// command asks again inside the same step, so nothing downstream ever sees the rejected attempt
+// -- the charge it opened is the only record that the call happened.
+test("workflow cost tracking bills a provider call the schema validator rejected", async () => {
+	const provider = await startFakeProvider(
+		1,
+		(seen) =>
+			seen === 1
+				? { inputTokens: 1000, outputTokens: 500 }
+				: { inputTokens: 3000, outputTokens: 100 },
+		() => 0,
+		(seen) => (seen === 1 ? {} : { summary: "hello" }),
+	);
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const schema = JSON.stringify({
+		type: "object",
+		required: ["summary"],
+		properties: { summary: { type: "string" } },
+	});
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "validated",
+						pipeline: `llm.invoke --model gpt-4o --prompt Summarize --output-schema '${schema}' | json`,
+					},
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 2, "the first answer failed the schema and was asked again");
+		// 1000 + 3000 and 500 + 100: both calls, not just the one that satisfied the schema.
+		assert.equal(result._meta?.cost?.totalInputTokens, 4000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 600);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
 	}
 });

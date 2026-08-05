@@ -806,12 +806,15 @@ async function runLlmInvoke({
 		});
 		const live: LlmProvenance = { cacheKey, replayed: false };
 		for (const item of normalized) markLlmItem(item, live);
+		// The provider has answered and been paid, so the charge is opened here rather than at
+		// either of the returns below. An attempt the local validator rejects never reaches one
+		// of them -- it goes round the loop and asks again -- and its call was as real as the one
+		// that eventually satisfies the schema. Opening it here also puts it before the writes
+		// that store the answer: either can fail once run state already holds a replayable copy,
+		// and the retry that replays it must still find a charge to settle.
+		recordLiveCharge(ctx, cacheKey, normalized[0]);
 
 		if (!validator) {
-			// The charge exists the moment the provider answered, so it is opened before the
-			// writes that store the answer: either of them can fail after run state already holds
-			// a replayable copy, and the retry that replays it must still find a charge to settle.
-			recordLiveCharge(ctx, cacheKey, normalized[0]);
 			await persistOutputs({
 				env,
 				stateKey,
@@ -825,10 +828,6 @@ async function runLlmInvoke({
 
 		const structured = normalized[0]?.output?.data ?? null;
 		if (validator(structured)) {
-			// The charge exists the moment the provider answered, so it is opened before the
-			// writes that store the answer: either of them can fail after run state already holds
-			// a replayable copy, and the retry that replays it must still find a charge to settle.
-			recordLiveCharge(ctx, cacheKey, normalized[0]);
 			await persistOutputs({
 				env,
 				stateKey,
