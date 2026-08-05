@@ -1267,7 +1267,7 @@ export async function runWorkflowFile({
 								env,
 								cwd,
 								_activeWorkflows: childActive,
-								_llmSpendLedger: llmSpendLedger,
+								_llmSpendLedger: stepScopedLedger(llmSpendLedger, step.id),
 							},
 						});
 						if (subResult.status === "needs_approval" || subResult.status === "needs_input") {
@@ -1543,6 +1543,15 @@ export async function runWorkflowFile({
 				results[step.id].approved = true;
 				if (approvedBy) results[step.id].approvedBy = approvedBy;
 			}
+		}
+
+		// Every charge still open here is a provider call this run paid for and no item ever
+		// carried to the accounting point. A paused run does not reach this line -- its charges
+		// travel in the resume state instead -- so this settles only calls that have nowhere
+		// left to be billed.
+		settleUnbilledCharges(costTracker, llmSpendLedger);
+		if (workflow.cost_limit) {
+			costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 		}
 
 		const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
@@ -2337,6 +2346,36 @@ type DeferredReplay = {
 	usage: Record<string, unknown>;
 };
 
+/**
+ * The run ledger seen by one step, so a charge opened inside it knows where it came from. A
+ * composed run's charges reach the composing run through this too, which is why the step id is
+ * overwritten rather than kept: in the parent's totals the spend belongs to the `workflow:`
+ * step, not to whatever the child called its own.
+ */
+function stepScopedLedger(ledger: LlmSpendLedger, stepId: string): LlmSpendLedger {
+	return {
+		record: (cacheKey, charge) => ledger.record(cacheKey, { ...charge, stepId }),
+		claim: (cacheKey) => ledger.claim(cacheKey),
+		outstanding: () => ledger.outstanding(),
+		restore: (charges) => ledger.restore(charges),
+	};
+}
+
+/**
+ * Bills the calls that ended the run unclaimed. An item is the usual carrier of usage, but a
+ * renderer can consume the pipeline before a later stage emits items of its own, an `ask` gate
+ * can swallow the only item, and a composed run can end on a step that carries none. The
+ * charge outlives all three, and dropping it would leave real spend out of `_meta.cost` and
+ * out of `cost_limit`.
+ */
+function settleUnbilledCharges(costTracker: CostTracker, llmSpendLedger: LlmSpendLedger) {
+	for (const charge of llmSpendLedger.outstanding()) {
+		if (!charge.usage) continue;
+		if (!llmSpendLedger.claim(charge.cacheKey)) continue;
+		costTracker.recordUsage(charge.stepId ?? "llm", charge.model ?? null, charge.usage);
+	}
+}
+
 function trackStepCost(
 	costTracker: CostTracker,
 	stepId: string,
@@ -3058,7 +3097,8 @@ async function runPipelineStep({
 		cwd,
 		signal: ctx.signal,
 		llmAdapters: ctx.llmAdapters,
-		llmSpendLedger,
+		// Scoped so a charge nothing bills can still name the step that opened it.
+		llmSpendLedger: llmSpendLedger ? stepScopedLedger(llmSpendLedger, stepId) : undefined,
 		input: resume ? resume.pipelineInput.items : inputValueToPipelineItems(inputValue),
 		requestInputEnabled,
 		requestInputResume: resume

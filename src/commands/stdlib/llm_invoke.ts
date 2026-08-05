@@ -215,15 +215,25 @@ export function llmProvenanceOf(value: unknown): LlmProvenance | null {
 // keyed by cache key: that is what a live item and every replay of it share across the JSON
 // round trip through run state and the response cache.
 export type LlmSpendLedger = {
-	record: (cacheKey: string) => void;
+	record: (cacheKey: string, charge?: LlmChargeCost) => void;
 	claim: (cacheKey: string) => boolean;
 	outstanding: () => LlmOutstandingCharge[];
 	restore: (charges: readonly LlmOutstandingCharge[] | undefined) => void;
 };
 
+// What a live call cost, carried with the charge itself. An item is the usual carrier, but it
+// does not always survive to the accounting point: a renderer consumes the pipeline, an `ask`
+// gate swallows the item, a composed run ends on a step of its own. The charge is then the only
+// record left that the provider was really paid.
+export type LlmChargeCost = {
+	stepId?: string;
+	model?: string | null;
+	usage?: Record<string, unknown>;
+};
+
 // A charge a run has opened and not yet billed. Carried in the run's own resume state so a
 // workflow that pauses mid-pipeline keeps it, and only that workflow can settle it.
-export type LlmOutstandingCharge = { cacheKey: string; count: number };
+export type LlmOutstandingCharge = { cacheKey: string; count: number } & LlmChargeCost;
 
 // A call nothing ever bills — a step that failed outright — leaves its key behind, so the
 // oldest are dropped to keep a long run's ledger bounded.
@@ -241,15 +251,18 @@ const MAX_UNBILLED_LIVE_INVOCATIONS = 256;
  * its own copy exactly once, while a replay neither of them paid for still claims nothing.
  */
 export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLedger {
-	// Outstanding charges per cache key, counted rather than flagged: two identical calls that
-	// race on a cold cache are two provider charges under one key, and the replays that later
-	// stand in for them have to be able to settle both.
-	const unbilled = new Map<string, number>();
+	// Outstanding charges per cache key, held one entry per call rather than as a count: two
+	// identical calls that race on a cold cache are two provider charges under one key, the
+	// replays that later stand in for them have to be able to settle both, and each carries the
+	// cost of the call that opened it.
+	const unbilled = new Map<string, LlmChargeCost[]>();
 	return {
-		record(cacheKey: string) {
+		record(cacheKey: string, charge?: LlmChargeCost) {
 			if (!cacheKey) return;
-			parent?.record(cacheKey);
-			unbilled.set(cacheKey, (unbilled.get(cacheKey) ?? 0) + 1);
+			parent?.record(cacheKey, charge);
+			const open = unbilled.get(cacheKey) ?? [];
+			open.push({ ...charge });
+			unbilled.set(cacheKey, open);
 			for (const oldest of unbilled.keys()) {
 				if (unbilled.size <= MAX_UNBILLED_LIVE_INVOCATIONS) break;
 				unbilled.delete(oldest);
@@ -262,14 +275,18 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 		 * can be billed N times, never fewer.
 		 */
 		claim(cacheKey: string) {
-			const outstanding = unbilled.get(cacheKey) ?? 0;
-			if (outstanding < 1) return false;
-			if (outstanding === 1) unbilled.delete(cacheKey);
-			else unbilled.set(cacheKey, outstanding - 1);
+			const open = unbilled.get(cacheKey);
+			if (!open?.length) return false;
+			open.shift();
+			if (!open.length) unbilled.delete(cacheKey);
 			return true;
 		},
 		outstanding() {
-			return [...unbilled].map(([cacheKey, count]) => ({ cacheKey, count }));
+			const charges: LlmOutstandingCharge[] = [];
+			for (const [cacheKey, open] of unbilled) {
+				for (const charge of open) charges.push({ cacheKey, count: 1, ...charge });
+			}
+			return charges;
 		},
 		/**
 		 * Reopens charges a paused run had not billed. A pipeline can suspend mid-step — at an
@@ -284,9 +301,35 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 				if (typeof charge.cacheKey !== "string" || !charge.cacheKey) continue;
 				const count = Math.floor(Number(charge.count ?? 0));
 				if (!Number.isFinite(count) || count < 1) continue;
-				for (let i = 0; i < count; i++) this.record(charge.cacheKey);
+				// State written before this field existed carries no cost, and a hand-edited file
+				// should not be able to invent one: only a plain object of numbers is taken.
+				const { cacheKey, count: _count, ...cost } = charge;
+				const restored = sanitizeChargeCost(cost);
+				for (let i = 0; i < count; i++) this.record(cacheKey, restored);
 			}
 		},
+	};
+}
+
+/** The cost of a live call, read from the item this module just built for it. */
+function chargeCostOf(item: NormalizedInvocationItem | undefined): LlmChargeCost | undefined {
+	const usage = item?.usage;
+	if (!usage || typeof usage !== "object") return undefined;
+	return { model: typeof item?.model === "string" ? item.model : null, usage };
+}
+
+function sanitizeChargeCost(cost: Record<string, unknown>): LlmChargeCost {
+	const usage = cost.usage;
+	if (!usage || typeof usage !== "object" || Array.isArray(usage)) return {};
+	const numbers: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(usage)) {
+		if (typeof value === "number" && Number.isFinite(value)) numbers[key] = value;
+	}
+	if (!Object.keys(numbers).length) return {};
+	return {
+		...(typeof cost.stepId === "string" ? { stepId: cost.stepId } : null),
+		model: typeof cost.model === "string" ? cost.model : null,
+		usage: numbers,
 	};
 }
 
@@ -621,7 +664,7 @@ async function runLlmInvoke({
 			// The charge exists the moment the provider answered, so it is opened before the
 			// writes that store the answer: either of them can fail after run state already holds
 			// a replayable copy, and the retry that replays it must still find a charge to settle.
-			ledgerFrom(ctx)?.record(cacheKey);
+			ledgerFrom(ctx)?.record(cacheKey, chargeCostOf(normalized[0]));
 			await persistOutputs({
 				env,
 				stateKey,
@@ -638,7 +681,7 @@ async function runLlmInvoke({
 			// The charge exists the moment the provider answered, so it is opened before the
 			// writes that store the answer: either of them can fail after run state already holds
 			// a replayable copy, and the retry that replays it must still find a charge to settle.
-			ledgerFrom(ctx)?.record(cacheKey);
+			ledgerFrom(ctx)?.record(cacheKey, chargeCostOf(normalized[0]));
 			await persistOutputs({
 				env,
 				stateKey,
