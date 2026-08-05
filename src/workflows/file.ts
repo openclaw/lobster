@@ -171,6 +171,7 @@ type RunContext = {
 	llmAdapters?: Record<string, any>;
 	dryRun?: boolean;
 	_activeWorkflows?: Set<string>;
+	_llmSpendLedger?: LlmSpendLedger;
 };
 
 export type WorkflowResumePayload = {
@@ -866,7 +867,7 @@ export async function runWorkflowFile({
 		costTracker.restore(pausedCost?.byStep);
 		// One ledger per run: a live call this run paid for can be recovered from the replay a
 		// retry produced, and a cache entry written by any other run has nothing to claim here.
-		const llmSpendLedger = createLlmSpendLedger();
+		const llmSpendLedger = createLlmSpendLedger(composingSpendLedger(ctx));
 		// A pipeline that paused at an `ask` gate had already paid for its LLM call without
 		// billing it, so the charge travels in the same resume state and reopens here. It is the
 		// same run continuing, which is why this cannot hand a charge to an unrelated one.
@@ -1261,7 +1262,13 @@ export async function runWorkflowFile({
 						const subResult = await runWorkflowFile({
 							filePath: resolvedWorkflowPath,
 							args: subArgs,
-							ctx: { ...ctx, env, cwd, _activeWorkflows: childActive },
+							ctx: {
+								...ctx,
+								env,
+								cwd,
+								_activeWorkflows: childActive,
+								_llmSpendLedger: llmSpendLedger,
+							},
 						});
 						if (subResult.status === "needs_approval" || subResult.status === "needs_input") {
 							const resumeToken =
@@ -1285,6 +1292,12 @@ export async function runWorkflowFile({
 						const json = subResult.output.length === 1 ? subResult.output[0] : subResult.output;
 						const stdout = subResult.output.length ? serializeValueForStdout(json) : "";
 						result = { id: step.id, stdout, json };
+						// A child ending in a rendered pipeline (`llm.invoke | json`) prints its items
+						// and returns JSON parsed back out of that print, which no symbol survives.
+						// Carry the child's own items across the composition boundary so this run
+						// applies to them the same replay rule it applies to its own pipelines.
+						const composedItems = pipelineSourceItems(subResult);
+						if (composedItems) attachPipelineSourceItems(result, composedItems);
 					} else if (execution.kind === "shell") {
 						const command = resolveTemplate(execution.value, resolvedArgs, results);
 						const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
@@ -1533,6 +1546,10 @@ export async function runWorkflowFile({
 			await deleteStateJson({ env: ctx.env, key: consumedResumeStateKey });
 		}
 		const runResult: WorkflowRunResult = { status: "ok", output };
+		// `output` is what the last step could serialize; a run composing this one also needs the
+		// items themselves, because that is where replay provenance lives.
+		const lastItems = lastStepId ? pipelineSourceItems(results[lastStepId]) : undefined;
+		if (lastItems) attachPipelineSourceItems(runResult, lastItems);
 		if (costTracker.hasUsage()) {
 			runResult._meta = { cost: costTracker.getSummary() };
 		}
@@ -2282,18 +2299,29 @@ function parseBoolLike(value: unknown): boolean | undefined {
 // exactly the items this process made, and no workflow input can put one here.
 const PIPELINE_SOURCE_ITEMS = Symbol("lobster.workflow.pipelineSourceItems");
 
-function attachPipelineSourceItems(result: WorkflowStepResult, items: unknown[]) {
-	Object.defineProperty(result, PIPELINE_SOURCE_ITEMS, {
+function attachPipelineSourceItems<T extends object>(target: T, items: unknown[]) {
+	Object.defineProperty(target, PIPELINE_SOURCE_ITEMS, {
 		value: items,
 		enumerable: false,
 		configurable: true,
 	});
-	return result;
+	return target;
 }
 
-function pipelineSourceItems(result: WorkflowStepResult): unknown[] | undefined {
-	const items = (result as Record<symbol, unknown>)[PIPELINE_SOURCE_ITEMS];
+function pipelineSourceItems(target: object | undefined): unknown[] | undefined {
+	if (!target) return undefined;
+	const items = (target as Record<symbol, unknown>)[PIPELINE_SOURCE_ITEMS];
 	return Array.isArray(items) ? items : undefined;
+}
+
+// The ledger of the run that invoked this one as a `workflow:` step. A composed run bills its
+// own steps and the composing run bills the output handed back to it, so a live call has to be
+// open in both ledgers for each of them to count it once. Read defensively: this arrives
+// through the same context object a caller supplies.
+function composingSpendLedger(ctx: RunContext): LlmSpendLedger | null {
+	const ledger = ctx._llmSpendLedger;
+	if (!ledger || typeof ledger !== "object") return null;
+	return typeof ledger.record === "function" && typeof ledger.claim === "function" ? ledger : null;
 }
 
 function trackStepCost(

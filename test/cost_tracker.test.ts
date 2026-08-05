@@ -519,6 +519,137 @@ test("cost_limit stop cannot be bypassed by a step that prints the full replay s
 // `... | json` is a supported step shape: the renderer prints the items and returns an empty
 // stream, so the workflow reads the step's JSON back from stdout. Accounting must still tell a
 // replay from a live call there, and must still bill output that only looks replayed.
+// Runs a parent workflow that composes a child through a `workflow:` step. Both files live in
+// one directory so the parent can name the child by relative path.
+async function runComposedWorkflow(
+	parent: Record<string, unknown>,
+	child: unknown,
+	envOverride?: Record<string, string>,
+) {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-"));
+	const stateDir = path.join(tmpDir, "state");
+	const parentPath = path.join(tmpDir, "workflow.lobster");
+	const childPath = path.join(tmpDir, "child.lobster");
+	await fsp.writeFile(parentPath, JSON.stringify(parent, null, 2), "utf8");
+	await fsp.writeFile(childPath, JSON.stringify(child, null, 2), "utf8");
+	const stderr = new PassThrough();
+	let stderrOutput = "";
+	stderr.on("data", (d: Buffer | string) => {
+		stderrOutput += String(d);
+	});
+
+	const result = await runWorkflowFile({
+		filePath: parentPath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr,
+			env: { ...process.env, LOBSTER_STATE_DIR: stateDir, ...envOverride },
+			mode: "tool",
+			registry: createDefaultRegistry(),
+		},
+	});
+
+	return { result, stderrOutput };
+}
+
+test("workflow cost tracking bills a live call a nested workflow made", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	try {
+		const { result } = await runComposedWorkflow(
+			{ steps: [{ id: "child", workflow: "child.lobster" }] },
+			{ steps: [{ id: "llm", pipeline: "llm.invoke --model gpt-4o --prompt Summarize | json" }] },
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		// The composing run counts the spend its child handed back, exactly once.
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["child"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow cost tracking bills a cached replay a nested workflow returned only once", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const step = "llm.invoke --model gpt-4o --prompt Summarize | json";
+	try {
+		const { result } = await runComposedWorkflow(
+			{
+				steps: [
+					{ id: "live", pipeline: step },
+					{ id: "child", workflow: "child.lobster" },
+				],
+			},
+			{ steps: [{ id: "llm", pipeline: step }] },
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		// The child replayed the answer the parent already paid for; billing it again would
+		// charge the run for tokens no provider was asked to spend.
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["live"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("cost_limit stop is not tripped by a replay a nested workflow returned", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const step = "llm.invoke --model gpt-4o --prompt Summarize | json";
+	try {
+		const { result } = await runComposedWorkflow(
+			{
+				cost_limit: { max_usd: 0.01, action: "stop" },
+				steps: [
+					{ id: "live", pipeline: step },
+					{ id: "child", workflow: "child.lobster" },
+				],
+			},
+			{ steps: [{ id: "llm", pipeline: step }] },
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		// One call is $0.0075; billing the child's replay too would exceed the $0.01 limit.
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.estimatedCostUsd, 0.0075);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow cost tracking bills a nested workflow that prints the full replay shape", async () => {
+	const emitPath = await emitJsonPath(forgedReplayItem());
+	const { result } = await runComposedWorkflow(
+		{ steps: [{ id: "child", workflow: "child.lobster" }] },
+		{ steps: [{ id: "forged", command: `node ${emitPath}` }] },
+	);
+
+	// Nothing a child prints can exempt itself: provenance is a symbol this process attaches.
+	assert.equal(result.status, "ok");
+	assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+	assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+});
+
 async function emitJsonPath(payload: unknown) {
 	const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-emit-"));
 	const filePath = path.join(dir, "emit.mjs");

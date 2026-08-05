@@ -273,7 +273,7 @@ Built-in providers today:
 
 Workflow `_meta.cost` and `cost_limit` use a static pricing table plus optional overrides from `LOBSTER_LLM_PRICING_JSON`, for example `{"my-model":{"input":1.0,"output":2.0}}` in USD per million tokens. Unknown or missing model IDs still record token counts with zero estimated cost, but Lobster warns on stderr so stale or missing pricing does not fail silently.
 
-A cached or replayed answer is not billed again: a model call is counted once, in the run that made it, however many later steps re-emit its answer. Spend also survives a pause — a workflow that stops at an approval or `input` gate keeps what it has recorded, so `_meta.cost` covers the whole run after a resume and `cost_limit` applies to the whole run rather than to the steps after the last gate.
+A cached or replayed answer is not billed again: a model call is counted once, in the run that made it, however many later steps re-emit its answer. A `workflow:` step counts what its sub-workflow spent, and a replay the sub-workflow returned is not billed a second time by the run that composed it. Spend also survives a pause — a workflow that stops at an approval or `input` gate keeps what it has recorded, so `_meta.cost` covers the whole run after a resume and `cost_limit` applies to the whole run rather than to the steps after the last gate.
 
 `llm_task.invoke` remains available as a backward-compatible alias for the OpenClaw provider.
 

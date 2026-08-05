@@ -234,8 +234,13 @@ const MAX_UNBILLED_LIVE_INVOCATIONS = 256;
  * recover its charge, because no other run holds this ledger: a workflow reusing a cache entry
  * written by an earlier run, or by an SDK caller outside cost accounting, finds nothing to
  * claim and is billed nothing. A live call made without a ledger in `ctx` opens no charge.
+ *
+ * A run composed by another one — a `workflow:` step — passes the composing run's ledger as
+ * `parent`. Both bill the same answer at their own boundary: the child bills its step, the
+ * parent bills the output handed back to it. So a charge is opened in both and each settles
+ * its own copy exactly once, while a replay neither of them paid for still claims nothing.
  */
-export function createLlmSpendLedger(): LlmSpendLedger {
+export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLedger {
 	// Outstanding charges per cache key, counted rather than flagged: two identical calls that
 	// race on a cold cache are two provider charges under one key, and the replays that later
 	// stand in for them have to be able to settle both.
@@ -243,6 +248,7 @@ export function createLlmSpendLedger(): LlmSpendLedger {
 	return {
 		record(cacheKey: string) {
 			if (!cacheKey) return;
+			parent?.record(cacheKey);
 			unbilled.set(cacheKey, (unbilled.get(cacheKey) ?? 0) + 1);
 			for (const oldest of unbilled.keys()) {
 				if (unbilled.size <= MAX_UNBILLED_LIVE_INVOCATIONS) break;
