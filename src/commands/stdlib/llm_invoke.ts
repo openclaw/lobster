@@ -341,6 +341,11 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 		 * both require the cost being billed to be the cost the run recorded for that call. An
 		 * item that invents a cost is billed on its own account and settles nothing, so a made-up
 		 * item can still add spend to a run, which it always could, and can never hide any.
+		 *
+		 * The two answers are not equally cheap to earn. Settling an open charge only ever adds a
+		 * record, so a copy that carries the cost but no key may do it. Withholding one removes a
+		 * record, so that needs the key as well -- otherwise any step printing a plausible
+		 * `{ model, usage }` could drop itself out of `cost_limit` by resembling an earlier call.
 		 */
 		billCopy(cacheKey: string | null, model: string | null, usage: Record<string, unknown>) {
 			const isSameCall = (charge: LlmChargeCost) =>
@@ -348,10 +353,8 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 			// A copy that still names a cache key is read against that key alone: the key is
 			// evidence of which call it came from, and honoring it keeps one call's copy from
 			// settling another call's charge. A transform can emit `{ model, usage }` and drop
-			// the key with the symbols, and then the cost is the only evidence there is.
-			const search = (ledger: Map<string, LlmChargeCost[]>) =>
-				cacheKey === null ? [...ledger.keys()] : [cacheKey];
-			for (const key of search(unbilled)) {
+			// the key with the symbols, leaving the cost as the only evidence there is.
+			for (const key of cacheKey === null ? [...unbilled.keys()] : [cacheKey]) {
 				const open = unbilled.get(key);
 				const index = open?.findIndex(isSameCall) ?? -1;
 				if (!open || index < 0) continue;
@@ -359,10 +362,13 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 				if (!open.length) unbilled.delete(key);
 				return true;
 			}
-			for (const key of search(billed)) {
-				if (billed.get(key)?.some(isSameCall)) return false;
-			}
-			return true;
+			// Past this point the answer can only be "do not bill", and that is not something an
+			// item without a key gets to say. Two unrelated objects can carry the same model and
+			// the same token counts, so on those alone an ordinary step printing `{ model, usage }`
+			// could suppress its own record by resembling a call made earlier. A key is what ties
+			// a copy to a call: it costs the same *and* names the call it came from.
+			if (cacheKey === null) return true;
+			return !billed.get(cacheKey)?.some(isSameCall);
 		},
 		outstanding() {
 			const charges: LlmOutstandingCharge[] = [];

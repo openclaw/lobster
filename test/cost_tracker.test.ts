@@ -1670,17 +1670,16 @@ test("workflow cost tracking bills a call once when the copy of its item lost th
 	const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-state-"));
 	try {
 		// `state.get` reads the stored item back without its marks and `pick` projects it down to
-		// the two fields that matter, dropping the cache key as well. What is left is a copy of a
-		// call already billed, and the cost it carries is the only evidence of that.
+		// the two fields that matter, dropping the cache key with them. All that reaches the
+		// accounting is a cost, and it is the cost of the call whose charge is still open.
 		const { result } = await runWorkflow(
 			{
 				steps: [
 					{
-						id: "store",
+						id: "invoke",
 						pipeline:
-							"llm.invoke --model gpt-4o --prompt Summarize | state.set probe | state.get sink",
+							"llm.invoke --model gpt-4o --prompt Summarize | state.set probe | state.get probe | pick model,usage",
 					},
-					{ id: "reload", pipeline: "state.get probe | pick model,usage" },
 				],
 			},
 			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir },
@@ -1690,10 +1689,6 @@ test("workflow cost tracking bills a call once when the copy of its item lost th
 		assert.equal(provider.requests(), 1);
 		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
 		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
-		assert.deepEqual(
-			result._meta?.cost?.byStep.map((entry) => entry.stepId),
-			["store"],
-		);
 	} finally {
 		await provider.close();
 		await fsp.rm(cacheDir, { recursive: true, force: true });
@@ -1736,13 +1731,26 @@ test("llm spend ledger reads a copy that kept no cache key by what it cost", () 
 	const usage = { inputTokens: 1000, outputTokens: 500 };
 	ledger.record("key-a", { model: "gpt-4o", usage });
 
-	// Without a key the cost is the only evidence, and it is enough: a cost the run never
-	// recorded still settles nothing and is billed on its own account.
+	// Without a key the cost is the only evidence, and it is enough to settle an open charge --
+	// which only ever adds a record of a call, never removes one.
 	assert.equal(ledger.billCopy(null, "gpt-4o", { inputTokens: 7 }), true);
 	assert.equal(ledger.outstanding().length, 1);
 	assert.equal(ledger.billCopy(null, "gpt-4o", { ...usage }), true);
 	assert.deepEqual(ledger.outstanding(), []);
-	assert.equal(ledger.billCopy(null, "gpt-4o", { ...usage }), false);
+});
+
+test("llm spend ledger never lets a keyless item withhold its own record", () => {
+	const ledger = createLlmSpendLedger();
+	const usage = { inputTokens: 1000, outputTokens: 500 };
+	ledger.record("key-a", { model: "gpt-4o", usage });
+	assert.ok(ledger.claim("key-a"));
+
+	// Resembling a call this run already billed is not evidence of being a copy of it: two
+	// unrelated objects can carry the same model and the same counts, and an ordinary step
+	// printing `{ model, usage }` must not be able to drop out of `cost_limit` that way. With
+	// the key it is a copy and is not billed twice; without it, it is billed.
+	assert.equal(ledger.billCopy(null, "gpt-4o", { ...usage }), true);
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { ...usage }), false);
 });
 
 test("llm spend ledger keeps a copy naming one call from settling another", () => {
@@ -1794,6 +1802,39 @@ test("workflow cost tracking bills a retried live call and the attempt before it
 		// would report the retry twice and the attempt before it not at all.
 		assert.equal(result._meta?.cost?.totalInputTokens, 4000);
 		assert.equal(result._meta?.cost?.totalOutputTokens, 600);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow cost tracking bills a keyless step that resembles a call already billed", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const lookalike = await emitJsonCommand({
+		model: "gpt-4o",
+		usage: { inputTokens: 1000, outputTokens: 500 },
+	});
+	try {
+		// The second step prints the same model and the same counts as the call the first one
+		// paid for, and names no cache key. That is not evidence of being a copy of it, so it is
+		// billed on its own account -- the run is charged for both.
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{ id: "live", pipeline: "llm.invoke --model gpt-4o --prompt Summarize | json" },
+					{ id: "lookalike", command: lookalike },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(result._meta?.cost?.totalInputTokens, 2000);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["live", "lookalike"],
+		);
 	} finally {
 		await provider.close();
 		await fsp.rm(cacheDir, { recursive: true, force: true });
