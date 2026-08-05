@@ -258,6 +258,8 @@ export type LlmSpendLedger = {
 	) => boolean;
 	outstanding: () => LlmOutstandingCharge[];
 	restore: (charges: readonly LlmOutstandingCharge[] | undefined) => void;
+	settled: () => LlmOutstandingCharge[];
+	restoreSettled: (charges: readonly LlmOutstandingCharge[] | undefined) => void;
 };
 
 // What a live call cost, carried with the charge itself. An item is the usual carrier, but it
@@ -428,6 +430,42 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 				const { cacheKey, count: _count, ...cost } = charge;
 				const restored = sanitizeChargeCost(cost);
 				for (let i = 0; i < count; i++) this.record(cacheKey, restored);
+			}
+		},
+		/**
+		 * The calls this run has already billed. A run that pauses carries this the way it carries
+		 * what it spent: the total says how much, and this says which calls it was for.
+		 */
+		settled() {
+			const charges: LlmOutstandingCharge[] = [];
+			for (const [cacheKey, seen] of billed) {
+				for (const charge of seen) charges.push({ cacheKey, count: 1, ...charge });
+			}
+			return charges;
+		},
+		/**
+		 * Restores what a paused run had billed, so the two halves of its accounting agree after
+		 * the pause. `cost` brings the money back; without this the run that resumes has no record
+		 * of what the money was for, and a later step that re-emits a completed LLM output — `head`
+		 * over `$live.json` — hands on a copy the fresh ledger has never heard of. It is billed on
+		 * top of the restored total: one provider call, twice in `_meta.cost` and against
+		 * `cost_limit`.
+		 *
+		 * A settled charge is only ever read against a cache key, so what this restores can excuse
+		 * a copy of a named call and nothing else. It cannot touch a live call — those settle out
+		 * of the open charges — and the spend it is reconstructing is already in the `cost` this
+		 * same state carries.
+		 */
+		restoreSettled(charges: readonly LlmOutstandingCharge[] | undefined) {
+			if (!Array.isArray(charges)) return;
+			for (const charge of charges) {
+				if (!charge || typeof charge !== "object") continue;
+				if (typeof charge.cacheKey !== "string" || !charge.cacheKey) continue;
+				const count = Math.floor(Number(charge.count ?? 0));
+				if (!Number.isFinite(count) || count < 1) continue;
+				const { cacheKey, count: _count, ...cost } = charge;
+				const restored = sanitizeChargeCost(cost);
+				for (let i = 0; i < count; i++) settle(cacheKey, restored);
 			}
 		},
 	};

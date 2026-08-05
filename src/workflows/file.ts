@@ -208,6 +208,9 @@ type WorkflowResumeState = {
 	cost?: CostSummary;
 	// Calls it had paid for but not yet billed — a pipeline can pause between the two.
 	llmSpend?: LlmOutstandingCharge[];
+	// Calls it had already billed, so the run that resumes can tell a copy of one of them from a
+	// call nobody has paid for. `cost` is the money; this is what the money was for.
+	llmBilled?: LlmOutstandingCharge[];
 	createdAt: string;
 };
 
@@ -874,6 +877,13 @@ export async function runWorkflowFile({
 		llmSpendLedger.restore(
 			resumeState && "llmSpend" in resumeState ? resumeState.llmSpend : undefined,
 		);
+		// The completed steps come back as JSON, so an LLM output among them has lost everything
+		// this process attached to it. A later step that re-emits one hands on a copy that still
+		// names its call, and the restored record is what lets that copy be recognized as one the
+		// paused run already paid for rather than billed a second time on top of `cost`.
+		llmSpendLedger.restoreSettled(
+			resumeState && "llmBilled" in resumeState ? resumeState.llmBilled : undefined,
+		);
 		let lastStepId: string | null =
 			resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
 
@@ -916,6 +926,7 @@ export async function runWorkflowFile({
 						...(llmSpendLedger.outstanding().length
 							? { llmSpend: llmSpendLedger.outstanding() }
 							: null),
+						...(llmSpendLedger.settled().length ? { llmBilled: llmSpendLedger.settled() } : null),
 						createdAt: new Date().toISOString(),
 					});
 
@@ -1406,6 +1417,7 @@ export async function runWorkflowFile({
 						...(llmSpendLedger.outstanding().length
 							? { llmSpend: llmSpendLedger.outstanding() }
 							: null),
+						...(llmSpendLedger.settled().length ? { llmBilled: llmSpendLedger.settled() } : null),
 						createdAt: new Date().toISOString(),
 					});
 
@@ -1515,6 +1527,7 @@ export async function runWorkflowFile({
 						...(llmSpendLedger.outstanding().length
 							? { llmSpend: llmSpendLedger.outstanding() }
 							: null),
+						...(llmSpendLedger.settled().length ? { llmBilled: llmSpendLedger.settled() } : null),
 						createdAt: new Date().toISOString(),
 					});
 
@@ -2382,6 +2395,8 @@ function stepScopedLedger(ledger: LlmSpendLedger, stepId: string): LlmSpendLedge
 		billCopy: (cacheKey, model, usage) => ledger.billCopy(cacheKey, model, usage),
 		outstanding: () => ledger.outstanding(),
 		restore: (charges) => ledger.restore(charges),
+		settled: () => ledger.settled(),
+		restoreSettled: (charges) => ledger.restoreSettled(charges),
 	};
 }
 

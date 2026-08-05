@@ -9,6 +9,7 @@ import { PassThrough } from "node:stream";
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { CostTracker } from "../src/core/cost_tracker.js";
 import { createLlmSpendLedger } from "../src/commands/stdlib/llm_invoke.js";
+import type { LlmOutstandingCharge } from "../src/commands/stdlib/llm_invoke.js";
 import { runWorkflowFile } from "../src/workflows/file.js";
 import { decodeToken } from "../src/token.js";
 
@@ -2001,4 +2002,133 @@ test("workflow cost tracking bills a provider call the schema validator rejected
 		await provider.close();
 		await fsp.rm(cacheDir, { recursive: true, force: true });
 	}
+});
+
+// Restoring what a paused run spent without restoring what it spent it on counts one call
+// twice. The steps come back from the resume state as JSON, so a completed `llm.invoke` output
+// among them carries no mark this process put there — only the cache key, which is an ordinary
+// field. A later step that re-emits that output is then a copy of a call the fresh ledger has
+// never heard of, and it is billed on top of the restored total.
+test("workflow cost tracking does not rebill a pre-pause call re-emitted after a resume", async () => {
+	const provider = await startFakeProvider();
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-rebill-"));
+	const cacheDir = path.join(tmpDir, "cache");
+	const stateDir = path.join(tmpDir, "state");
+	await fsp.mkdir(cacheDir, { recursive: true });
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{ id: "live", pipeline: "llm.invoke --model gpt-4o --prompt Summarize" },
+				{ id: "gate", run: "echo gate", approval: "Continue?" },
+				// Re-emits the answer the run paid for before the gate, as a plain JSON copy.
+				{ id: "echo", pipeline: "head --n 1", stdin: "$live.json" },
+			],
+		}),
+		"utf8",
+	);
+
+	const env = {
+		...process.env,
+		LOBSTER_STATE_DIR: stateDir,
+		LOBSTER_CACHE_DIR: cacheDir,
+		OPENCLAW_URL: provider.url,
+	};
+	const ctx = () => ({
+		stdin: process.stdin,
+		stdout: process.stdout,
+		stderr: new PassThrough(),
+		env,
+		mode: "tool" as const,
+		registry: createDefaultRegistry(),
+	});
+
+	try {
+		const paused = await runWorkflowFile({ filePath, ctx: ctx() });
+		assert.equal(paused.status, "needs_approval");
+		const token = paused.requiresApproval?.resumeToken;
+		assert.equal(typeof token, "string");
+
+		const resumed = await runWorkflowFile({
+			filePath,
+			ctx: ctx(),
+			resume: decodeToken(token as string),
+			approved: true,
+		});
+
+		assert.equal(resumed.status, "ok");
+		// One provider call, so one call's worth of tokens however many steps show its answer.
+		assert.equal(provider.requests(), 1);
+		assert.equal(resumed._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(resumed._meta?.cost?.totalOutputTokens, 500);
+		assert.deepEqual(
+			resumed._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["live"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
+});
+
+// A settled charge is read only against the cache key it names, so restored state cannot excuse
+// a call it does not name. An entry invented for one key leaves a copy of a different call
+// billed exactly as it would have been.
+test("restored billed charges excuse only the call they name", async () => {
+	const ledger = createLlmSpendLedger();
+	ledger.restoreSettled([
+		{
+			cacheKey: "key-a",
+			count: 1,
+			model: "gpt-4o",
+			usage: { inputTokens: 1000, outputTokens: 500 },
+		},
+	]);
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), false);
+	assert.equal(ledger.billCopy("key-b", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), true);
+	// Same key, a different call: the cost has to match the charge that was settled.
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 4000, outputTokens: 10 }), true);
+	// Nothing is opened, so a live call still bills.
+	assert.equal(ledger.claim("key-a"), null);
+});
+
+// What the ledger hands to a pausing run has to be readable by the run that resumes it: a
+// charge already billed travels as billed, and one still open travels as open.
+test("a ledger's settled and open charges survive a round trip through resume state", () => {
+	const source = createLlmSpendLedger();
+	source.record("billed-key", {
+		stepId: "one",
+		model: "gpt-4o",
+		usage: { inputTokens: 100, outputTokens: 20 },
+	});
+	source.record("open-key", {
+		stepId: "two",
+		model: "gpt-4o",
+		usage: { inputTokens: 300, outputTokens: 40 },
+	});
+	source.claim("billed-key", { model: "gpt-4o", usage: { inputTokens: 100, outputTokens: 20 } });
+
+	const carried = JSON.parse(
+		JSON.stringify({ llmSpend: source.outstanding(), llmBilled: source.settled() }),
+	);
+	assert.deepEqual(
+		carried.llmSpend.map((charge: LlmOutstandingCharge) => charge.cacheKey),
+		["open-key"],
+	);
+	assert.deepEqual(
+		carried.llmBilled.map((charge: LlmOutstandingCharge) => charge.cacheKey),
+		["billed-key"],
+	);
+
+	const resumed = createLlmSpendLedger();
+	resumed.restore(carried.llmSpend);
+	resumed.restoreSettled(carried.llmBilled);
+	// The open charge is still the resumed run's to settle...
+	assert.deepEqual(resumed.claim("open-key")?.usage, { inputTokens: 300, outputTokens: 40 });
+	// ...and a copy of the billed one is not billed again.
+	assert.equal(
+		resumed.billCopy("billed-key", "gpt-4o", { inputTokens: 100, outputTokens: 20 }),
+		false,
+	);
 });
