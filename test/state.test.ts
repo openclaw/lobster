@@ -1048,6 +1048,13 @@ test("stripExtendedLengthPrefix maps only namespaces with a plain equivalent", (
 		"\\\\server\\share\\state",
 	);
 
+	// Windows matches the namespace component case-insensitively, so a lowercase
+	// marker names the same share and must map to the same plain path.
+	assert.equal(
+		stripExtendedLengthPrefix("\\\\?\\unc\\server\\share\\state"),
+		"\\\\server\\share\\state",
+	);
+
 	// A device namespace has no drive-letter form, so stripping it would leave a
 	// relative path and break an explicitly configured state directory.
 	const volume = "\\\\?\\Volume{6f4c2b1a-0000-0000-0000-000000000000}\\lobster\\state";

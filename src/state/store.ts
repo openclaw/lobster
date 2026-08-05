@@ -124,7 +124,8 @@ async function syncDirectory(dir: string) {
  * that prefix, so such a path never compares equal to the plain drive path we
  * walk toward and `path.relative` between the two yields an absolute path.
  * Map the namespaces that have a plain equivalent back to it so both ends of the
- * chain share one root form.
+ * chain share one root form. The UNC marker is matched without regard to case,
+ * because Windows accepts a lowercase "unc" namespace component just as well.
  *
  * Device namespaces with no drive-letter or UNC equivalent, such as
  * `\\?\Volume{GUID}\...`, are returned unchanged: stripping their prefix would
@@ -133,7 +134,7 @@ async function syncDirectory(dir: string) {
 export function stripExtendedLengthPrefix(target: string) {
 	if (!target.startsWith("\\\\?\\")) return target;
 	const rest = target.slice(4);
-	if (rest.startsWith("UNC\\")) return `\\\\${rest.slice(4)}`;
+	if (/^UNC\\/i.test(rest)) return `\\\\${rest.slice(4)}`;
 	if (/^[A-Za-z]:[\\/]/.test(rest)) return rest;
 	return target;
 }
