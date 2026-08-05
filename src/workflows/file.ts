@@ -1048,6 +1048,10 @@ export async function runWorkflowFile({
 
 						scopedResults[subStep.id] = subResult;
 						trackStepCost(costTracker, `${step.id}.${subStep.id}`, subResult, llmSpendLedger);
+						// Before the next step runs: a charge no item carried is spend the step really made,
+						// and leaving it for the end would let `cost_limit` wave through every step after the
+						// one that blew the budget.
+						settleUnbilledCharges(costTracker, llmSpendLedger);
 						if (workflow.cost_limit) {
 							costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 						}
@@ -1072,6 +1076,10 @@ export async function runWorkflowFile({
 				results[step.id] = loopResult;
 				lastStepId = step.id;
 				trackStepCost(costTracker, step.id, loopResult, llmSpendLedger);
+				// Before the next step runs: a charge no item carried is spend the step really made,
+				// and leaving it for the end would let `cost_limit` wave through every step after the
+				// one that blew the budget.
+				settleUnbilledCharges(costTracker, llmSpendLedger);
 				if (workflow.cost_limit) {
 					costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 				}
@@ -1471,6 +1479,10 @@ export async function runWorkflowFile({
 
 			trackStepCost(costTracker, step.id, result, llmSpendLedger, deferredReplays);
 			settleReplayedCosts(costTracker, deferredReplays, llmSpendLedger);
+			// Before the next step runs: a charge no item carried is spend the step really made,
+			// and leaving it for the end would let `cost_limit` wave through every step after the
+			// one that blew the budget.
+			settleUnbilledCharges(costTracker, llmSpendLedger);
 			if (workflow.cost_limit) {
 				costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 			}
@@ -1545,10 +1557,9 @@ export async function runWorkflowFile({
 			}
 		}
 
-		// Every charge still open here is a provider call this run paid for and no item ever
-		// carried to the accounting point. A paused run does not reach this line -- its charges
-		// travel in the resume state instead -- so this settles only calls that have nowhere
-		// left to be billed.
+		// Whatever a skipped or failed step left open, and anything from a run with no step left
+		// to settle it against. A paused run does not reach this line -- its charges travel in
+		// the resume state instead -- so this settles only calls with nowhere left to be billed.
 		settleUnbilledCharges(costTracker, llmSpendLedger);
 		if (workflow.cost_limit) {
 			costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
@@ -2356,7 +2367,7 @@ function stepScopedLedger(ledger: LlmSpendLedger, stepId: string): LlmSpendLedge
 	return {
 		record: (cacheKey, charge) => ledger.record(cacheKey, { ...charge, stepId }),
 		claim: (cacheKey) => ledger.claim(cacheKey),
-		claimEquivalent: (cacheKey, model, usage) => ledger.claimEquivalent(cacheKey, model, usage),
+		billCopy: (cacheKey, model, usage) => ledger.billCopy(cacheKey, model, usage),
 		outstanding: () => ledger.outstanding(),
 		restore: (charges) => ledger.restore(charges),
 	};
@@ -2423,12 +2434,14 @@ function trackStepCost(
 			llmSpendLedger.claim(provenance.cacheKey);
 		} else if (typeof record.cacheKey === "string" && record.cacheKey) {
 			// No mark, but numbers: a stage that JSON round-trips the stream hands on a copy that
-			// kept `model` and `usage` and lost everything this process attached. Billing the copy
-			// is right, and it has to settle the charge behind it or the sweep below bills the
-			// same call a second time. The ledger only settles a charge whose recorded cost is
-			// the one being billed, so a step printing an invented cache key still cannot hide
-			// spend.
-			llmSpendLedger.claimEquivalent(record.cacheKey, model, usage as Record<string, unknown>);
+			// kept `model` and `usage` and lost everything this process attached. The ledger
+			// decides, because only it knows whether that call has been accounted for yet -- the
+			// copy either settles the charge and is billed as its carrier, or stands behind a
+			// call already billed and is not billed twice. A cost the run never recorded matches
+			// neither and is billed on its own account.
+			if (!llmSpendLedger.billCopy(record.cacheKey, model, usage as Record<string, unknown>)) {
+				continue;
+			}
 		}
 		costTracker.recordUsage(stepId, model, usage as Record<string, unknown>);
 	}
@@ -2451,8 +2464,19 @@ function settleReplayedCosts(
 	llmSpendLedger: LlmSpendLedger,
 ) {
 	for (const replay of deferred) {
-		if (!llmSpendLedger.claim(replay.cacheKey)) continue;
-		costTracker.recordUsage(replay.stepId, replay.model, replay.usage);
+		const settled = llmSpendLedger.claim(replay.cacheKey);
+		if (!settled) continue;
+		// Bill what the call this settles actually cost, not what the replay carries. Identical
+		// calls that raced on a cold cache are separate charges under one key, and every replay
+		// of them repeats whichever single answer was stored -- so costing each replay by its
+		// own copy reports all of those calls at the price of the one that won the cache write.
+		// A charge restored from resume state written before it carried a cost falls back.
+		const cost = typeof settled === "object" && settled.usage ? settled : null;
+		costTracker.recordUsage(
+			replay.stepId,
+			cost ? (cost.model ?? null) : replay.model,
+			cost?.usage ?? replay.usage,
+		);
 	}
 	deferred.length = 0;
 }

@@ -216,12 +216,8 @@ export function llmProvenanceOf(value: unknown): LlmProvenance | null {
 // round trip through run state and the response cache.
 export type LlmSpendLedger = {
 	record: (cacheKey: string, charge?: LlmChargeCost) => void;
-	claim: (cacheKey: string) => boolean;
-	claimEquivalent: (
-		cacheKey: string,
-		model: string | null,
-		usage: Record<string, unknown>,
-	) => boolean;
+	claim: (cacheKey: string) => LlmChargeCost | null;
+	billCopy: (cacheKey: string, model: string | null, usage: Record<string, unknown>) => boolean;
 	outstanding: () => LlmOutstandingCharge[];
 	restore: (charges: readonly LlmOutstandingCharge[] | undefined) => void;
 };
@@ -261,6 +257,19 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 	// replays that later stand in for them have to be able to settle both, and each carries the
 	// cost of the call that opened it.
 	const unbilled = new Map<string, LlmChargeCost[]>();
+	// Charges this run has already accounted for. A copy of an item that lost its mark can turn
+	// up in any later step, and the only way to tell it from a call nobody has billed yet is to
+	// remember what has been billed. Bounded like the open charges, oldest key first.
+	const billed = new Map<string, LlmChargeCost[]>();
+	function settle(cacheKey: string, charge: LlmChargeCost | undefined) {
+		const seen = billed.get(cacheKey) ?? [];
+		seen.push(charge ?? {});
+		billed.set(cacheKey, seen);
+		for (const oldest of billed.keys()) {
+			if (billed.size <= MAX_UNBILLED_LIVE_INVOCATIONS) break;
+			billed.delete(oldest);
+		}
+	}
 	return {
 		record(cacheKey: string, charge?: LlmChargeCost) {
 			if (!cacheKey) return;
@@ -274,37 +283,55 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 			}
 		},
 		/**
-		 * Settles one outstanding charge, returning true for the caller that must bill it. A
-		 * live item and every replay of it draw on the same charges, so a provider call is
-		 * billed exactly once however many steps re-emit its answer — and N calls under one key
-		 * can be billed N times, never fewer.
+		 * Settles one outstanding charge and hands back what that call cost, or null for the
+		 * caller that must not bill anything. A live item and every replay of it draw on the same
+		 * charges, so a provider call is billed exactly once however many steps re-emit its
+		 * answer — and N calls under one key can be billed N times, never fewer.
+		 *
+		 * The cost comes back because a replay is not a reliable witness of it: identical calls
+		 * that raced on a cold cache each paid their own way, and every replay of them carries
+		 * whichever single answer was stored.
 		 */
 		claim(cacheKey: string) {
 			const open = unbilled.get(cacheKey);
-			if (!open?.length) return false;
-			open.shift();
+			if (!open?.length) return null;
+			const [charge] = open.splice(0, 1);
 			if (!open.length) unbilled.delete(cacheKey);
-			return true;
+			settle(cacheKey, charge);
+			return charge ?? {};
 		},
 		/**
-		 * Settles the charge an item is being billed for when the item lost its in-process mark
-		 * but kept the numbers: a stage that JSON round-trips the stream hands on such a copy, and
-		 * billing it while the charge stayed open would let the run be charged twice for one call.
+		 * Whether an item carrying a call's numbers but not its in-process mark should be billed.
+		 * A stage that JSON round-trips the stream hands on exactly such a copy: the numbers
+		 * survive, every symbol this process attached does not.
 		 *
-		 * The public cache key is not trusted on its own -- any step can print one -- so a charge
-		 * is settled only when the cost being billed is the cost it recorded. A made-up item can
-		 * therefore add spend to a run, which it always could, but never hide any.
+		 * The copy is billed when it is the first thing to account for the call, and settles the
+		 * charge as it goes. It is not billed when that call has already been settled — by its
+		 * own item, by a replay, or by the run itself when nothing carried it — because then the
+		 * copy is the second thing to account for one provider call.
+		 *
+		 * Neither answer trusts the public cache key on its own, because any step can print one:
+		 * both require the cost being billed to be the cost the run recorded for that call. An
+		 * item that invents a cost is billed on its own account and settles nothing, so a made-up
+		 * item can still add spend to a run, which it always could, and can never hide any.
 		 */
-		claimEquivalent(cacheKey: string, model: string | null, usage: Record<string, unknown>) {
+		billCopy(cacheKey: string, model: string | null, usage: Record<string, unknown>) {
 			const open = unbilled.get(cacheKey);
-			if (!open?.length) return false;
-			const index = open.findIndex(
-				(charge) => (charge.model ?? null) === model && sameBillableUsage(charge.usage, usage),
-			);
-			if (index < 0) return false;
-			open.splice(index, 1);
-			if (!open.length) unbilled.delete(cacheKey);
-			return true;
+			const index =
+				open?.findIndex(
+					(charge) => (charge.model ?? null) === model && sameBillableUsage(charge.usage, usage),
+				) ?? -1;
+			if (open && index >= 0) {
+				settle(cacheKey, open.splice(index, 1)[0]);
+				if (!open.length) unbilled.delete(cacheKey);
+				return true;
+			}
+			const alreadyBilled = billed
+				.get(cacheKey)
+				?.some(
+					(charge) => (charge.model ?? null) === model && sameBillableUsage(charge.usage, usage),
+				);
+			return !alreadyBilled;
 		},
 		outstanding() {
 			const charges: LlmOutstandingCharge[] = [];

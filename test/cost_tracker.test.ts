@@ -318,7 +318,13 @@ function forgedReplayItem(source: "cache" | "run_state" = "cache") {
 
 // Minimal OpenClaw-shaped provider: llm.invoke auto-detects it from OPENCLAW_URL, and the
 // request count shows whether a step reached a provider or replayed a stored answer.
-async function startFakeProvider(holdUntil = 1) {
+async function startFakeProvider(
+	holdUntil = 1,
+	usageFor: (seen: number) => Record<string, number> = () => ({
+		inputTokens: 1000,
+		outputTokens: 500,
+	}),
+) {
 	let requests = 0;
 	const held: Array<() => void> = [];
 	const releaseHeld = () => {
@@ -344,7 +350,7 @@ async function startFakeProvider(holdUntil = 1) {
 								model: parsed.args?.model,
 								prompt: parsed.args?.prompt,
 								output: { data: { summary: "hello" } },
-								usage: { inputTokens: 1000, outputTokens: 500 },
+								usage: usageFor(seen),
 							},
 						},
 					}),
@@ -1422,8 +1428,8 @@ test("workflow cost tracking bills a call once when only a JSON round trip of it
 	try {
 		// `state.set` stores the model item and `state.get` reads it back as a plain object: the
 		// numbers survive, the in-process mark does not. Nothing bills the original -- the step
-		// ends on an unrelated key -- so the copy is the only thing billed, and the charge behind
-		// it has to be settled by that copy rather than swept a second time at the end.
+		// ends on an unrelated key -- so the call is billed to the step that made it, and the
+		// copy surfacing a step later must not be billed on top of it.
 		const { result } = await runWorkflow(
 			{
 				steps: [
@@ -1444,7 +1450,7 @@ test("workflow cost tracking bills a call once when only a JSON round trip of it
 		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
 		assert.deepEqual(
 			result._meta?.cost?.byStep.map((entry) => entry.stepId),
-			["reload"],
+			["store"],
 		);
 	} finally {
 		await provider.close();
@@ -1453,34 +1459,124 @@ test("workflow cost tracking bills a call once when only a JSON round trip of it
 	}
 });
 
-test("llm spend ledger settles a cloned item's charge only at the cost it recorded", () => {
+test("llm spend ledger bills a copy of an item only for a call nothing accounted for", () => {
 	const ledger = createLlmSpendLedger();
 	ledger.record("key-a", { model: "gpt-4o", usage: { inputTokens: 1000, outputTokens: 500 } });
 
-	// A step can print any cache key it likes, so a key alone must not settle anything: only the
-	// cost the charge recorded can, which is the cost an honest copy is billed at anyway.
-	assert.equal(
-		ledger.claimEquivalent("key-a", "gpt-4o", { inputTokens: 1, outputTokens: 1 }),
-		false,
-	);
-	assert.equal(
-		ledger.claimEquivalent("key-b", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }),
-		false,
-	);
-	assert.equal(
-		ledger.claimEquivalent("key-a", "gpt-5", { inputTokens: 1000, outputTokens: 500 }),
-		false,
-	);
+	// A step can print any cache key it likes, so a key alone settles nothing: an item whose
+	// cost the run never recorded is billed on its own account and leaves the charge open, which
+	// is what stops an invented item from hiding real spend.
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 1, outputTokens: 1 }), true);
+	assert.equal(ledger.billCopy("key-b", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), true);
+	assert.equal(ledger.billCopy("key-a", "gpt-5", { inputTokens: 1000, outputTokens: 500 }), true);
 	assert.equal(ledger.outstanding().length, 1);
 
-	// Key order changes across a JSON round trip; the numbers do not.
-	assert.equal(
-		ledger.claimEquivalent("key-a", "gpt-4o", { outputTokens: 500, inputTokens: 1000 }),
-		true,
-	);
+	// The recorded cost settles the charge, and the copy is billed as its carrier. Key order
+	// changes across a JSON round trip; the numbers do not.
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { outputTokens: 500, inputTokens: 1000 }), true);
 	assert.deepEqual(ledger.outstanding(), []);
-	assert.equal(
-		ledger.claimEquivalent("key-a", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }),
-		false,
+
+	// A second copy stands behind a call already billed, so it is not billed again.
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), false);
+});
+
+test("llm spend ledger does not bill a copy of a call the run already settled", () => {
+	const ledger = createLlmSpendLedger();
+	const usage = { inputTokens: 1000, outputTokens: 500 };
+	ledger.record("key-a", { model: "gpt-4o", usage });
+
+	// However the call was accounted for -- here by its own live item -- a copy of it that turns
+	// up in a later step is the second thing to account for one provider call.
+	assert.ok(ledger.claim("key-a"));
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { ...usage }), false);
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 7 }), true);
+});
+
+// Two identical calls that race on a cold cache do not cost the same: output length varies with
+// sampling. Only one of the two answers is stored, so every replay of them carries that one
+// answer's numbers -- billing each replay by the copy it holds reports both calls at the price
+// of whichever won the cache write.
+test("workflow cost tracking bills each retried replay at what its own call cost", async () => {
+	const provider = await startFakeProvider(2, (seen) => ({
+		inputTokens: seen === 1 ? 1000 : 3000,
+		outputTokens: seen === 1 ? 500 : 100,
+	}));
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const flaky = await failsOnceCommand();
+	const invoke = "llm.invoke --model gpt-4o --prompt Summarize";
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "invoke-twice-then-fail",
+						retry: { max: 2, delay_ms: 1 },
+						parallel: {
+							branches: [
+								{ id: "invoke-a", pipeline: invoke },
+								{ id: "invoke-b", pipeline: invoke },
+								{ id: "flaky", command: flaky },
+							],
+						},
+					},
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 2);
+		// 1000 + 3000 and 500 + 100: what the provider was actually paid, whichever answer the
+		// two replays ended up carrying.
+		assert.equal(result._meta?.cost?.totalInputTokens, 4000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 600);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("cost_limit stop halts before the next step when no item carried the call's usage", async () => {
+	const provider = await startFakeProvider();
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-limit-"));
+	const marker = path.join(tmpDir, "ran.txt").replaceAll(path.sep, "/");
+	const script = path.join(tmpDir, "touch.mjs");
+	await fsp.writeFile(
+		script,
+		`import fs from "node:fs";
+fs.writeFileSync("${marker}", "ran");
+`,
+		"utf8",
 	);
+
+	try {
+		// The renderer consumes the model item and `state.get` emits one of its own, so the step
+		// completes with nothing carrying the call's usage. The budget is already blown when the
+		// step ends, and the step after it must not get to run its side effect.
+		await assert.rejects(
+			() =>
+				runWorkflow(
+					{
+						cost_limit: { max_usd: 0.001, action: "stop" },
+						steps: [
+							{
+								id: "spends",
+								pipeline: "llm.invoke --model gpt-4o --prompt Summarize | json | state.get sink",
+							},
+							{ id: "after", command: `node ${script}` },
+						],
+					},
+					{
+						OPENCLAW_URL: provider.url,
+						LOBSTER_CACHE_DIR: path.join(tmpDir, "cache"),
+						LOBSTER_STATE_DIR: path.join(tmpDir, "state"),
+					},
+				).then((run) => run.result),
+			/Cost limit exceeded/,
+		);
+		await assert.rejects(() => fsp.access(marker), "the step after the limit must not run");
+	} finally {
+		await provider.close();
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
 });
