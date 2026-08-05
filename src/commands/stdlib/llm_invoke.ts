@@ -376,6 +376,9 @@ async function runLlmInvoke({
 
 	const inputArtifacts: any[] = [];
 	for await (const item of input) inputArtifacts.push(item);
+	// Draining pipeline input waits on the upstream step, so a timeout can fire
+	// here. Re-check before the reuse lookups below can answer with a success.
+	signal?.throwIfAborted();
 
 	const normalizedArtifacts = [...inputArtifacts, ...providedArtifacts].map(normalizeArtifact);
 	const artifactHashes = normalizedArtifacts.map(hashArtifact);
@@ -390,6 +393,9 @@ async function runLlmInvoke({
 
 	if (stateKey && !forceRefresh) {
 		const stored = await readReusableLlmState(env, stateKey);
+		// Reading run state is I/O of unbounded duration; a signal that aborted
+		// during it must not be overtaken by the replay below.
+		signal?.throwIfAborted();
 		const reused = pickReusableState(stored, cacheKey, config.stateType);
 		if (reused) {
 			return {
@@ -402,6 +408,7 @@ async function runLlmInvoke({
 
 	if (!disableCache && !forceRefresh) {
 		const cache = await readCacheEntry(env, cacheKey, config.cacheNamespace);
+		signal?.throwIfAborted();
 		if (cache) {
 			return {
 				output: streamOf(cache.items.map((item) => ({ ...item, source: "cache", cached: true }))),

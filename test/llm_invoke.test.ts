@@ -320,6 +320,137 @@ test("llm.invoke does not complete from cache when ctx.signal is already aborted
 	}
 });
 
+test("llm.invoke does not replay a cache hit when ctx.signal aborts while input is drained", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+	await mkdir(path.join(cacheDir, "llm.invoke"), { recursive: true });
+
+	let requests = 0;
+	const server = http.createServer((req, res) => {
+		requests += 1;
+		req.resume();
+		req.on("end", () => {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					result: { runId: "cached_1", output: { text: "hello", data: null } },
+				}),
+			);
+		});
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+	const env = {
+		LOBSTER_LLM_ADAPTER_URL: `http://127.0.0.1:${port}/invoke`,
+		LOBSTER_CACHE_DIR: cacheDir,
+	};
+	const args = { _: [], provider: "http", prompt: "Summarize" };
+
+	try {
+		const warm = await cmd.run({
+			input: streamOf([]),
+			args,
+			ctx: baseCtx(env, registry),
+		} as any);
+		assert.equal((await collect(warm.output!))[0].cached, false);
+		assert.equal(requests, 1);
+
+		// The step timeout fires while the upstream step is still producing input,
+		// which is after the entry check and before the cache lookup.
+		const controller = new AbortController();
+		const abortingInput = (async function* () {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			controller.abort();
+		})();
+
+		await assert.rejects(
+			() =>
+				cmd.run({
+					input: abortingInput,
+					args,
+					ctx: { ...baseCtx(env, registry), signal: controller.signal },
+				} as any),
+			(err: any) => err?.name === "AbortError" || err?.code === "ABORT_ERR",
+		);
+		assert.equal(requests, 1, "a cancelled run must not reach the adapter either");
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
+		await closeServer(server);
+	}
+});
+
+test("llm.invoke does not replay run state when ctx.signal aborts while input is drained", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const stateDir = await mkdtemp(path.join(tmpdir(), "lobster-state-"));
+
+	let requests = 0;
+	const server = http.createServer((req, res) => {
+		requests += 1;
+		req.resume();
+		req.on("end", () => {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					result: { runId: "state_1", output: { text: "hello", data: null } },
+				}),
+			);
+		});
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+	const env = {
+		LOBSTER_LLM_ADAPTER_URL: `http://127.0.0.1:${port}/invoke`,
+		LOBSTER_STATE_DIR: stateDir,
+	};
+	const args = {
+		_: [],
+		provider: "http",
+		prompt: "Summarize",
+		"state-key": "step-1",
+		"disable-cache": true,
+	};
+
+	try {
+		const warm = await cmd.run({
+			input: streamOf([]),
+			args,
+			ctx: baseCtx(env, registry),
+		} as any);
+		assert.equal((await collect(warm.output!))[0].cached, false);
+		assert.equal(requests, 1);
+
+		const controller = new AbortController();
+		const abortingInput = (async function* () {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			controller.abort();
+		})();
+
+		await assert.rejects(
+			() =>
+				cmd.run({
+					input: abortingInput,
+					args,
+					ctx: { ...baseCtx(env, registry), signal: controller.signal },
+				} as any),
+			(err: any) => err?.name === "AbortError" || err?.code === "ABORT_ERR",
+		);
+		assert.equal(requests, 1, "a cancelled run must not reach the adapter either");
+	} finally {
+		await rm(stateDir, { recursive: true, force: true });
+		await closeServer(server);
+	}
+});
+
 test("llm.invoke does not call the adapter when ctx.signal is already aborted", async () => {
 	const registry = createDefaultRegistry();
 	const cmd = registry.get("llm.invoke");
