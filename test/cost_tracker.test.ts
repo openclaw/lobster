@@ -1209,3 +1209,81 @@ test("workflow cost tracking bills a replay when the cache write failed after th
 		await fsp.rm(tmpDir, { recursive: true, force: true });
 	}
 });
+
+test("workflow cost tracking bills one call when a parallel replay branch is declared first", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const step = "llm.invoke --model gpt-4o --prompt Summarize";
+	try {
+		// The replay branch is declared before the live one, so it is accounted first: without
+		// holding replays back it claims the charge the refresh branch opened and is billed for
+		// it, and the refresh branch -- billed whatever its own claim returns -- is billed again.
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{ id: "warm", pipeline: step },
+					{
+						id: "both",
+						parallel: {
+							wait: "all",
+							branches: [
+								{ id: "replay", pipeline: step },
+								{ id: "refresh", pipeline: `${step} --refresh` },
+							],
+						},
+					},
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 2, "one warm-up call and one refresh");
+		assert.equal(result._meta?.cost?.totalInputTokens, 2000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 1000);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["warm", "refresh"],
+		);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("cost_limit stop is not tripped by a parallel replay branch declared first", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const step = "llm.invoke --model gpt-4o --prompt Summarize";
+	try {
+		// Two provider calls cost $0.0150; the third charge the ordering bug added took the run
+		// to $0.0225 and stopped it at a budget it had not spent.
+		const { result } = await runWorkflow(
+			{
+				cost_limit: { max_usd: 0.02, action: "stop" },
+				steps: [
+					{ id: "warm", pipeline: step },
+					{
+						id: "both",
+						parallel: {
+							wait: "all",
+							branches: [
+								{ id: "replay", pipeline: step },
+								{ id: "refresh", pipeline: `${step} --refresh` },
+							],
+						},
+					},
+					{ id: "after", command: "echo done" },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(result._meta?.cost?.estimatedCostUsd, 0.015);
+		assert.equal(String(result.output?.[0]).trim(), "done", "the step after ran");
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});

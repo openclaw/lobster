@@ -1457,16 +1457,20 @@ export async function runWorkflowFile({
 				continue;
 			}
 
+			// One accounting group per step: its parallel branches and its own result settle
+			// together, so no branch can be billed for a charge another branch is about to claim.
+			const deferredReplays: DeferredReplay[] = [];
 			if (parallelBranchResults) {
 				for (const [branchId, branchResult] of Object.entries(parallelBranchResults)) {
 					results[branchId] = branchResult;
-					trackStepCost(costTracker, branchId, branchResult, llmSpendLedger);
+					trackStepCost(costTracker, branchId, branchResult, llmSpendLedger, deferredReplays);
 				}
 			}
 			results[step.id] = result;
 			lastStepId = step.id;
 
-			trackStepCost(costTracker, step.id, result, llmSpendLedger);
+			trackStepCost(costTracker, step.id, result, llmSpendLedger, deferredReplays);
+			settleReplayedCosts(costTracker, deferredReplays, llmSpendLedger);
 			if (workflow.cost_limit) {
 				costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 			}
@@ -2324,11 +2328,21 @@ function composingSpendLedger(ctx: RunContext): LlmSpendLedger | null {
 	return typeof ledger.record === "function" && typeof ledger.claim === "function" ? ledger : null;
 }
 
+// A replay this step held back: it may only be billed once every live result accounted
+// alongside it has claimed the charge it opened.
+type DeferredReplay = {
+	stepId: string;
+	cacheKey: string;
+	model: string | null;
+	usage: Record<string, unknown>;
+};
+
 function trackStepCost(
 	costTracker: CostTracker,
 	stepId: string,
 	result: WorkflowStepResult,
 	llmSpendLedger: LlmSpendLedger,
+	deferredReplays?: DeferredReplay[],
 ) {
 	// Bill the items the pipeline produced rather than the JSON re-read from its stdout: a
 	// renderer serializes them, and replay provenance does not survive that round trip. Steps
@@ -2336,32 +2350,63 @@ function trackStepCost(
 	const json = pipelineSourceItems(result) ?? result.json;
 	if (!json || typeof json !== "object") return;
 
+	// Replays wait for the live results accounted with them. Branches of one parallel step are
+	// billed in declaration order, so a cached replay declared before an identical `--refresh`
+	// branch would otherwise claim the charge that branch had just opened — and the live branch,
+	// billed whatever its own claim returns, would be billed for it too. One provider call, two
+	// charges, and a `cost_limit` tripped on spend that never happened.
+	const deferred = deferredReplays ?? [];
 	const items = Array.isArray(json) ? json : [json];
 	for (const item of items) {
 		if (!item || typeof item !== "object") continue;
 		const record = item as Record<string, unknown>;
 		const usage = record.usage;
 		if (!usage || typeof usage !== "object") continue;
+		const modelValue = record.model;
+		const model = typeof modelValue === "string" ? modelValue : null;
 		// Provenance the LLM commands attach in-process, never a field in the JSON: a step that
 		// prints a replay-shaped object stays billed, so `cost_limit` cannot be evaded. A
 		// projection can drop the item's own mark while carrying its usage record across, so the
 		// record is read too — both marks are symbol keys built in this process.
 		const provenance = llmProvenanceOf(record) ?? llmProvenanceOf(usage);
 		if (provenance) {
-			// Claiming settles the charge for the live call this item belongs to, and succeeds
-			// for exactly one of the live item and its replays.
-			const claimed = llmSpendLedger.claim(provenance.cacheKey);
-			// A replay carries the usage of the call that produced it, so counting it again
-			// charges a run for tokens no provider was asked to spend. It is billed only when
-			// the call it replays is still unpaid for: a step is costed once it succeeds, so a
-			// step that failed after its LLM call and was retried leaves its real spend riding
-			// on the replay the retry produced.
-			if (provenance.replayed && !claimed) continue;
+			if (provenance.replayed) {
+				deferred.push({
+					stepId,
+					cacheKey: provenance.cacheKey,
+					model,
+					usage: usage as Record<string, unknown>,
+				});
+				continue;
+			}
+			// Settles the charge this live call opened, so no replay of it is billed again.
+			llmSpendLedger.claim(provenance.cacheKey);
 		}
-		const modelValue = record.model;
-		const model = typeof modelValue === "string" ? modelValue : null;
 		costTracker.recordUsage(stepId, model, usage as Record<string, unknown>);
 	}
+
+	if (!deferredReplays) settleReplayedCosts(costTracker, deferred, llmSpendLedger);
+}
+
+/**
+ * Bills the replays a step held back, now that every live result accounted alongside them has
+ * settled its own charge.
+ *
+ * A replay carries the usage of the call that produced it, so counting it again charges a run
+ * for tokens no provider was asked to spend. It is billed only when the call it replays is
+ * still unpaid for: a step is costed once it succeeds, so a step that failed after its LLM
+ * call and was retried leaves its real spend riding on the replay the retry produced.
+ */
+function settleReplayedCosts(
+	costTracker: CostTracker,
+	deferred: DeferredReplay[],
+	llmSpendLedger: LlmSpendLedger,
+) {
+	for (const replay of deferred) {
+		if (!llmSpendLedger.claim(replay.cacheKey)) continue;
+		costTracker.recordUsage(replay.stepId, replay.model, replay.usage);
+	}
+	deferred.length = 0;
 }
 
 function parseJson(stdout: string) {
