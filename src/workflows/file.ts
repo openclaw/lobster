@@ -1476,18 +1476,18 @@ export async function runWorkflowFile({
 
 			// One accounting group per step: its parallel branches and its own result settle
 			// together, so no branch can be billed for a charge another branch is about to claim.
-			const deferredReplays: DeferredReplay[] = [];
+			const deferredCharges: DeferredCharge[] = [];
 			if (parallelBranchResults) {
 				for (const [branchId, branchResult] of Object.entries(parallelBranchResults)) {
 					results[branchId] = branchResult;
-					trackStepCost(costTracker, branchId, branchResult, llmSpendLedger, deferredReplays);
+					trackStepCost(costTracker, branchId, branchResult, llmSpendLedger, deferredCharges);
 				}
 			}
 			results[step.id] = result;
 			lastStepId = step.id;
 
-			trackStepCost(costTracker, step.id, result, llmSpendLedger, deferredReplays);
-			settleReplayedCosts(costTracker, deferredReplays, llmSpendLedger);
+			trackStepCost(costTracker, step.id, result, llmSpendLedger, deferredCharges);
+			settleDeferredCosts(costTracker, deferredCharges, llmSpendLedger);
 			// Before the next step runs: a charge no item carried is spend the step really made,
 			// and leaving it for the end would let `cost_limit` wave through every step after the
 			// one that blew the budget.
@@ -2357,11 +2357,14 @@ function composingSpendLedger(ctx: RunContext): LlmSpendLedger | null {
 	return typeof ledger.record === "function" && typeof ledger.claim === "function" ? ledger : null;
 }
 
-// A replay this step held back: it may only be billed once every live result accounted
-// alongside it has claimed the charge it opened.
-type DeferredReplay = {
+// An item this step held back: it may only be read against the ledger once every marked live
+// result accounted alongside it has settled the charge it opened. A `replay` carries the mark of
+// the call it stands in for; a `copy` lost the mark on its way through a stage that rebuilt it,
+// and sometimes the cache key with it.
+type DeferredCharge = {
+	kind: "replay" | "copy";
 	stepId: string;
-	cacheKey: string;
+	cacheKey: string | null;
 	model: string | null;
 	usage: Record<string, unknown>;
 };
@@ -2402,7 +2405,7 @@ function trackStepCost(
 	stepId: string,
 	result: WorkflowStepResult,
 	llmSpendLedger: LlmSpendLedger,
-	deferredReplays?: DeferredReplay[],
+	deferredCharges?: DeferredCharge[],
 ) {
 	// Bill the items the pipeline produced rather than the JSON re-read from its stdout: a
 	// renderer serializes them, and replay provenance does not survive that round trip. Steps
@@ -2415,7 +2418,7 @@ function trackStepCost(
 	// branch would otherwise claim the charge that branch had just opened — and the live branch,
 	// billed whatever its own claim returns, would be billed for it too. One provider call, two
 	// charges, and a `cost_limit` tripped on spend that never happened.
-	const deferred = deferredReplays ?? [];
+	const deferred = deferredCharges ?? [];
 	const items = Array.isArray(json) ? json : [json];
 	for (const item of items) {
 		if (!item || typeof item !== "object") continue;
@@ -2432,6 +2435,7 @@ function trackStepCost(
 		if (provenance) {
 			if (provenance.replayed) {
 				deferred.push({
+					kind: "replay",
 					stepId,
 					cacheKey: provenance.cacheKey,
 					model,
@@ -2449,37 +2453,46 @@ function trackStepCost(
 		} else {
 			// No mark, but numbers: a stage that JSON round-trips the stream hands on a copy that
 			// kept `model` and `usage` and lost everything this process attached -- sometimes the
-			// cache key with it. The ledger decides, because only it knows whether that call has
-			// been accounted for yet: the copy either settles the charge and is billed as its
-			// carrier, or stands behind a call already billed and is not billed twice. A cost the
-			// run never recorded matches neither and is billed on its own account.
-			const copiedKey =
-				typeof record.cacheKey === "string" && record.cacheKey ? record.cacheKey : null;
-			if (!llmSpendLedger.billCopy(copiedKey, model, usage as Record<string, unknown>)) {
-				continue;
-			}
+			// cache key with it. Held back like a replay, and for the same reason: a copy that
+			// lost its key is read by cost alone, and until the marked results have settled their
+			// own charges an identical parallel call's charge is still open to be mistaken for
+			// the one this copy came from.
+			deferred.push({
+				kind: "copy",
+				stepId,
+				cacheKey: typeof record.cacheKey === "string" && record.cacheKey ? record.cacheKey : null,
+				model,
+				usage: usage as Record<string, unknown>,
+			});
+			continue;
 		}
 		costTracker.recordUsage(stepId, model, usage as Record<string, unknown>);
 	}
 
-	if (!deferredReplays) settleReplayedCosts(costTracker, deferred, llmSpendLedger);
+	if (!deferredCharges) settleDeferredCosts(costTracker, deferred, llmSpendLedger);
 }
 
 /**
- * Bills the replays a step held back, now that every live result accounted alongside them has
- * settled its own charge.
+ * Bills what a step held back, now that every marked live result accounted alongside them has
+ * settled its own charge. Replays go first: one carries the mark of the call it stands in for,
+ * which is better evidence than the cost a copy carries on its own.
  *
  * A replay carries the usage of the call that produced it, so counting it again charges a run
  * for tokens no provider was asked to spend. It is billed only when the call it replays is
  * still unpaid for: a step is costed once it succeeds, so a step that failed after its LLM
  * call and was retried leaves its real spend riding on the replay the retry produced.
+ *
+ * A copy is billed either way — it is a record of a call, and nothing in a JSON payload can be
+ * trusted to say otherwise — but the ledger still decides whether it settles a charge, so the
+ * step settlement does not add a second record of the same call.
  */
-function settleReplayedCosts(
+function settleDeferredCosts(
 	costTracker: CostTracker,
-	deferred: DeferredReplay[],
+	deferred: DeferredCharge[],
 	llmSpendLedger: LlmSpendLedger,
 ) {
 	for (const replay of deferred) {
+		if (replay.kind !== "replay" || replay.cacheKey === null) continue;
 		const settled = llmSpendLedger.claim(replay.cacheKey);
 		if (!settled) continue;
 		// Bill what the call this settles actually cost, not what the replay carries. Identical
@@ -2493,6 +2506,12 @@ function settleReplayedCosts(
 			cost ? (cost.model ?? null) : replay.model,
 			cost?.usage ?? replay.usage,
 		);
+	}
+	for (const copy of deferred) {
+		if (copy.kind !== "copy") continue;
+		if (llmSpendLedger.billCopy(copy.cacheKey, copy.model, copy.usage)) {
+			costTracker.recordUsage(copy.stepId, copy.model, copy.usage);
+		}
 	}
 	deferred.length = 0;
 }

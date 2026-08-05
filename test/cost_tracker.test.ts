@@ -324,6 +324,8 @@ async function startFakeProvider(
 		inputTokens: 1000,
 		outputTokens: 500,
 	}),
+	// Lets a case fix the order two concurrent calls reach the ledger in.
+	delayMsFor: (prompt: string) => number = () => 0,
 ) {
 	let requests = 0;
 	const held: Array<() => void> = [];
@@ -356,8 +358,13 @@ async function startFakeProvider(
 					}),
 				);
 			};
-			held.push(answer);
-			if (requests >= holdUntil) releaseHeld();
+			const enqueue = () => {
+				held.push(answer);
+				if (requests >= holdUntil) releaseHeld();
+			};
+			const delayMs = delayMsFor(String(parsed.args?.prompt ?? ""));
+			if (delayMs > 0) setTimeout(enqueue, delayMs);
+			else enqueue();
 		});
 	});
 	await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -1838,5 +1845,51 @@ test("workflow cost tracking bills a keyless step that resembles a call already 
 	} finally {
 		await provider.close();
 		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+// Two live calls in one step, costing the same and made under different cache keys. One branch
+// hands on a copy that lost its mark and its key, so all the ledger can read it by is the cost --
+// and until the marked branch has settled its own charge, the other call's charge answers to that
+// cost just as well.
+test("workflow cost tracking does not let a keyless copy settle another call's charge", async () => {
+	const provider = await startFakeProvider(1, undefined, (prompt) => (prompt === "Beta" ? 60 : 0));
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-state-"));
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "two-calls",
+						parallel: {
+							wait: "all",
+							branches: [
+								{
+									// Declared first, so it is accounted first; its own call answers last.
+									id: "filtered",
+									pipeline:
+										"llm.invoke --model gpt-4o --prompt Beta | state.set probe | state.get probe | pick model,usage",
+								},
+								{ id: "marked", pipeline: "llm.invoke --model gpt-4o --prompt Alpha | json" },
+							],
+						},
+					},
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 2);
+		// Two calls, two records. Reading the copy before the marked branch settles leaves the
+		// copy on one charge, the marked branch billed regardless, and the third charge for the
+		// step settlement to find.
+		assert.equal(result._meta?.cost?.totalInputTokens, 2000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 1000);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+		await fsp.rm(stateDir, { recursive: true, force: true });
 	}
 });
