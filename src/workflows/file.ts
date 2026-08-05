@@ -1459,6 +1459,15 @@ export async function runWorkflowFile({
 					errorMessage,
 				};
 
+				// The step failed after paying a provider: a call it made before failing is spend
+				// this run really made, and its items are gone with the failure. Settling here is
+				// what stops a budget already blown from letting the next step run its side
+				// effects, which is the whole point of `action: stop`.
+				settleUnbilledCharges(costTracker, llmSpendLedger);
+				if (workflow.cost_limit) {
+					costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
+				}
+
 				if (policy === "skip_rest") {
 					break;
 				}

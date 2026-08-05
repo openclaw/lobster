@@ -1580,3 +1580,55 @@ fs.writeFileSync("${marker}", "ran");
 		await fsp.rm(tmpDir, { recursive: true, force: true });
 	}
 });
+
+test("cost_limit stop halts before the next step when the step that spent it failed", async () => {
+	const provider = await startFakeProvider();
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-limit-"));
+	const marker = path.join(tmpDir, "ran.txt").replaceAll(path.sep, "/");
+	const script = path.join(tmpDir, "touch.mjs");
+	await fsp.writeFile(
+		script,
+		`import fs from "node:fs";
+fs.writeFileSync("${marker}", "ran");
+`,
+		"utf8",
+	);
+	const failing = await alwaysFailsCommand();
+
+	try {
+		// One branch pays a provider, another fails, and `on_error: continue` advances the run.
+		// No item of the failed step is ever billed, so the charge it left behind is the only
+		// record of the spend -- and the budget is already gone by the time the next step is
+		// asked to run its side effect.
+		await assert.rejects(
+			() =>
+				runWorkflow(
+					{
+						cost_limit: { max_usd: 0.001, action: "stop" },
+						steps: [
+							{
+								id: "spends",
+								on_error: "continue",
+								parallel: {
+									branches: [
+										{ id: "invoke", pipeline: "llm.invoke --model gpt-4o --prompt Summarize" },
+										{ id: "fails", command: failing },
+									],
+								},
+							},
+							{ id: "after", command: `node ${script}` },
+						],
+					},
+					{
+						OPENCLAW_URL: provider.url,
+						LOBSTER_CACHE_DIR: path.join(tmpDir, "cache"),
+					},
+				).then((run) => run.result),
+			/Cost limit exceeded/,
+		);
+		await assert.rejects(() => fsp.access(marker), "the step after the limit must not run");
+	} finally {
+		await provider.close();
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
+});
