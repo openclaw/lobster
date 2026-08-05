@@ -209,6 +209,39 @@ export function llmProvenanceOf(value: unknown): LlmProvenance | null {
 	return { cacheKey, replayed };
 }
 
+/**
+ * Marks `target` — a structurally identical value rebuilt from `source`'s own JSON — as standing
+ * in for whatever calls `source` was marked with.
+ *
+ * The marks are deliberately not in that JSON, and re-deriving them from it would mean trusting a
+ * payload, which the accounting must never do. Carrying them is a different act: the caller holds
+ * both values in this process and knows one was built from the other, which nothing on disk can
+ * claim for itself.
+ *
+ * What is carried is always a replay, whatever the source was. A value read back out of storage
+ * re-emits an answer that already exists; the call behind it was made once, and this is not that
+ * call happening again.
+ */
+export function carryLlmProvenance(source: unknown, target: unknown) {
+	if (!source || typeof source !== "object" || !target || typeof target !== "object") return;
+	const provenance = llmProvenanceOf(source);
+	if (provenance)
+		markProvenance(target as object, { cacheKey: provenance.cacheKey, replayed: true });
+	if (Array.isArray(source) || Array.isArray(target)) {
+		if (!Array.isArray(source) || !Array.isArray(target)) return;
+		for (let index = 0; index < Math.min(source.length, target.length); index++) {
+			carryLlmProvenance(source[index], target[index]);
+		}
+		return;
+	}
+	for (const key of Object.keys(source)) {
+		carryLlmProvenance(
+			(source as Record<string, unknown>)[key],
+			(target as Record<string, unknown>)[key],
+		);
+	}
+}
+
 // Live calls a run has paid for that nothing has billed yet. A workflow records a step's cost
 // only once the step succeeds, so a step that fails *after* its LLM call — and is then retried
 // — never bills the live item. The retry replays the stored answer, and that replay is the only

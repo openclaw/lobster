@@ -1893,3 +1893,68 @@ test("workflow cost tracking does not let a keyless copy settle another call's c
 		await fsp.rm(stateDir, { recursive: true, force: true });
 	}
 });
+
+test("workflow cost tracking does not bill a replay routed through state storage", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-state-"));
+	const invoke = "llm.invoke --model gpt-4o --prompt Summarize";
+	const env = {
+		OPENCLAW_URL: provider.url,
+		LOBSTER_CACHE_DIR: cacheDir,
+		LOBSTER_STATE_DIR: stateDir,
+	};
+	try {
+		// An earlier run paid for the answer, so this run has no charge of its own to settle: it
+		// is billed nothing whether or not it stores the replay on the way past. `state.get`
+		// rebuilds the item from its own JSON, which carries none of the marks this process
+		// attached -- but the command wrote those bytes itself a moment earlier, so it knows what
+		// the value it hands back stands in for.
+		const first = await runWorkflow({ steps: [{ id: "warm", pipeline: `${invoke} | json` }] }, env);
+		assert.equal(first.result._meta?.cost?.totalInputTokens, 1000);
+
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{ id: "through-state", pipeline: `${invoke} | state.set probe | state.get probe | json` },
+				],
+			},
+			env,
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost, undefined);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+		await fsp.rm(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow cost tracking still bills a state value this process never wrote", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-state-"));
+	// A state file some other run -- or some other program -- left behind. It looks exactly like
+	// a replay and says so, and it is still billed: the bytes on disk were never handed to this
+	// process to be marked, so nothing about them can claim the call was already paid for.
+	await fsp.writeFile(
+		path.join(stateDir, "planted.json"),
+		JSON.stringify(forgedReplayItem("cache"), null, 2) + "\n",
+		"utf8",
+	);
+	try {
+		const { result } = await runWorkflow(
+			{ steps: [{ id: "planted", pipeline: "state.get planted | json" }] },
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+		await fsp.rm(stateDir, { recursive: true, force: true });
+	}
+});

@@ -1,6 +1,23 @@
 import { promises as fsp } from "node:fs";
 
 import { defaultStateDir, ensureDirectory, keyToPath, writeFileAtomic } from "../../state/store.js";
+import { carryLlmProvenance } from "./llm_invoke.js";
+
+// What this process last wrote to each state file. A value read straight back is the same value
+// rebuilt from its own JSON, and the marks a command attached in-process are not in that JSON:
+// without this, `llm.invoke | state.set k | state.get k` turns a replay that cost nothing into an
+// item indistinguishable from one that was paid for. The remembered text has to match the file
+// byte for byte, so nothing written by anything else can pick up marks it was never given.
+const lastWritten = new Map<string, { text: string; value: unknown }>();
+const MAX_REMEMBERED_WRITES = 64;
+
+function rememberWrite(filePath: string, text: string, value: unknown) {
+	lastWritten.set(filePath, { text, value });
+	for (const oldest of lastWritten.keys()) {
+		if (lastWritten.size <= MAX_REMEMBERED_WRITES) break;
+		lastWritten.delete(oldest);
+	}
+}
 
 export const stateGetCommand = {
 	name: "state.get",
@@ -29,6 +46,8 @@ export const stateGetCommand = {
 		try {
 			const text = await fsp.readFile(filePath, "utf8");
 			value = JSON.parse(text);
+			const written = lastWritten.get(filePath);
+			if (written?.text === text) carryLlmProvenance(written.value, value);
 		} catch (err) {
 			if (err?.code === "ENOENT") {
 				value = null;
@@ -70,7 +89,9 @@ export const stateSetCommand = {
 		const filePath = keyToPath(stateDir, key);
 
 		await ensureDirectory(stateDir);
-		await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n");
+		const text = JSON.stringify(value, null, 2) + "\n";
+		await writeFileAtomic(filePath, text);
+		rememberWrite(filePath, text, value);
 
 		return { output: asStream([value]) };
 	},
