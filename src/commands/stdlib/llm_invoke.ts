@@ -217,7 +217,7 @@ export function llmProvenanceOf(value: unknown): LlmProvenance | null {
 // round trip through run state and the response cache.
 export type LlmSpendLedger = {
 	record: (cacheKey: string, charge?: LlmChargeCost) => void;
-	claim: (cacheKey: string) => LlmChargeCost | null;
+	claim: (cacheKey: string, cost?: LlmChargeCost) => LlmChargeCost | null;
 	billCopy: (
 		cacheKey: string | null,
 		model: string | null,
@@ -297,16 +297,31 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 		 * that raced on a cold cache each paid their own way, and every replay of them carries
 		 * whichever single answer was stored.
 		 */
-		claim(cacheKey: string) {
+		claim(cacheKey: string, cost?: LlmChargeCost) {
 			const open = unbilled.get(cacheKey);
 			if (!open?.length) return null;
-			// A charge that records no cost settles nothing anyone can bill, so it must not be
-			// the one handed to a caller that has a real call to account for. Charges restored
-			// from resume state written before they carried a cost are the ones this can be.
-			const index = Math.max(
-				open.findIndex((charge) => charge.usage !== undefined),
-				0,
-			);
+			// A caller that knows what its own call cost settles that call's charge. A step
+			// retried after an attempt that failed *after* paying has more than one charge under
+			// the key, and they did not cost the same: settling the wrong one leaves the other to
+			// be billed at this call's price instead of its own.
+			const own = cost
+				? open.findIndex(
+						(charge) =>
+							(charge.model ?? null) === (cost.model ?? null) &&
+							sameBillableUsage(charge.usage, cost.usage),
+					)
+				: -1;
+			// Otherwise: a charge that records no cost settles nothing anyone can bill, so it
+			// must not be the one handed to a caller with a real call to account for. Charges
+			// restored from resume state written before they carried a cost are the ones this
+			// can be.
+			const index =
+				own >= 0
+					? own
+					: Math.max(
+							open.findIndex((charge) => charge.usage !== undefined),
+							0,
+						);
 			const [charge] = open.splice(index, 1);
 			if (!open.length) unbilled.delete(cacheKey);
 			settle(cacheKey, charge);

@@ -2375,7 +2375,7 @@ type DeferredReplay = {
 function stepScopedLedger(ledger: LlmSpendLedger, stepId: string): LlmSpendLedger {
 	return {
 		record: (cacheKey, charge) => ledger.record(cacheKey, { ...charge, stepId }),
-		claim: (cacheKey) => ledger.claim(cacheKey),
+		claim: (cacheKey, cost) => ledger.claim(cacheKey, cost),
 		billCopy: (cacheKey, model, usage) => ledger.billCopy(cacheKey, model, usage),
 		outstanding: () => ledger.outstanding(),
 		restore: (charges) => ledger.restore(charges),
@@ -2439,8 +2439,13 @@ function trackStepCost(
 				});
 				continue;
 			}
-			// Settles the charge this live call opened, so no replay of it is billed again.
-			llmSpendLedger.claim(provenance.cacheKey);
+			// Settles the charge this live call opened -- the one that cost what this item cost,
+			// not merely the first under the key. A step retried after an attempt that failed
+			// after paying leaves more than one charge open, and they did not cost the same.
+			llmSpendLedger.claim(provenance.cacheKey, {
+				model,
+				usage: usage as Record<string, unknown>,
+			});
 		} else {
 			// No mark, but numbers: a stage that JSON round-trips the stream hands on a copy that
 			// kept `model` and `usage` and lost everything this process attached -- sometimes the

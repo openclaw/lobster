@@ -1754,3 +1754,48 @@ test("llm spend ledger keeps a copy naming one call from settling another", () =
 	assert.equal(ledger.billCopy("key-b", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), true);
 	assert.equal(ledger.outstanding().length, 1);
 });
+
+// A step that pays a provider and then fails is retried, and `--refresh` makes the retry pay
+// again rather than replay. Two charges under one key, and they did not cost the same: only the
+// retry produces an item, so the charge it settles decides what the failed attempt is billed as.
+test("workflow cost tracking bills a retried live call and the attempt before it at their own costs", async () => {
+	const provider = await startFakeProvider(1, (seen) =>
+		seen === 1
+			? { inputTokens: 1000, outputTokens: 500 }
+			: { inputTokens: 3000, outputTokens: 100 },
+	);
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const flaky = await failsOnceCommand();
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "pay-fail-pay",
+						retry: { max: 2, delay_ms: 1 },
+						parallel: {
+							branches: [
+								{
+									id: "invoke",
+									pipeline: "llm.invoke --model gpt-4o --prompt Summarize --refresh",
+								},
+								{ id: "flaky", command: flaky },
+							],
+						},
+					},
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 2);
+		// 1000 + 3000 and 500 + 100. Billing the retry's item against the failed attempt's charge
+		// would report the retry twice and the attempt before it not at all.
+		assert.equal(result._meta?.cost?.totalInputTokens, 4000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 600);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
