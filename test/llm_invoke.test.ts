@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -486,6 +486,141 @@ test("llm.invoke does not call the adapter when ctx.signal is already aborted", 
 		);
 		assert.equal(requests, 0, "an already-cancelled run must not reach the adapter");
 	} finally {
+		await closeServer(server);
+	}
+});
+
+test("llm.invoke does not complete a run cancelled while its result is persisted", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+	const stateDir = await mkdtemp(path.join(tmpdir(), "lobster-state-"));
+
+	let requests = 0;
+	let answered = false;
+	const server = http.createServer((req, res) => {
+		requests += 1;
+		req.resume();
+		req.on("end", () => {
+			answered = true;
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					result: { runId: "persist_1", output: { text: "hello", data: null } },
+				}),
+			);
+		});
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+
+	// The deadline passes while the answer is being written to run state:
+	// persistOutputs reads the state directory as its first act, so aborting from
+	// that read puts the cancellation inside the write rather than before it.
+	const controller = new AbortController();
+	const env: Record<string, any> = {
+		...process.env,
+		LOBSTER_LLM_ADAPTER_URL: `http://127.0.0.1:${port}/invoke`,
+		LOBSTER_CACHE_DIR: cacheDir,
+	};
+	Object.defineProperty(env, "LOBSTER_STATE_DIR", {
+		enumerable: true,
+		get() {
+			if (answered && !controller.signal.aborted) controller.abort();
+			return stateDir;
+		},
+	});
+
+	try {
+		await assert.rejects(
+			() =>
+				cmd.run({
+					input: streamOf([]),
+					args: { _: [], provider: "http", prompt: "Summarize", "state-key": "step-1" },
+					ctx: { ...baseCtx({}, registry), env, signal: controller.signal },
+				} as any),
+			(err: any) => err?.name === "AbortError" || err?.code === "ABORT_ERR",
+		);
+		assert.equal(requests, 1);
+		const stored = await readdir(path.join(cacheDir, "llm.invoke"));
+		assert.equal(stored.length, 1, "the answer the run already paid for stays stored for a retry");
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
+		await rm(stateDir, { recursive: true, force: true });
+		await closeServer(server);
+	}
+});
+
+test("llm.invoke does not complete a validated run cancelled during the cache write", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+
+	let requests = 0;
+	let answered = false;
+	const server = http.createServer((req, res) => {
+		requests += 1;
+		req.resume();
+		req.on("end", () => {
+			answered = true;
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					result: { runId: "persist_2", output: { data: { summary: "hello" } } },
+				}),
+			);
+		});
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+
+	// Same boundary on the schema-validated return path, one write later: the
+	// cache directory is read when writeCacheEntry starts.
+	const controller = new AbortController();
+	const env: Record<string, any> = {
+		...process.env,
+		LOBSTER_LLM_ADAPTER_URL: `http://127.0.0.1:${port}/invoke`,
+	};
+	Object.defineProperty(env, "LOBSTER_CACHE_DIR", {
+		enumerable: true,
+		get() {
+			if (answered && !controller.signal.aborted) controller.abort();
+			return cacheDir;
+		},
+	});
+
+	try {
+		await assert.rejects(
+			() =>
+				cmd.run({
+					input: streamOf([]),
+					args: {
+						_: [],
+						provider: "http",
+						prompt: "Summarize",
+						"output-schema": JSON.stringify({
+							type: "object",
+							required: ["summary"],
+							properties: { summary: { type: "string" } },
+						}),
+					},
+					ctx: { ...baseCtx({}, registry), env, signal: controller.signal },
+				} as any),
+			(err: any) => err?.name === "AbortError" || err?.code === "ABORT_ERR",
+		);
+		assert.equal(requests, 1, "a cancelled run must not retry the model call");
+		const stored = await readdir(path.join(cacheDir, "llm.invoke"));
+		assert.equal(stored.length, 1, "the answer the run already paid for stays stored for a retry");
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
 		await closeServer(server);
 	}
 });

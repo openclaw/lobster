@@ -486,6 +486,12 @@ async function runLlmInvoke({
 				stateType: config.stateType,
 			});
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
+			// The writes above are unbounded I/O and the workflow clears the step timer
+			// as soon as this returns, so a deadline crossed while they ran would be
+			// reported as a completed step. Checked after both writes rather than
+			// between them: the answer is already paid for, and leaving it stored lets
+			// the retry replay it instead of calling the model a second time.
+			signal?.throwIfAborted();
 			return { output: streamOf(normalized) };
 		}
 
@@ -499,6 +505,8 @@ async function runLlmInvoke({
 				stateType: config.stateType,
 			});
 			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
+			// Same boundary as the unvalidated path above.
+			signal?.throwIfAborted();
 			return { output: streamOf(normalized) };
 		}
 
