@@ -6,6 +6,14 @@ function parseDescriptionFromHelp(helpText: string): string {
   return firstLine.includes('—') ? firstLine.split('—').slice(1).join('—').trim() : firstLine.trim();
 }
 
+function commandKind(name: string): 'workflow' | 'integration' | 'state' | 'approval' | 'stdlib' {
+  if (name.startsWith('workflows.')) return 'workflow';
+  if (name.includes('invoke') || name.includes('gmail')) return 'integration';
+  if (name.startsWith('state.')) return 'state';
+  if (name === 'approve') return 'approval';
+  return 'stdlib';
+}
+
 export const commandsListCommand: LobsterCommand = {
   name: 'commands.list',
   help() {
@@ -34,13 +42,21 @@ export const commandsListCommand: LobsterCommand = {
       const cmd = ctx.registry.get(name) as LobsterCommand | undefined;
       const help = typeof cmd?.help === 'function' ? String(cmd.help()) : '';
       const description = cmd?.meta?.description ?? parseDescriptionFromHelp(help);
+      const sideEffects = cmd?.meta?.sideEffects ?? null;
 
       return {
         name,
         description,
+        kind: commandKind(name),
+        metadata: {
+          hasArgsSchema: Boolean(cmd?.meta?.argsSchema),
+          hasExamples: Boolean(cmd?.meta?.examples?.length),
+          sideEffectCount: sideEffects?.length ?? 0,
+          sideEffectRisk: sideEffects && sideEffects.length > 0 ? 'declared' : 'none',
+        },
         argsSchema: cmd?.meta?.argsSchema ?? null,
         examples: cmd?.meta?.examples ?? null,
-        sideEffects: cmd?.meta?.sideEffects ?? null,
+        sideEffects,
       };
     });
 
