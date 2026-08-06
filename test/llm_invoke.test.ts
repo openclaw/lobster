@@ -496,6 +496,7 @@ test("llm.invoke does not complete a run cancelled while its result is persisted
 	assert.ok(cmd);
 	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
 	const stateDir = await mkdtemp(path.join(tmpdir(), "lobster-state-"));
+	await mkdir(path.join(cacheDir, "llm.invoke"), { recursive: true });
 
 	let requests = 0;
 	let answered = false;
@@ -560,6 +561,7 @@ test("llm.invoke does not complete a validated run cancelled during the cache wr
 	const cmd = registry.get("llm.invoke");
 	assert.ok(cmd);
 	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+	await mkdir(path.join(cacheDir, "llm.invoke"), { recursive: true });
 
 	let requests = 0;
 	let answered = false;
