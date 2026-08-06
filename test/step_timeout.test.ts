@@ -15,6 +15,7 @@ async function runWorkflow(
 		signal?: AbortSignal;
 		dryRun?: boolean;
 		env?: Record<string, string>;
+		llmAdapters?: Record<string, unknown>;
 	},
 ) {
 	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-step-timeout-"));
@@ -36,6 +37,7 @@ async function runWorkflow(
 			mode: "tool",
 			signal: opts?.signal,
 			dryRun: opts?.dryRun,
+			llmAdapters: opts?.llmAdapters,
 			registry: createDefaultRegistry(),
 		},
 	});
@@ -252,3 +254,46 @@ test("dry-run renders timeout and on_error details", async () => {
 	assert.match(stderrOutput, /timeout: 5000ms/);
 	assert.match(stderrOutput, /on_error: continue/);
 });
+
+test(
+	"external abort with a custom reason still stops the workflow",
+	{ timeout: 20_000 },
+	async () => {
+		let invoked = () => {};
+		const adapterInvoked = new Promise<void>((resolve) => (invoked = resolve));
+		// Ignores ctx.signal, so what the runner classifies is llm.invoke's own
+		// abort rejection rather than a cancelled socket.
+		const stubborn = {
+			invoke() {
+				invoked();
+				return new Promise<never>(() => {});
+			},
+		};
+
+		const controller = new AbortController();
+		// A host may abort with any reason. A plain Error must still read as
+		// cancellation, not as an ordinary step failure.
+		void adapterInvoked.then(() => controller.abort(new Error("cancelled by host")));
+
+		await assert.rejects(
+			() =>
+				runWorkflow(
+					{
+						steps: [
+							{
+								id: "ask",
+								// on_error: continue is what makes a misclassified abort
+								// visible -- the run would otherwise report success.
+								pipeline: 'llm.invoke --provider stubborn --prompt "Summarize" --disable-cache',
+								on_error: "continue",
+							},
+						],
+					},
+					{ signal: controller.signal, llmAdapters: { stubborn } },
+				),
+			(err: any) =>
+				(err?.name === "AbortError" || err?.code === "ABORT_ERR") &&
+				/cancelled by host/.test(String(err?.message)),
+		);
+	},
+);
