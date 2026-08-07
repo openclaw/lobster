@@ -846,6 +846,62 @@ test("workflow cost tracking bills a run-state llm.invoke replay only once throu
 	}
 });
 
+test("workflow cost tracking prices a projected live call from the charge it settled", async () => {
+	const provider = await startFakeProvider();
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "live",
+						pipeline: "llm.invoke --disable-cache --model gpt-4o --prompt Summarize | pick usage",
+					},
+				],
+			},
+			{ OPENCLAW_URL: provider.url },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+		assert.equal(result._meta?.cost?.estimatedCostUsd, 0.0075);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.model),
+			["gpt-4o"],
+		);
+	} finally {
+		await provider.close();
+	}
+});
+
+test("workflow cost tracking prices a live call whose model field a step rewrote", async () => {
+	const provider = await startFakeProvider();
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "live",
+						pipeline:
+							"llm.invoke --disable-cache --model gpt-4o --prompt Summarize | map model=gpt-3.5-turbo",
+					},
+				],
+			},
+			{ OPENCLAW_URL: provider.url },
+		);
+
+		assert.equal(result.status, "ok");
+		assert.equal(provider.requests(), 1);
+		assert.equal(result._meta?.cost?.estimatedCostUsd, 0.0075);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.model),
+			["gpt-4o"],
+		);
+	} finally {
+		await provider.close();
+	}
+});
+
 test("workflow cost tracking bills a projected step that prints the full replay shape", async () => {
 	const forged = await emitJsonPath(forgedReplayItem("cache"));
 	const { result } = await runWorkflow({

@@ -2517,10 +2517,20 @@ function trackStepCost(
 			// Settles the charge this live call opened -- the one that cost what this item cost,
 			// not merely the first under the key. A step retried after an attempt that failed
 			// after paying leaves more than one charge open, and they did not cost the same.
-			llmSpendLedger.claim(provenance.cacheKey, {
+			const settled = llmSpendLedger.claim(provenance.cacheKey, {
 				model,
 				usage: usage as Record<string, unknown>,
 			});
+			// Bill what the provider was really asked for, not what the item says by the time it
+			// gets here. A pipeline can drop the model on the way -- `| pick usage` hands on the
+			// marked usage record without it -- or rewrite it, and the step is then priced at the
+			// wrong rate or at nothing at all while `cost_limit` reads the difference as room left.
+			// The charge the call opened is the same witness a replay is already billed from. A
+			// charge restored from resume state written before it carried a cost falls back.
+			if (settled?.usage) {
+				costTracker.recordUsage(stepId, settled.model ?? null, settled.usage);
+				continue;
+			}
 		} else {
 			// No mark, but numbers: a stage that JSON round-trips the stream hands on a copy that
 			// kept `model` and `usage` and lost everything this process attached -- sometimes the
