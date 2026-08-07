@@ -19,7 +19,11 @@ import { readLineFromStream } from "../read_line.js";
 import { resolveInlineShellCommand } from "../shell.js";
 import { compileCached } from "../validation.js";
 import { createLlmSpendLedger, llmProvenanceOf } from "../commands/stdlib/llm_invoke.js";
-import type { LlmOutstandingCharge, LlmSpendLedger } from "../commands/stdlib/llm_invoke.js";
+import type {
+	LlmChargeCost,
+	LlmOutstandingCharge,
+	LlmSpendLedger,
+} from "../commands/stdlib/llm_invoke.js";
 import { CostTracker } from "../core/cost_tracker.js";
 import type { CostLimit, CostSummary } from "../core/cost_tracker.js";
 import { withRetry, resolveRetryConfig } from "../core/retry.js";
@@ -1134,6 +1138,20 @@ export async function runWorkflowFile({
 							? AbortSignal.any([stepSignal, branchAbortController.signal])
 							: branchAbortController.signal;
 						const shouldForceKill = Boolean(step.timeout_ms || parallel.timeout_ms);
+						// `wait: "any"` keeps the first branch to answer and abandons the rest, so a
+						// losing branch spends against a buffer of its own. Only the winner's charges
+						// reach the run. `wait: "all"` keeps every branch, so those bill straight
+						// through as before.
+						const branchLedgers = new Map<string, BranchSpendBuffer>();
+						const ledgerFor = (branchId: string): LlmSpendLedger => {
+							if (wait !== "any") return llmSpendLedger;
+							let buffered = branchLedgers.get(branchId);
+							if (!buffered) {
+								buffered = branchSpendBuffer(llmSpendLedger);
+								branchLedgers.set(branchId, buffered);
+							}
+							return buffered;
+						};
 						const runBranch = async (
 							branch: ParallelBranch,
 						): Promise<{ branchId: string; result: WorkflowStepResult }> => {
@@ -1185,7 +1203,7 @@ export async function runWorkflowFile({
 									pipelineText,
 									inputValue,
 									ctx: { ...ctx, signal: branchSignal },
-									llmSpendLedger,
+									llmSpendLedger: ledgerFor(branch.id),
 									env: branchEnv,
 									cwd: branchCwd,
 									requestInputEnabled: false,
@@ -1220,6 +1238,7 @@ export async function runWorkflowFile({
 									result: WorkflowStepResult;
 								};
 								parallelBranchResults = { [winner.branchId]: winner.result };
+								branchLedgers.get(winner.branchId)?.release();
 								branchAbortController.abort();
 							} else {
 								const branchPromises = parallel.branches.map((branch) => runBranch(branch));
@@ -2381,6 +2400,43 @@ type DeferredCharge = {
 	model: string | null;
 	usage: Record<string, unknown>;
 };
+
+type BranchSpendBuffer = LlmSpendLedger & { release: () => void };
+
+/**
+ * One `wait: "any"` branch's view of the run ledger. The race returns as soon as a branch
+ * answers and leaves the others running, so a losing branch can pay a provider long after the
+ * step settled. Writing that charge straight to the run ledger makes the workflow's own total
+ * depend on how long the run happened to live afterwards: land before the run ends and the
+ * discarded branch's spend is billed, land after and it is billed nowhere.
+ *
+ * So a branch opens its charges here instead, and only the winner releases them into the run.
+ * The output of a losing branch is thrown away; its accounting goes with it. Reads pass
+ * through, because they settle charges the run opened before the race and are made by the
+ * workflow after a branch has returned, never from inside one.
+ */
+function branchSpendBuffer(ledger: LlmSpendLedger): BranchSpendBuffer {
+	const held: Array<{ cacheKey: string; charge?: LlmChargeCost }> = [];
+	let released = false;
+	return {
+		record: (cacheKey, charge) => {
+			if (released) ledger.record(cacheKey, charge);
+			else held.push({ cacheKey, charge });
+		},
+		claim: (cacheKey, cost) => ledger.claim(cacheKey, cost),
+		billCopy: (cacheKey, model, usage) => ledger.billCopy(cacheKey, model, usage),
+		outstanding: () => ledger.outstanding(),
+		restore: (charges) => ledger.restore(charges),
+		settled: () => ledger.settled(),
+		restoreSettled: (charges) => ledger.restoreSettled(charges),
+		release: () => {
+			if (released) return;
+			released = true;
+			for (const { cacheKey, charge } of held) ledger.record(cacheKey, charge);
+			held.length = 0;
+		},
+	};
+}
 
 /**
  * The run ledger seen by one step, so a charge opened inside it knows where it came from. A

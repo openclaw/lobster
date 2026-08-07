@@ -2132,3 +2132,67 @@ test("a ledger's settled and open charges survive a round trip through resume st
 		false,
 	);
 });
+
+// A `wait: "any"` step keeps the first branch to answer and abandons the rest, but an abandoned
+// branch is not a stopped one: it can still be waiting on a provider, and it pays when the answer
+// arrives. Whether that spend reached the workflow's own total used to depend on nothing but how
+// long the run happened to live afterwards, so the same workflow over the same three calls billed
+// two of them or three. The discarded branch's output is thrown away and its cost goes with it.
+async function runDiscardedBranchRace(tailMs: number) {
+	const provider = await startFakeProvider(1, undefined, (prompt) =>
+		prompt === "Slow" ? 300 : prompt === "Tail" ? tailMs : 0,
+	);
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	try {
+		const { result } = await runWorkflow(
+			{
+				steps: [
+					{
+						id: "race",
+						parallel: {
+							wait: "any",
+							branches: [
+								{ id: "fast", pipeline: "llm.invoke --model gpt-4o --prompt Fast | json" },
+								{ id: "slow", pipeline: "llm.invoke --model gpt-4o --prompt Slow | json" },
+							],
+						},
+					},
+					{ id: "tail", pipeline: "llm.invoke --model gpt-4o --prompt Tail | json" },
+				],
+			},
+			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+		);
+		return { result, requests: provider.requests() };
+	} finally {
+		// Let the abandoned branch finish paying before the provider goes away, so the case
+		// measures where its charge lands rather than whether it was ever made.
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+}
+
+test("workflow cost tracking leaves a discarded wait:any branch out of the total", async () => {
+	// The run ends while the losing branch is still waiting on its provider.
+	const ended = await runDiscardedBranchRace(0);
+	// The run is still going when that branch pays.
+	const running = await runDiscardedBranchRace(700);
+
+	for (const { result, requests } of [ended, running]) {
+		assert.equal(result.status, "ok");
+		// All three calls really were made; only two of them are the workflow's.
+		assert.equal(requests, 3);
+		assert.equal(result._meta?.cost?.totalInputTokens, 2000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 1000);
+		assert.deepEqual(
+			result._meta?.cost?.byStep.map((entry) => entry.stepId),
+			["fast", "tail"],
+		);
+	}
+
+	// The total is the same either way: it does not turn on the losing branch's timing.
+	assert.equal(
+		ended.result._meta?.cost?.totalInputTokens,
+		running.result._meta?.cost?.totalInputTokens,
+	);
+});
