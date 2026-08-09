@@ -565,13 +565,18 @@ function throwIfCancelled(signal?: AbortSignal): void {
 function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 	if (!signal) return promise;
 	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(cancellationError(signal));
+		// Observe `promise` before anything can settle the wrapper, including the
+		// already-aborted case below. An adapter can cancel the run from inside its own
+		// `invoke` and reject afterwards; rejecting here without watching that promise
+		// leaves the rejection unhandled, which ends the process under Node's default
+		// handling -- long after this step was cancelled cleanly.
+		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
 		if (signal.aborted) {
-			reject(cancellationError(signal));
+			onAbort();
 			return;
 		}
-		const onAbort = () => reject(cancellationError(signal));
 		signal.addEventListener("abort", onAbort, { once: true });
-		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
 	});
 }
 

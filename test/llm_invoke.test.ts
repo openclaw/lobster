@@ -261,6 +261,57 @@ test(
 	},
 );
 
+test("llm.invoke observes a direct adapter that rejects after aborting the run", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+
+	const controller = new AbortController();
+	// An adapter that cancels the run from inside its own invoke and then fails:
+	// the shape of an SDK client that tears itself down on a fatal error.
+	const selfaborting = {
+		invoke() {
+			controller.abort();
+			return Promise.reject(new Error("adapter tore down its client"));
+		},
+	};
+
+	const unhandled: any[] = [];
+	const onUnhandled = (reason: any) => unhandled.push(reason);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		const err = await cmd
+			.run({
+				input: streamOf([]),
+				args: { _: [], provider: "selfaborting", prompt: "Summarize", "disable-cache": true },
+				ctx: {
+					...baseCtx({}, registry),
+					llmAdapters: { selfaborting },
+					signal: controller.signal,
+				},
+			} as any)
+			.then(
+				() => null,
+				(e: any) => e,
+			);
+		assert.ok(
+			err?.name === "AbortError" || err?.code === "ABORT_ERR",
+			`expected an abort error, got ${err?.name}: ${err?.message}`,
+		);
+		// The adapter's own rejection must not outlive the cancelled step. Nothing is
+		// waiting on it once the abort has won the race, and an unobserved rejection
+		// ends the process under Node's default handling.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(
+			unhandled.length,
+			0,
+			`adapter rejection went unhandled: ${unhandled[0]?.message ?? unhandled[0]}`,
+		);
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+	}
+});
+
 test("llm.invoke does not complete from cache when ctx.signal is already aborted", async () => {
 	const registry = createDefaultRegistry();
 	const cmd = registry.get("llm.invoke");
