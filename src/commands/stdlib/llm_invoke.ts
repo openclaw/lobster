@@ -242,6 +242,57 @@ export function carryLlmProvenance(source: unknown, target: unknown) {
 	}
 }
 
+/**
+ * Restores private replay provenance on completed step results loaded from Lobster's own
+ * workflow-resume state. Resume state is the narrow trusted boundary: ordinary command JSON
+ * never reaches this helper, so copying a public cache key cannot suppress its usage record.
+ */
+export function restoreLlmProvenance(
+	target: unknown,
+	charges: readonly LlmOutstandingCharge[] | undefined,
+) {
+	if (!target || typeof target !== "object" || !Array.isArray(charges)) return;
+	const settled = charges.filter(
+		(charge) =>
+			charge &&
+			typeof charge === "object" &&
+			typeof charge.cacheKey === "string" &&
+			charge.cacheKey &&
+			charge.usage &&
+			typeof charge.usage === "object",
+	);
+	if (!settled.length) return;
+
+	const visit = (value: unknown) => {
+		if (!value || typeof value !== "object") return;
+		if (Array.isArray(value)) {
+			for (const item of value) visit(item);
+			return;
+		}
+
+		const record = value as Record<string, unknown>;
+		const cacheKey = typeof record.cacheKey === "string" ? record.cacheKey : null;
+		const model = typeof record.model === "string" ? record.model : null;
+		const usage = record.usage;
+		if (cacheKey && usage && typeof usage === "object") {
+			const matches = settled.some(
+				(charge) =>
+					charge.cacheKey === cacheKey &&
+					(charge.model ?? null) === model &&
+					sameBillableUsage(charge.usage, usage),
+			);
+			if (matches) {
+				const provenance = { cacheKey, replayed: true };
+				markProvenance(usage as object, provenance);
+				markProvenance(record, provenance);
+			}
+		}
+
+		for (const child of Object.values(record)) visit(child);
+	};
+	visit(target);
+}
+
 // Live calls a run has paid for that nothing has billed yet. A workflow records a step's cost
 // only once the step succeeds, so a step that fails *after* its LLM call — and is then retried
 // — never bills the live item. The retry replays the stored answer, and that replay is the only
@@ -364,23 +415,9 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 		},
 		/**
 		 * Whether an item carrying a call's numbers but not its in-process mark should be billed.
-		 * A stage that JSON round-trips the stream hands on exactly such a copy: the numbers
-		 * survive, every symbol this process attached does not.
-		 *
-		 * The copy is billed when it is the first thing to account for the call, and settles the
-		 * charge as it goes. It is not billed when that call has already been settled — by its
-		 * own item, by a replay, or by the run itself when nothing carried it — because then the
-		 * copy is the second thing to account for one provider call.
-		 *
-		 * Neither answer trusts the public cache key on its own, because any step can print one:
-		 * both require the cost being billed to be the cost the run recorded for that call. An
-		 * item that invents a cost is billed on its own account and settles nothing, so a made-up
-		 * item can still add spend to a run, which it always could, and can never hide any.
-		 *
-		 * The two answers are not equally cheap to earn. Settling an open charge only ever adds a
-		 * record, so a copy that carries the cost but no key may do it. Withholding one removes a
-		 * record, so that needs the key as well -- otherwise any step printing a plausible
-		 * `{ model, usage }` could drop itself out of `cost_limit` by resembling an earlier call.
+		 * A matching open charge is settled so the same provider call is not recorded again by
+		 * end-of-step cleanup. Once no charge is open, however, public fields can never suppress
+		 * usage: only the private provenance symbol can prove an item is a replay.
 		 */
 		billCopy(cacheKey: string | null, model: string | null, usage: Record<string, unknown>) {
 			const isSameCall = (charge: LlmChargeCost) =>
@@ -397,13 +434,7 @@ export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLe
 				if (!open.length) unbilled.delete(key);
 				return true;
 			}
-			// Past this point the answer can only be "do not bill", and that is not something an
-			// item without a key gets to say. Two unrelated objects can carry the same model and
-			// the same token counts, so on those alone an ordinary step printing `{ model, usage }`
-			// could suppress its own record by resembling a call made earlier. A key is what ties
-			// a copy to a call: it costs the same *and* names the call it came from.
-			if (cacheKey === null) return true;
-			return !billed.get(cacheKey)?.some(isSameCall);
+			return true;
 		},
 		outstanding() {
 			const charges: LlmOutstandingCharge[] = [];
@@ -1318,7 +1349,7 @@ async function readCacheEntry(
 		if (parsed?.cacheKey !== key || !Array.isArray(parsed.items)) return null;
 		return parsed as CacheEntry;
 	} catch (err: any) {
-		if (err?.code === "ENOENT") return null;
+		if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
 		if (isJsonSyntaxError(err)) return null;
 		throw err;
 	}

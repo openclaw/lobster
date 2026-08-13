@@ -8,7 +8,11 @@ import { PassThrough } from "node:stream";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { CostTracker } from "../src/core/cost_tracker.js";
-import { createLlmSpendLedger } from "../src/commands/stdlib/llm_invoke.js";
+import {
+	createLlmSpendLedger,
+	llmProvenanceOf,
+	restoreLlmProvenance,
+} from "../src/commands/stdlib/llm_invoke.js";
 import type { LlmOutstandingCharge } from "../src/commands/stdlib/llm_invoke.js";
 import { runWorkflowFile } from "../src/workflows/file.js";
 import { decodeToken } from "../src/token.js";
@@ -532,6 +536,39 @@ test("cost_limit stop cannot be bypassed by a step that prints the full replay s
 	);
 });
 
+test("cost_limit stop cannot be bypassed by copying a settled call's public fields", async () => {
+	const provider = await startFakeProvider();
+	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
+	const copy = await copyJsonStdinPath();
+	try {
+		await assert.rejects(
+			() =>
+				runWorkflow(
+					{
+						cost_limit: { max_usd: 0.01, action: "stop" },
+						steps: [
+							{
+								id: "live",
+								pipeline: "llm.invoke --model gpt-4o --prompt Summarize",
+							},
+							{
+								id: "public-copy",
+								pipeline: `exec --stdin json --json=true node ${copy}`,
+								stdin: "$live.json",
+							},
+						],
+					},
+					{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+				).then((x) => x.result),
+			/Cost limit exceeded/,
+		);
+		assert.equal(provider.requests(), 1);
+	} finally {
+		await provider.close();
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
 // `... | json` is a supported step shape: the renderer prints the items and returns an empty
 // stream, so the workflow reads the step's JSON back from stdout. Accounting must still tell a
 // replay from a live call there, and must still bill output that only looks replayed.
@@ -671,6 +708,17 @@ async function emitJsonPath(payload: unknown) {
 	const filePath = path.join(dir, "emit.mjs");
 	const literal = JSON.stringify(JSON.stringify(payload));
 	await fsp.writeFile(filePath, `process.stdout.write(${literal});\n`, "utf8");
+	return filePath.split(path.sep).join("/");
+}
+
+async function copyJsonStdinPath() {
+	const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-copy-"));
+	const filePath = path.join(dir, "copy.mjs");
+	await fsp.writeFile(
+		filePath,
+		'let input = "";\nprocess.stdin.setEncoding("utf8");\nprocess.stdin.on("data", (chunk) => (input += chunk));\nprocess.stdin.on("end", () => process.stdout.write(input));\n',
+		"utf8",
+	);
 	return filePath.split(path.sep).join("/");
 }
 
@@ -1541,19 +1589,18 @@ test("llm spend ledger bills a copy of an item only for a call nothing accounted
 	assert.equal(ledger.billCopy("key-a", "gpt-4o", { outputTokens: 500, inputTokens: 1000 }), true);
 	assert.deepEqual(ledger.outstanding(), []);
 
-	// A second copy stands behind a call already billed, so it is not billed again.
-	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), false);
+	// Public fields never prove that a later item is the same call.
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), true);
 });
 
-test("llm spend ledger does not bill a copy of a call the run already settled", () => {
+test("llm spend ledger does not trust a copy of a call the run already settled", () => {
 	const ledger = createLlmSpendLedger();
 	const usage = { inputTokens: 1000, outputTokens: 500 };
 	ledger.record("key-a", { model: "gpt-4o", usage });
 
-	// However the call was accounted for -- here by its own live item -- a copy of it that turns
-	// up in a later step is the second thing to account for one provider call.
+	// However the call was accounted for, ordinary JSON cannot prove it came from that call.
 	assert.ok(ledger.claim("key-a"));
-	assert.equal(ledger.billCopy("key-a", "gpt-4o", { ...usage }), false);
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { ...usage }), true);
 	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 7 }), true);
 });
 
@@ -1813,9 +1860,9 @@ test("llm spend ledger never lets a keyless item withhold its own record", () =>
 	// Resembling a call this run already billed is not evidence of being a copy of it: two
 	// unrelated objects can carry the same model and the same counts, and an ordinary step
 	// printing `{ model, usage }` must not be able to drop out of `cost_limit` that way. With
-	// the key it is a copy and is not billed twice; without it, it is billed.
+	// a matching public key remains forgeable, so both forms are billed.
 	assert.equal(ledger.billCopy(null, "gpt-4o", { ...usage }), true);
-	assert.equal(ledger.billCopy("key-a", "gpt-4o", { ...usage }), false);
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { ...usage }), true);
 });
 
 test("llm spend ledger keeps a copy naming one call from settling another", () => {
@@ -2131,21 +2178,32 @@ test("workflow cost tracking does not rebill a pre-pause call re-emitted after a
 // A settled charge is read only against the cache key it names, so restored state cannot excuse
 // a call it does not name. An entry invented for one key leaves a copy of a different call
 // billed exactly as it would have been.
-test("restored billed charges excuse only the call they name", async () => {
+test("restored billed charges mark only the call they name", async () => {
 	const ledger = createLlmSpendLedger();
-	ledger.restoreSettled([
+	const settled = [
 		{
 			cacheKey: "key-a",
 			count: 1,
 			model: "gpt-4o",
 			usage: { inputTokens: 1000, outputTokens: 500 },
 		},
-	]);
-	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), false);
-	assert.equal(ledger.billCopy("key-b", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), true);
-	// Same key, a different call: the cost has to match the charge that was settled.
-	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 4000, outputTokens: 10 }), true);
-	// Nothing is opened, so a live call still bills.
+	] satisfies LlmOutstandingCharge[];
+	ledger.restoreSettled(settled);
+	const matching = {
+		cacheKey: "key-a",
+		model: "gpt-4o",
+		usage: { inputTokens: 1000, outputTokens: 500 },
+	};
+	const other = {
+		cacheKey: "key-b",
+		model: "gpt-4o",
+		usage: { inputTokens: 1000, outputTokens: 500 },
+	};
+	restoreLlmProvenance({ matching, other }, settled);
+	assert.deepEqual(llmProvenanceOf(matching), { cacheKey: "key-a", replayed: true });
+	assert.equal(llmProvenanceOf(other), null);
+	// Outside the trusted restore boundary, the same public fields remain billable.
+	assert.equal(ledger.billCopy("key-a", "gpt-4o", { inputTokens: 1000, outputTokens: 500 }), true);
 	assert.equal(ledger.claim("key-a"), null);
 });
 
@@ -2182,11 +2240,14 @@ test("a ledger's settled and open charges survive a round trip through resume st
 	resumed.restoreSettled(carried.llmBilled);
 	// The open charge is still the resumed run's to settle...
 	assert.deepEqual(resumed.claim("open-key")?.usage, { inputTokens: 300, outputTokens: 40 });
-	// ...and a copy of the billed one is not billed again.
-	assert.equal(
-		resumed.billCopy("billed-key", "gpt-4o", { inputTokens: 100, outputTokens: 20 }),
-		false,
-	);
+	// ...and the trusted resume boundary restores private provenance for the billed one.
+	const billedCopy = {
+		cacheKey: "billed-key",
+		model: "gpt-4o",
+		usage: { inputTokens: 100, outputTokens: 20 },
+	};
+	restoreLlmProvenance(billedCopy, carried.llmBilled);
+	assert.deepEqual(llmProvenanceOf(billedCopy), { cacheKey: "billed-key", replayed: true });
 });
 
 // A `wait: "any"` step keeps the first branch to answer and abandons the rest, but an abandoned

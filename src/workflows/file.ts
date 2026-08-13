@@ -18,7 +18,11 @@ import {
 import { readLineFromStream } from "../read_line.js";
 import { resolveInlineShellCommand } from "../shell.js";
 import { compileCached } from "../validation.js";
-import { createLlmSpendLedger, llmProvenanceOf } from "../commands/stdlib/llm_invoke.js";
+import {
+	createLlmSpendLedger,
+	llmProvenanceOf,
+	restoreLlmProvenance,
+} from "../commands/stdlib/llm_invoke.js";
 import type {
 	LlmChargeCost,
 	LlmOutstandingCharge,
@@ -886,6 +890,12 @@ export async function runWorkflowFile({
 		// names its call, and the restored record is what lets that copy be recognized as one the
 		// paused run already paid for rather than billed a second time on top of `cost`.
 		llmSpendLedger.restoreSettled(
+			resumeState && "llmBilled" in resumeState ? resumeState.llmBilled : undefined,
+		);
+		// Completed results lost their symbol keys when the pause was persisted. Restore those
+		// private marks only at this trusted resume boundary; ordinary command JSON stays billable.
+		restoreLlmProvenance(
+			results,
 			resumeState && "llmBilled" in resumeState ? resumeState.llmBilled : undefined,
 		);
 		let lastStepId: string | null =
