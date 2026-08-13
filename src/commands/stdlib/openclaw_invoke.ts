@@ -91,6 +91,7 @@ function createInvokeCommand(commandName: string) {
 			const invokeOnce = async (argsValue: unknown) => {
 				const res = await fetch(endpoint, {
 					method: "POST",
+					signal: ctx.signal,
 					headers: {
 						"content-type": "application/json",
 						...(token ? { authorization: `Bearer ${token}` } : null),

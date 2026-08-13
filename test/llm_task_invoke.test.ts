@@ -163,6 +163,132 @@ test("llm_task.invoke retries when schema validation fails", async () => {
 	}
 });
 
+test("llm_task.invoke makes a single model call when --max-validation-retries is 0", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm_task.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+
+	let calls = 0;
+	const server = http.createServer((req, res) => {
+		if (req.method !== "POST" || req.url !== "/tools/invoke") {
+			res.writeHead(404);
+			res.end();
+			return;
+		}
+		calls += 1;
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(
+			JSON.stringify({
+				ok: true,
+				result: {
+					ok: true,
+					result: { runId: `attempt_${calls}`, output: { data: { foo: "bar" } } },
+				},
+			}),
+		);
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+
+	try {
+		await assert.rejects(
+			cmd.run({
+				input: streamOf([]),
+				args: {
+					_: [],
+					model: "claude-3-opus",
+					prompt: "Decide",
+					"output-schema": '{"type":"object","required":["decision"]}',
+					"max-validation-retries": 0,
+				},
+				ctx: baseCtx(
+					{ LOBSTER_CACHE_DIR: cacheDir, CLAWD_URL: `http://localhost:${port}` },
+					registry,
+				),
+			} as any),
+			/output failed schema validation/,
+		);
+		assert.equal(calls, 1);
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
+		await closeServer(server);
+	}
+});
+
+test("llm_task.invoke retries validation exactly once by default", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm_task.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-"));
+
+	const bodyLog: any[] = [];
+	const server = http.createServer((req, res) => {
+		if (req.method !== "POST" || req.url !== "/tools/invoke") {
+			res.writeHead(404);
+			res.end();
+			return;
+		}
+		let buf = "";
+		req.setEncoding("utf8");
+		req.on("data", (chunk) => (buf += chunk));
+		req.on("end", () => {
+			bodyLog.push(JSON.parse(buf || "{}"));
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					result: {
+						ok: true,
+						result: {
+							runId: `attempt_${bodyLog.length}`,
+							output: { data: { foo: "bar" } },
+						},
+					},
+				}),
+			);
+		});
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, resolve));
+	const addr = server.address();
+	const port = typeof addr === "object" && addr ? addr.port : 0;
+
+	try {
+		await assert.rejects(
+			cmd.run({
+				input: streamOf([]),
+				args: {
+					_: [],
+					model: "claude-3-opus",
+					prompt: "Decide",
+					"output-schema": '{"type":"object","required":["decision"]}',
+				},
+				ctx: baseCtx(
+					{
+						LOBSTER_CACHE_DIR: cacheDir,
+						CLAWD_URL: `http://localhost:${port}`,
+						LOBSTER_LLM_VALIDATION_RETRIES: "",
+						LLM_TASK_VALIDATION_RETRIES: "",
+					},
+					registry,
+				),
+			} as any),
+			/output failed schema validation/,
+		);
+
+		assert.equal(bodyLog.length, 2);
+		assert.equal(bodyLog[0].args.retryContext, undefined);
+		assert.equal(bodyLog[1].args.retryContext.attempt, 2);
+		assert.ok(bodyLog[1].args.retryContext.validationErrors.length >= 1);
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
+		await closeServer(server);
+	}
+});
+
 test("llm_task.invoke persists to run state so resume skips remote call", async () => {
 	const stateDir = await mkdtemp(path.join(tmpdir(), "lobster-state-"));
 	const registry = createDefaultRegistry();
