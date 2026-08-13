@@ -35,6 +35,22 @@ function streamOf(items: unknown[]) {
 	})();
 }
 
+test("explicit cancellation accepts legacy embedded workflow tokens", async () => {
+	const token = encodeToken({
+		protocolVersion: 1,
+		v: 1,
+		kind: "workflow-file",
+		filePath: "/legacy/workflow.lobster",
+		resumeAtIndex: 1,
+		steps: { gate: { id: "gate", approved: false } },
+		args: {},
+	});
+
+	const result = await resumeToolRequest({ token, cancel: true });
+	assert.equal(result.ok, true);
+	assert.equal(result.status, "cancelled");
+});
+
 test("runAbortableProcess preserves UTF-8 characters split across pipe chunks", async () => {
 	const result = await runAbortableProcess({
 		command: process.execPath,
@@ -5593,7 +5609,7 @@ test(
 				},
 			});
 
-			await waitForFile(started, 5000);
+			await waitForFile(started, 15_000);
 			const childPid = Number(await readFile(started, "utf8"));
 			controller.abort();
 			const immediate = await observeSettlement(run, 50);

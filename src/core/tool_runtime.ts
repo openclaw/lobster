@@ -214,8 +214,8 @@ export async function resumeToolRequest({
 	};
 
 	if (cancel === true) {
-		let stateKeys = [payload.stateKey];
-		if (payload.kind === "workflow-file") {
+		let stateKeys = payload.stateKey ? [payload.stateKey] : [];
+		if (payload.kind === "workflow-file" && payload.stateKey) {
 			const alternateStateKey = alternateWorkflowResumeStateKey(payload.stateKey);
 			if (alternateStateKey) {
 				// Delete a non-authoritative spelling first. If cancellation interrupts
@@ -245,8 +245,9 @@ export async function resumeToolRequest({
 			);
 		}
 		if (
-			deletionResults.includes("claimed") ||
-			deletionResults.every((result) => result === "missing")
+			stateKeys.length > 0 &&
+			(deletionResults.includes("claimed") ||
+				deletionResults.every((result) => result === "missing"))
 		) {
 			return errorEnvelope("runtime_error", "Resume state not found");
 		}

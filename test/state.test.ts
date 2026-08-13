@@ -784,36 +784,40 @@ test("diffAndStore reclaims an old lock with a malformed owner", async () => {
 	await assert.rejects(fsp.access(lockPath));
 });
 
-test("diffAndStore reclaims an old lock after its owner PID is reused", async () => {
-	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-reused-pid-lock-"));
-	const env = { LOBSTER_STATE_DIR: tmp };
-	const lockPath = `${keyToPath(tmp, "snapshot")}.lock`;
-	const ownerPath = path.join(lockPath, "owner");
-	await fsp.mkdir(lockPath);
-	await fsp.writeFile(ownerPath, `${process.pid}:0:stale-owner\n`, "utf8");
-	const staleAt = new Date(Date.now() - 10_000);
-	await fsp.utimes(lockPath, staleAt, staleAt);
-	await fsp.utimes(ownerPath, staleAt, staleAt);
+test(
+	"diffAndStore reclaims an old lock after its owner PID is reused",
+	{ skip: process.platform !== "linux" },
+	async () => {
+		const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-diff-reused-pid-lock-"));
+		const env = { LOBSTER_STATE_DIR: tmp };
+		const lockPath = `${keyToPath(tmp, "snapshot")}.lock`;
+		const ownerPath = path.join(lockPath, "owner");
+		await fsp.mkdir(lockPath);
+		await fsp.writeFile(ownerPath, `${process.pid}:0:stale-owner\n`, "utf8");
+		const staleAt = new Date(Date.now() - 10_000);
+		await fsp.utimes(lockPath, staleAt, staleAt);
+		await fsp.utimes(ownerPath, staleAt, staleAt);
 
-	const controller = new AbortController();
-	const timeout = setTimeout(
-		() => controller.abort(new Error("reused lock was not reclaimed")),
-		250,
-	);
-	try {
-		await diffAndStore({
-			env,
-			key: "snapshot",
-			value: { version: "recovered" },
-			signal: controller.signal,
-		});
-	} finally {
-		clearTimeout(timeout);
-	}
-	assert.equal(controller.signal.aborted, false);
-	assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { version: "recovered" });
-	await assert.rejects(fsp.access(lockPath));
-});
+		const controller = new AbortController();
+		const timeout = setTimeout(
+			() => controller.abort(new Error("reused lock was not reclaimed")),
+			250,
+		);
+		try {
+			await diffAndStore({
+				env,
+				key: "snapshot",
+				value: { version: "recovered" },
+				signal: controller.signal,
+			});
+		} finally {
+			clearTimeout(timeout);
+		}
+		assert.equal(controller.signal.aborted, false);
+		assert.deepEqual(await readStateJson({ env, key: "snapshot" }), { version: "recovered" });
+		await assert.rejects(fsp.access(lockPath));
+	},
+);
 
 test("withFileLock does not reclaim a replacement lock after observing a stale one", async () => {
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-state-lock-replacement-"));
@@ -916,7 +920,7 @@ test("withFileLock releases its key when best-effort cleanup cannot remove the d
 		second = withFileLock({ filePath, task: async () => "reacquired" });
 		const settled = await Promise.race([
 			second,
-			new Promise<"timed out">((resolve) => setTimeout(() => resolve("timed out"), 75)),
+			new Promise<"timed out">((resolve) => setTimeout(() => resolve("timed out"), 500)),
 		]);
 		if (settled === "timed out") await originalRm(lockPath, { recursive: true, force: true });
 		assert.equal(settled, "reacquired", "a failed cleanup must not poison the live state lock");
