@@ -14,6 +14,8 @@ import {
 	diffAndStore,
 	keyToPath,
 	withFileLock,
+	ensureDirectory,
+	stripExtendedLengthPrefix,
 	writeStateJson,
 	readStateJsonWithLock as readStateJson,
 	writeFileAtomic,
@@ -1025,4 +1027,38 @@ test("SDK writeState removes temp files when replacement fails", async () => {
 	await assert.rejects(() => writeState("sdk-state", { ok: true }, ctx));
 	const leftovers = (await fsp.readdir(tmp)).filter((f) => f.includes(".tmp"));
 	assert.deepEqual(leftovers, []);
+});
+
+test("ensureDirectory creates missing parent directories", async () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-ensure-dir-"));
+	const nested = path.join(tmp, "alpha", "beta", "gamma");
+
+	await ensureDirectory(nested);
+	assert.equal((await fsp.stat(nested)).isDirectory(), true);
+
+	// Re-running must stay a no-op once the whole chain already exists.
+	await ensureDirectory(nested);
+	assert.equal((await fsp.stat(nested)).isDirectory(), true);
+});
+
+test("stripExtendedLengthPrefix maps only namespaces with a plain equivalent", () => {
+	assert.equal(stripExtendedLengthPrefix("\\\\?\\C:\\lobster\\state"), "C:\\lobster\\state");
+	assert.equal(
+		stripExtendedLengthPrefix("\\\\?\\UNC\\server\\share\\state"),
+		"\\\\server\\share\\state",
+	);
+
+	// Windows matches the namespace component case-insensitively, so a lowercase
+	// marker names the same share and must map to the same plain path.
+	assert.equal(
+		stripExtendedLengthPrefix("\\\\?\\unc\\server\\share\\state"),
+		"\\\\server\\share\\state",
+	);
+
+	// A device namespace has no drive-letter form, so stripping it would leave a
+	// relative path and break an explicitly configured state directory.
+	const volume = "\\\\?\\Volume{6f4c2b1a-0000-0000-0000-000000000000}\\lobster\\state";
+	assert.equal(stripExtendedLengthPrefix(volume), volume);
+
+	assert.equal(stripExtendedLengthPrefix("/tmp/lobster/state"), "/tmp/lobster/state");
 });

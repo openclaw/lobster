@@ -25,6 +25,16 @@ import {
 import { readLineFromStream } from "../read_line.js";
 import { resolveInlineShellCommand } from "../shell.js";
 import { compileCached } from "../validation.js";
+import {
+	createLlmSpendLedger,
+	llmProvenanceOf,
+	restoreLlmProvenance,
+} from "../commands/stdlib/llm_invoke.js";
+import type {
+	LlmChargeCost,
+	LlmOutstandingCharge,
+	LlmSpendLedger,
+} from "../commands/stdlib/llm_invoke.js";
 import { CostTracker } from "../core/cost_tracker.js";
 import type { CostLimit, CostSummary } from "../core/cost_tracker.js";
 import { withRetry, resolveRetryConfig } from "../core/retry.js";
@@ -178,6 +188,7 @@ type RunContext = {
 	llmAdapters?: Record<string, any>;
 	dryRun?: boolean;
 	_activeWorkflows?: Set<string>;
+	_llmSpendLedger?: LlmSpendLedger;
 	_onResumeStateResolved?: (stateKey: string) => void;
 	_onExecutionStarted?: () => void | Promise<void>;
 	_onExecutionInterrupted?: () => void;
@@ -233,6 +244,13 @@ type WorkflowResumeState = {
 	inputSchema?: unknown;
 	inputSubject?: unknown;
 	pipelineInput?: WorkflowPipelineInputResumeState;
+	// What the paused run had spent, so the run that resumes it does not start from zero.
+	cost?: CostSummary;
+	// Calls it had paid for but not yet billed — a pipeline can pause between the two.
+	llmSpend?: LlmOutstandingCharge[];
+	// Calls it had already billed, so the run that resumes can tell a copy of one of them from a
+	// call nobody has paid for. `cost` is the money; this is what the money was for.
+	llmBilled?: LlmOutstandingCharge[];
 	supersededResumeStateKeys?: string[];
 	createdAt: string;
 };
@@ -947,6 +965,34 @@ export async function runWorkflowFile({
 			CostTracker.parsePricingFromEnv(ctx.env, ctx.stderr),
 			ctx.stderr,
 		);
+		// A gate pauses a run, it does not reset its spend: seed this run with what the paused
+		// run recorded, so `_meta.cost` covers the whole workflow and `cost_limit` cannot be
+		// walked past one gate at a time. A replay of a call billed before the pause then stays
+		// exempt, which is what an empty ledger already means for a charge someone else settled.
+		const pausedCost = resumeState && "cost" in resumeState ? resumeState.cost : undefined;
+		costTracker.restore(pausedCost?.byStep);
+		// One ledger per run: a live call this run paid for can be recovered from the replay a
+		// retry produced, and a cache entry written by any other run has nothing to claim here.
+		const llmSpendLedger = createLlmSpendLedger(composingSpendLedger(ctx));
+		// A pipeline that paused at an `ask` gate had already paid for its LLM call without
+		// billing it, so the charge travels in the same resume state and reopens here. It is the
+		// same run continuing, which is why this cannot hand a charge to an unrelated one.
+		llmSpendLedger.restore(
+			resumeState && "llmSpend" in resumeState ? resumeState.llmSpend : undefined,
+		);
+		// The completed steps come back as JSON, so an LLM output among them has lost everything
+		// this process attached to it. A later step that re-emits one hands on a copy that still
+		// names its call, and the restored record is what lets that copy be recognized as one the
+		// paused run already paid for rather than billed a second time on top of `cost`.
+		llmSpendLedger.restoreSettled(
+			resumeState && "llmBilled" in resumeState ? resumeState.llmBilled : undefined,
+		);
+		// Completed results lost their symbol keys when the pause was persisted. Restore those
+		// private marks only at this trusted resume boundary; ordinary command JSON stays billable.
+		restoreLlmProvenance(
+			results,
+			resumeState && "llmBilled" in resumeState ? resumeState.llmBilled : undefined,
+		);
 		let lastStepId: string | null =
 			resumeState?.inputStepId ?? findLastCompletedStepId(steps, results);
 
@@ -990,6 +1036,13 @@ export async function runWorkflowFile({
 								// Preserve the full resolved subject for resume semantics; the tool
 								// envelope may contain a truncated preview to stay within size limits.
 								inputSubject: subject,
+								...(costTracker.hasUsage() ? { cost: costTracker.getSummary() } : null),
+								...(llmSpendLedger.outstanding().length
+									? { llmSpend: llmSpendLedger.outstanding() }
+									: null),
+								...(llmSpendLedger.settled().length
+									? { llmBilled: llmSpendLedger.settled() }
+									: null),
 								supersededResumeStateKeys: collectSupersededWorkflowResumeStateKeys(
 									consumedResumeStateKey,
 									resumeState,
@@ -1133,6 +1186,7 @@ export async function runWorkflowFile({
 								pipelineText,
 								inputValue,
 								ctx,
+								llmSpendLedger,
 								env: subEnv,
 								cwd: subCwd,
 								requestInputEnabled: false,
@@ -1144,7 +1198,11 @@ export async function runWorkflowFile({
 						}
 
 						scopedResults[subStep.id] = subResult;
-						trackStepCost(costTracker, `${step.id}.${subStep.id}`, subResult);
+						trackStepCost(costTracker, `${step.id}.${subStep.id}`, subResult, llmSpendLedger);
+						// Before the next step runs: a charge no item carried is spend the step really made,
+						// and leaving it for the end would let `cost_limit` wave through every step after the
+						// one that blew the budget.
+						settleUnbilledCharges(costTracker, llmSpendLedger);
 						if (workflow.cost_limit) {
 							costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 						}
@@ -1168,7 +1226,11 @@ export async function runWorkflowFile({
 				};
 				results[step.id] = loopResult;
 				lastStepId = step.id;
-				trackStepCost(costTracker, step.id, loopResult);
+				trackStepCost(costTracker, step.id, loopResult, llmSpendLedger);
+				// Before the next step runs: a charge no item carried is spend the step really made,
+				// and leaving it for the end would let `cost_limit` wave through every step after the
+				// one that blew the budget.
+				settleUnbilledCharges(costTracker, llmSpendLedger);
 				if (workflow.cost_limit) {
 					costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 				}
@@ -1219,6 +1281,20 @@ export async function runWorkflowFile({
 							stepTimeoutController?.signal.aborted || parallelTimeoutController.signal.aborted
 								? ("SIGKILL" as NodeJS.Signals)
 								: undefined;
+						// `wait: "any"` keeps the first branch to answer and abandons the rest, so a
+						// losing branch spends against a buffer of its own. Only the winner's charges
+						// reach the run. `wait: "all"` keeps every branch, so those bill straight
+						// through as before.
+						const branchLedgers = new Map<string, BranchSpendBuffer>();
+						const ledgerFor = (branchId: string): LlmSpendLedger => {
+							if (wait !== "any") return llmSpendLedger;
+							let buffered = branchLedgers.get(branchId);
+							if (!buffered) {
+								buffered = branchSpendBuffer(llmSpendLedger);
+								branchLedgers.set(branchId, buffered);
+							}
+							return buffered;
+						};
 						const runBranch = async (
 							branch: ParallelBranch,
 						): Promise<{ branchId: string; result: WorkflowStepResult }> => {
@@ -1272,6 +1348,7 @@ export async function runWorkflowFile({
 									pipelineText,
 									inputValue,
 									ctx: { ...ctx, signal: branchSignal },
+									llmSpendLedger: ledgerFor(branch.id),
 									env: branchEnv,
 									cwd: branchCwd,
 									requestInputEnabled: false,
@@ -1312,6 +1389,7 @@ export async function runWorkflowFile({
 									result: WorkflowStepResult;
 								};
 								parallelBranchResults = { [winner.branchId]: winner.result };
+								branchLedgers.get(winner.branchId)?.release();
 							} else {
 								const settled = (await (timeoutPromise
 									? Promise.race([Promise.allSettled(branchPromises), timeoutPromise])
@@ -1382,6 +1460,7 @@ export async function runWorkflowFile({
 								cwd,
 								signal: stepSignal,
 								_activeWorkflows: childActive,
+								_llmSpendLedger: stepScopedLedger(llmSpendLedger, step.id),
 								_onExecutionStarted: async () => {
 									await markExecutionStarted(stepSignal);
 								},
@@ -1412,6 +1491,12 @@ export async function runWorkflowFile({
 						const json = subResult.output.length === 1 ? subResult.output[0] : subResult.output;
 						const stdout = subResult.output.length ? serializeValueForStdout(json) : "";
 						result = { id: step.id, stdout, json };
+						// A child ending in a rendered pipeline (`llm.invoke | json`) prints its items
+						// and returns JSON parsed back out of that print, which no symbol survives.
+						// Carry the child's own items across the composition boundary so this run
+						// applies to them the same replay rule it applies to its own pipelines.
+						const composedItems = pipelineSourceItems(subResult);
+						if (composedItems) attachPipelineSourceItems(result, composedItems);
 					} else if (execution.kind === "shell") {
 						const command = resolveTemplate(execution.value, resolvedArgs, results);
 						const stdinValue = resolveShellStdin(step.stdin, resolvedArgs, results);
@@ -1440,6 +1525,7 @@ export async function runWorkflowFile({
 							pipelineText,
 							inputValue,
 							ctx: { ...ctx, signal: stepSignal },
+							llmSpendLedger,
 							env,
 							cwd,
 							resume:
@@ -1516,6 +1602,13 @@ export async function runWorkflowFile({
 								inputSchema: err.request.responseSchema,
 								inputSubject: err.request.subject,
 								pipelineInput: err.pipelineInput,
+								...(costTracker.hasUsage() ? { cost: costTracker.getSummary() } : null),
+								...(llmSpendLedger.outstanding().length
+									? { llmSpend: llmSpendLedger.outstanding() }
+									: null),
+								...(llmSpendLedger.settled().length
+									? { llmBilled: llmSpendLedger.settled() }
+									: null),
 								supersededResumeStateKeys: collectSupersededWorkflowResumeStateKeys(
 									consumedResumeStateKey,
 									resumeState,
@@ -1587,22 +1680,39 @@ export async function runWorkflowFile({
 					errorMessage,
 				};
 
+				// The step failed after paying a provider: a call it made before failing is spend
+				// this run really made, and its items are gone with the failure. Settling here is
+				// what stops a budget already blown from letting the next step run its side
+				// effects, which is the whole point of `action: stop`.
+				settleUnbilledCharges(costTracker, llmSpendLedger);
+				if (workflow.cost_limit) {
+					costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
+				}
+
 				if (policy === "skip_rest") {
 					break;
 				}
 				continue;
 			}
 
+			// One accounting group per step: its parallel branches and its own result settle
+			// together, so no branch can be billed for a charge another branch is about to claim.
+			const deferredCharges: DeferredCharge[] = [];
 			if (parallelBranchResults) {
 				for (const [branchId, branchResult] of Object.entries(parallelBranchResults)) {
 					results[branchId] = branchResult;
-					trackStepCost(costTracker, branchId, branchResult);
+					trackStepCost(costTracker, branchId, branchResult, llmSpendLedger, deferredCharges);
 				}
 			}
 			results[step.id] = result;
 			lastStepId = step.id;
 
-			trackStepCost(costTracker, step.id, result);
+			trackStepCost(costTracker, step.id, result, llmSpendLedger, deferredCharges);
+			settleDeferredCosts(costTracker, deferredCharges, llmSpendLedger);
+			// Before the next step runs: a charge no item carried is spend the step really made,
+			// and leaving it for the end would let `cost_limit` wave through every step after the
+			// one that blew the budget.
+			settleUnbilledCharges(costTracker, llmSpendLedger);
 			if (workflow.cost_limit) {
 				costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
 			}
@@ -1626,6 +1736,13 @@ export async function runWorkflowFile({
 								args: resolvedArgs,
 								approvalStepId: step.id,
 								approvalIdentity,
+								...(costTracker.hasUsage() ? { cost: costTracker.getSummary() } : null),
+								...(llmSpendLedger.outstanding().length
+									? { llmSpend: llmSpendLedger.outstanding() }
+									: null),
+								...(llmSpendLedger.settled().length
+									? { llmBilled: llmSpendLedger.settled() }
+									: null),
 								supersededResumeStateKeys: collectSupersededWorkflowResumeStateKeys(
 									consumedResumeStateKey,
 									resumeState,
@@ -1690,6 +1807,14 @@ export async function runWorkflowFile({
 			}
 		}
 
+		// Whatever a skipped or failed step left open, and anything from a run with no step left
+		// to settle it against. A paused run does not reach this line -- its charges travel in
+		// the resume state instead -- so this settles only calls with nowhere left to be billed.
+		settleUnbilledCharges(costTracker, llmSpendLedger);
+		if (workflow.cost_limit) {
+			costTracker.checkLimit(workflow.cost_limit, ctx.stderr);
+		}
+
 		const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
 		if (consumedResumeStateKey) {
 			if (resumeStateConsumed) {
@@ -1716,6 +1841,10 @@ export async function runWorkflowFile({
 			ctx.signal?.throwIfAborted();
 		}
 		const runResult: WorkflowRunResult = { status: "ok", output };
+		// `output` is what the last step could serialize; a run composing this one also needs the
+		// items themselves, because that is where replay provenance lives.
+		const lastItems = lastStepId ? pipelineSourceItems(results[lastStepId]) : undefined;
+		if (lastItems) attachPipelineSourceItems(runResult, lastItems);
 		if (costTracker.hasUsage()) {
 			runResult._meta = { cost: costTracker.getSummary() };
 		}
@@ -2600,19 +2729,244 @@ function parseBoolLike(value: unknown): boolean | undefined {
 	return undefined;
 }
 
-function trackStepCost(costTracker: CostTracker, stepId: string, result: WorkflowStepResult) {
-	const json = result.json;
+// The objects a step's pipeline produced, held apart from the serializable step result.
+// A rendered pipeline such as `llm.invoke | json` prints its items and returns an empty
+// stream, so the step's `json` is parsed back out of stdout and only carries what JSON can
+// express. A symbol key survives neither `JSON.stringify` nor `JSON.parse`, so this holds
+// exactly the items this process made, and no workflow input can put one here.
+const PIPELINE_SOURCE_ITEMS = Symbol("lobster.workflow.pipelineSourceItems");
+
+function attachPipelineSourceItems<T extends object>(target: T, items: unknown[]) {
+	Object.defineProperty(target, PIPELINE_SOURCE_ITEMS, {
+		value: items,
+		enumerable: false,
+		configurable: true,
+	});
+	return target;
+}
+
+function pipelineSourceItems(target: object | undefined): unknown[] | undefined {
+	if (!target) return undefined;
+	const items = (target as Record<symbol, unknown>)[PIPELINE_SOURCE_ITEMS];
+	return Array.isArray(items) ? items : undefined;
+}
+
+// The ledger of the run that invoked this one as a `workflow:` step. A composed run bills its
+// own steps and the composing run bills the output handed back to it, so a live call has to be
+// open in both ledgers for each of them to count it once. Read defensively: this arrives
+// through the same context object a caller supplies.
+function composingSpendLedger(ctx: RunContext): LlmSpendLedger | null {
+	const ledger = ctx._llmSpendLedger;
+	if (!ledger || typeof ledger !== "object") return null;
+	return typeof ledger.record === "function" && typeof ledger.claim === "function" ? ledger : null;
+}
+
+// An item this step held back: it may only be read against the ledger once every marked live
+// result accounted alongside it has settled the charge it opened. A `replay` carries the mark of
+// the call it stands in for; a `copy` lost the mark on its way through a stage that rebuilt it,
+// and sometimes the cache key with it.
+type DeferredCharge = {
+	kind: "replay" | "copy";
+	stepId: string;
+	cacheKey: string | null;
+	model: string | null;
+	usage: Record<string, unknown>;
+};
+
+type BranchSpendBuffer = LlmSpendLedger & { release: () => void };
+
+/**
+ * One `wait: "any"` branch's view of the run ledger. The race returns as soon as a branch
+ * answers and leaves the others running, so a losing branch can pay a provider long after the
+ * step settled. Writing that charge straight to the run ledger makes the workflow's own total
+ * depend on how long the run happened to live afterwards: land before the run ends and the
+ * discarded branch's spend is billed, land after and it is billed nowhere.
+ *
+ * So a branch opens its charges here instead, and only the winner releases them into the run.
+ * The output of a losing branch is thrown away; its accounting goes with it. Reads pass
+ * through, because they settle charges the run opened before the race and are made by the
+ * workflow after a branch has returned, never from inside one.
+ */
+function branchSpendBuffer(ledger: LlmSpendLedger): BranchSpendBuffer {
+	const held: Array<{ cacheKey: string; charge?: LlmChargeCost }> = [];
+	let released = false;
+	return {
+		record: (cacheKey, charge) => {
+			if (released) ledger.record(cacheKey, charge);
+			else held.push({ cacheKey, charge });
+		},
+		claim: (cacheKey, cost) => ledger.claim(cacheKey, cost),
+		billCopy: (cacheKey, model, usage) => ledger.billCopy(cacheKey, model, usage),
+		outstanding: () => ledger.outstanding(),
+		restore: (charges) => ledger.restore(charges),
+		settled: () => ledger.settled(),
+		restoreSettled: (charges) => ledger.restoreSettled(charges),
+		release: () => {
+			if (released) return;
+			released = true;
+			for (const { cacheKey, charge } of held) ledger.record(cacheKey, charge);
+			held.length = 0;
+		},
+	};
+}
+
+/**
+ * The run ledger seen by one step, so a charge opened inside it knows where it came from. A
+ * composed run's charges reach the composing run through this too, which is why the step id is
+ * overwritten rather than kept: in the parent's totals the spend belongs to the `workflow:`
+ * step, not to whatever the child called its own.
+ */
+function stepScopedLedger(ledger: LlmSpendLedger, stepId: string): LlmSpendLedger {
+	return {
+		record: (cacheKey, charge) => ledger.record(cacheKey, { ...charge, stepId }),
+		claim: (cacheKey, cost) => ledger.claim(cacheKey, cost),
+		billCopy: (cacheKey, model, usage) => ledger.billCopy(cacheKey, model, usage),
+		outstanding: () => ledger.outstanding(),
+		restore: (charges) => ledger.restore(charges),
+		settled: () => ledger.settled(),
+		restoreSettled: (charges) => ledger.restoreSettled(charges),
+	};
+}
+
+/**
+ * Bills the calls that ended the run unclaimed. An item is the usual carrier of usage, but a
+ * renderer can consume the pipeline before a later stage emits items of its own, an `ask` gate
+ * can swallow the only item, and a composed run can end on a step that carries none. The
+ * charge outlives all three, and dropping it would leave real spend out of `_meta.cost` and
+ * out of `cost_limit`.
+ */
+function settleUnbilledCharges(costTracker: CostTracker, llmSpendLedger: LlmSpendLedger) {
+	for (const charge of llmSpendLedger.outstanding()) {
+		if (!charge.usage) continue;
+		if (!llmSpendLedger.claim(charge.cacheKey)) continue;
+		costTracker.recordUsage(charge.stepId ?? "llm", charge.model ?? null, charge.usage);
+	}
+}
+
+function trackStepCost(
+	costTracker: CostTracker,
+	stepId: string,
+	result: WorkflowStepResult,
+	llmSpendLedger: LlmSpendLedger,
+	deferredCharges?: DeferredCharge[],
+) {
+	// Bill the items the pipeline produced rather than the JSON re-read from its stdout: a
+	// renderer serializes them, and replay provenance does not survive that round trip. Steps
+	// without a pipeline (shell commands) have no such items and are read from `json` as before.
+	const json = pipelineSourceItems(result) ?? result.json;
 	if (!json || typeof json !== "object") return;
 
+	// Replays wait for the live results accounted with them. Branches of one parallel step are
+	// billed in declaration order, so a cached replay declared before an identical `--refresh`
+	// branch would otherwise claim the charge that branch had just opened — and the live branch,
+	// billed whatever its own claim returns, would be billed for it too. One provider call, two
+	// charges, and a `cost_limit` tripped on spend that never happened.
+	const deferred = deferredCharges ?? [];
 	const items = Array.isArray(json) ? json : [json];
 	for (const item of items) {
 		if (!item || typeof item !== "object") continue;
-		const usage = (item as Record<string, unknown>).usage;
+		const record = item as Record<string, unknown>;
+		const usage = record.usage;
 		if (!usage || typeof usage !== "object") continue;
-		const modelValue = (item as Record<string, unknown>).model;
+		const modelValue = record.model;
 		const model = typeof modelValue === "string" ? modelValue : null;
+		// Provenance the LLM commands attach in-process, never a field in the JSON: a step that
+		// prints a replay-shaped object stays billed, so `cost_limit` cannot be evaded. A
+		// projection can drop the item's own mark while carrying its usage record across, so the
+		// record is read too — both marks are symbol keys built in this process.
+		const provenance = llmProvenanceOf(record) ?? llmProvenanceOf(usage);
+		if (provenance) {
+			if (provenance.replayed) {
+				deferred.push({
+					kind: "replay",
+					stepId,
+					cacheKey: provenance.cacheKey,
+					model,
+					usage: usage as Record<string, unknown>,
+				});
+				continue;
+			}
+			// Settles the charge this live call opened -- the one that cost what this item cost,
+			// not merely the first under the key. A step retried after an attempt that failed
+			// after paying leaves more than one charge open, and they did not cost the same.
+			const settled = llmSpendLedger.claim(provenance.cacheKey, {
+				model,
+				usage: usage as Record<string, unknown>,
+			});
+			// Bill what the provider was really asked for, not what the item says by the time it
+			// gets here. A pipeline can drop the model on the way -- `| pick usage` hands on the
+			// marked usage record without it -- or rewrite it, and the step is then priced at the
+			// wrong rate or at nothing at all while `cost_limit` reads the difference as room left.
+			// The charge the call opened is the same witness a replay is already billed from. A
+			// charge restored from resume state written before it carried a cost falls back.
+			if (settled?.usage) {
+				costTracker.recordUsage(stepId, settled.model ?? null, settled.usage);
+				continue;
+			}
+		} else {
+			// No mark, but numbers: a stage that JSON round-trips the stream hands on a copy that
+			// kept `model` and `usage` and lost everything this process attached -- sometimes the
+			// cache key with it. Held back like a replay, and for the same reason: a copy that
+			// lost its key is read by cost alone, and until the marked results have settled their
+			// own charges an identical parallel call's charge is still open to be mistaken for
+			// the one this copy came from.
+			deferred.push({
+				kind: "copy",
+				stepId,
+				cacheKey: typeof record.cacheKey === "string" && record.cacheKey ? record.cacheKey : null,
+				model,
+				usage: usage as Record<string, unknown>,
+			});
+			continue;
+		}
 		costTracker.recordUsage(stepId, model, usage as Record<string, unknown>);
 	}
+
+	if (!deferredCharges) settleDeferredCosts(costTracker, deferred, llmSpendLedger);
+}
+
+/**
+ * Bills what a step held back, now that every marked live result accounted alongside them has
+ * settled its own charge. Replays go first: one carries the mark of the call it stands in for,
+ * which is better evidence than the cost a copy carries on its own.
+ *
+ * A replay carries the usage of the call that produced it, so counting it again charges a run
+ * for tokens no provider was asked to spend. It is billed only when the call it replays is
+ * still unpaid for: a step is costed once it succeeds, so a step that failed after its LLM
+ * call and was retried leaves its real spend riding on the replay the retry produced.
+ *
+ * A copy is billed either way — it is a record of a call, and nothing in a JSON payload can be
+ * trusted to say otherwise — but the ledger still decides whether it settles a charge, so the
+ * step settlement does not add a second record of the same call.
+ */
+function settleDeferredCosts(
+	costTracker: CostTracker,
+	deferred: DeferredCharge[],
+	llmSpendLedger: LlmSpendLedger,
+) {
+	for (const replay of deferred) {
+		if (replay.kind !== "replay" || replay.cacheKey === null) continue;
+		const settled = llmSpendLedger.claim(replay.cacheKey);
+		if (!settled) continue;
+		// Bill what the call this settles actually cost, not what the replay carries. Identical
+		// calls that raced on a cold cache are separate charges under one key, and every replay
+		// of them repeats whichever single answer was stored -- so costing each replay by its
+		// own copy reports all of those calls at the price of the one that won the cache write.
+		// A charge restored from resume state written before it carried a cost falls back.
+		const cost = typeof settled === "object" && settled.usage ? settled : null;
+		costTracker.recordUsage(
+			replay.stepId,
+			cost ? (cost.model ?? null) : replay.model,
+			cost?.usage ?? replay.usage,
+		);
+	}
+	for (const copy of deferred) {
+		if (copy.kind !== "copy") continue;
+		if (llmSpendLedger.billCopy(copy.cacheKey, copy.model, copy.usage)) {
+			costTracker.recordUsage(copy.stepId, copy.model, copy.usage);
+		}
+	}
+	deferred.length = 0;
 }
 
 function parseJson(stdout: string) {
@@ -3185,6 +3539,7 @@ async function runPipelineStep({
 	pipelineText,
 	inputValue,
 	ctx,
+	llmSpendLedger,
 	env,
 	cwd,
 	resume,
@@ -3195,6 +3550,7 @@ async function runPipelineStep({
 	pipelineText: string;
 	inputValue: unknown;
 	ctx: RunContext;
+	llmSpendLedger?: LlmSpendLedger;
 	env: Record<string, string | undefined>;
 	cwd?: string;
 	resume?: {
@@ -3245,6 +3601,8 @@ async function runPipelineStep({
 		forceTerminationSignal: ctx.forceTerminationSignal,
 		haltAfterStageOnAbort: true,
 		llmAdapters: ctx.llmAdapters,
+		// Scoped so a charge nothing bills can still name the step that opened it.
+		llmSpendLedger: llmSpendLedger ? stepScopedLedger(llmSpendLedger, stepId) : undefined,
 		input: resume ? resume.pipelineInput.items : inputValueToPipelineItems(inputValue),
 		requestInputEnabled,
 		requestInputResume: resume
@@ -3299,11 +3657,16 @@ async function runPipelineStep({
 			: result.items
 		: parseJson(renderedStdout);
 
-	return {
+	const stepResult: WorkflowStepResult = {
 		id: stepId,
 		stdout: normalizedStdout,
 		json,
-	} satisfies WorkflowStepResult;
+	};
+	// Only when a renderer consumed the pipeline: otherwise `json` already is those items.
+	if (!result.items.length && result.renderedItems.length) {
+		attachPipelineSourceItems(stepResult, result.renderedItems);
+	}
+	return stepResult;
 }
 
 function createSyntheticStepResult(stepId: string, value: unknown): WorkflowStepResult {

@@ -118,9 +118,30 @@ async function syncDirectory(dir: string) {
 	}
 }
 
+/**
+ * On Windows, `fs.mkdir(..., { recursive: true })` reports the first created
+ * directory as an extended-length path (`\\?\C:\...`). `path.resolve` keeps
+ * that prefix, so such a path never compares equal to the plain drive path we
+ * walk toward and `path.relative` between the two yields an absolute path.
+ * Map the namespaces that have a plain equivalent back to it so both ends of the
+ * chain share one root form. The UNC marker is matched without regard to case,
+ * because Windows accepts a lowercase "unc" namespace component just as well.
+ *
+ * Device namespaces with no drive-letter or UNC equivalent, such as
+ * `\\?\Volume{GUID}\...`, are returned unchanged: stripping their prefix would
+ * leave a relative path and break an explicitly configured state directory.
+ */
+export function stripExtendedLengthPrefix(target: string) {
+	if (!target.startsWith("\\\\?\\")) return target;
+	const rest = target.slice(4);
+	if (/^UNC\\/i.test(rest)) return `\\\\${rest.slice(4)}`;
+	if (/^[A-Za-z]:[\\/]/.test(rest)) return rest;
+	return target;
+}
+
 async function syncCreatedDirectoryChain(firstCreated: string, finalDir: string) {
-	const final = path.resolve(finalDir);
-	let current = path.resolve(firstCreated);
+	const final = path.resolve(stripExtendedLengthPrefix(finalDir));
+	let current = path.resolve(stripExtendedLengthPrefix(firstCreated));
 
 	await syncDirectory(path.dirname(current));
 	while (current !== final) {

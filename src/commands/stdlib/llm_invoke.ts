@@ -2,6 +2,7 @@ import path from "node:path";
 import { promises as fsp } from "node:fs";
 import { createHash } from "node:crypto";
 import { Ajv } from "ajv";
+import { billableTokens } from "../../core/cost_tracker.js";
 import type { ErrorObject } from "ajv";
 
 import {
@@ -107,6 +108,8 @@ const validateResponseEnvelope = ajv.compile(responseSchema);
 
 const DEFAULT_MAX_VALIDATION_RETRIES = 1;
 const STATE_VERSION = 1;
+// Identity version of the response cache key. See computeCacheKey.
+const CACHE_KEY_VERSION = 2;
 
 type BuiltInProvider = "openclaw" | "pi" | "http";
 type SupportedProvider = BuiltInProvider | string;
@@ -150,8 +153,411 @@ type NormalizedInvocationItem = {
 	createdAt: string;
 	source: string;
 	cached: boolean;
+	// Set only when a stored item is re-emitted, so consumers can tell a replay from a live
+	// call. `source` cannot carry that: a direct adapter's source is its provider name.
+	replayed?: boolean;
 	attemptCount: number;
 };
+
+// Provenance for an item this module emitted: which stored answer it belongs to, and whether
+// it came from a provider call or from run state / the response cache.
+// A symbol key cannot come out of `JSON.parse`, so the JSON a workflow step reads from a
+// command's stdout can never carry it: only objects built here, in this process, take part in
+// the replay exemption in workflow cost accounting.
+const LLM_PROVENANCE = Symbol("lobster.llm.provenance");
+
+export type LlmProvenance = { cacheKey: string; replayed: boolean };
+
+/**
+ * Stamps provenance on a value this module is emitting. The property is enumerable so a
+ * downstream `{ ...value }` keeps it, and `JSON.stringify` ignores symbol keys, so serialized
+ * output — including what is written to the cache — is unchanged.
+ */
+function markProvenance<T extends object>(value: T, provenance: LlmProvenance): T {
+	return Object.defineProperty(value, LLM_PROVENANCE, {
+		value: provenance,
+		enumerable: true,
+		configurable: true,
+	});
+}
+
+/**
+ * Marks an item this module is emitting, and its usage record with it. A projection such as
+ * `pick model,usage` builds a new object out of named fields, so the item's own mark does not
+ * reach the consumer — but the usage record crosses by reference, and the usage record is what
+ * gets billed. Marking both means provenance survives an in-process projection without the
+ * consumer having to recognize every command that can build one.
+ */
+function markLlmItem(
+	item: NormalizedInvocationItem,
+	provenance: LlmProvenance,
+): NormalizedInvocationItem {
+	if (item.usage && typeof item.usage === "object") {
+		markProvenance(item.usage as object, provenance);
+	}
+	return markProvenance(item, provenance);
+}
+
+/**
+ * The provenance of an item — or of a usage record — this module produced in the current
+ * process, and null for anything else. The public `replayed` field is deliberately not
+ * consulted: any command can print it beside a real `usage` object, and honoring that would
+ * drop real spend from `_meta.cost` and `cost_limit`.
+ */
+export function llmProvenanceOf(value: unknown): LlmProvenance | null {
+	if (!value || typeof value !== "object") return null;
+	const provenance = (value as Record<symbol, unknown>)[LLM_PROVENANCE];
+	if (!provenance || typeof provenance !== "object") return null;
+	const { cacheKey, replayed } = provenance as LlmProvenance;
+	if (typeof cacheKey !== "string" || typeof replayed !== "boolean") return null;
+	return { cacheKey, replayed };
+}
+
+/**
+ * Marks `target` — a structurally identical value rebuilt from `source`'s own JSON — as standing
+ * in for whatever calls `source` was marked with.
+ *
+ * The marks are deliberately not in that JSON, and re-deriving them from it would mean trusting a
+ * payload, which the accounting must never do. Carrying them is a different act: the caller holds
+ * both values in this process and knows one was built from the other, which nothing on disk can
+ * claim for itself.
+ *
+ * What is carried is always a replay, whatever the source was. A value read back out of storage
+ * re-emits an answer that already exists; the call behind it was made once, and this is not that
+ * call happening again.
+ */
+export function carryLlmProvenance(source: unknown, target: unknown) {
+	if (!source || typeof source !== "object" || !target || typeof target !== "object") return;
+	const provenance = llmProvenanceOf(source);
+	if (provenance)
+		markProvenance(target as object, { cacheKey: provenance.cacheKey, replayed: true });
+	if (Array.isArray(source) || Array.isArray(target)) {
+		if (!Array.isArray(source) || !Array.isArray(target)) return;
+		for (let index = 0; index < Math.min(source.length, target.length); index++) {
+			carryLlmProvenance(source[index], target[index]);
+		}
+		return;
+	}
+	for (const key of Object.keys(source)) {
+		carryLlmProvenance(
+			(source as Record<string, unknown>)[key],
+			(target as Record<string, unknown>)[key],
+		);
+	}
+}
+
+/**
+ * Restores private replay provenance on completed step results loaded from Lobster's own
+ * workflow-resume state. Resume state is the narrow trusted boundary: ordinary command JSON
+ * never reaches this helper, so copying a public cache key cannot suppress its usage record.
+ */
+export function restoreLlmProvenance(
+	target: unknown,
+	charges: readonly LlmOutstandingCharge[] | undefined,
+) {
+	if (!target || typeof target !== "object" || !Array.isArray(charges)) return;
+	const settled = charges.filter(
+		(charge) =>
+			charge &&
+			typeof charge === "object" &&
+			typeof charge.cacheKey === "string" &&
+			charge.cacheKey &&
+			charge.usage &&
+			typeof charge.usage === "object",
+	);
+	if (!settled.length) return;
+
+	const visit = (value: unknown) => {
+		if (!value || typeof value !== "object") return;
+		if (Array.isArray(value)) {
+			for (const item of value) visit(item);
+			return;
+		}
+
+		const record = value as Record<string, unknown>;
+		const cacheKey = typeof record.cacheKey === "string" ? record.cacheKey : null;
+		const model = typeof record.model === "string" ? record.model : null;
+		const usage = record.usage;
+		if (cacheKey && usage && typeof usage === "object") {
+			const matches = settled.some(
+				(charge) =>
+					charge.cacheKey === cacheKey &&
+					(charge.model ?? null) === model &&
+					sameBillableUsage(charge.usage, usage),
+			);
+			if (matches) {
+				const provenance = { cacheKey, replayed: true };
+				markProvenance(usage as object, provenance);
+				markProvenance(record, provenance);
+			}
+		}
+
+		for (const child of Object.values(record)) visit(child);
+	};
+	visit(target);
+}
+
+// Live calls a run has paid for that nothing has billed yet. A workflow records a step's cost
+// only once the step succeeds, so a step that fails *after* its LLM call — and is then retried
+// — never bills the live item. The retry replays the stored answer, and that replay is the only
+// carrier left for a charge that really happened, so it is billed there instead. Entries are
+// keyed by cache key: that is what a live item and every replay of it share across the JSON
+// round trip through run state and the response cache.
+export type LlmSpendLedger = {
+	record: (cacheKey: string, charge?: LlmChargeCost) => void;
+	claim: (cacheKey: string, cost?: LlmChargeCost) => LlmChargeCost | null;
+	billCopy: (
+		cacheKey: string | null,
+		model: string | null,
+		usage: Record<string, unknown>,
+	) => boolean;
+	outstanding: () => LlmOutstandingCharge[];
+	restore: (charges: readonly LlmOutstandingCharge[] | undefined) => void;
+	settled: () => LlmOutstandingCharge[];
+	restoreSettled: (charges: readonly LlmOutstandingCharge[] | undefined) => void;
+};
+
+// What a live call cost, carried with the charge itself. An item is the usual carrier, but it
+// does not always survive to the accounting point: a renderer consumes the pipeline, an `ask`
+// gate swallows the item, a composed run ends on a step of its own. The charge is then the only
+// record left that the provider was really paid.
+export type LlmChargeCost = {
+	stepId?: string;
+	model?: string | null;
+	usage?: Record<string, unknown>;
+};
+
+// A charge a run has opened and not yet billed. Carried in the run's own resume state so a
+// workflow that pauses mid-pipeline keeps it, and only that workflow can settle it.
+export type LlmOutstandingCharge = { cacheKey: string; count: number } & LlmChargeCost;
+
+// A call nothing ever bills — a step that failed outright — leaves its key behind, so the
+// oldest are dropped to keep a long run's ledger bounded.
+const MAX_UNBILLED_LIVE_INVOCATIONS = 256;
+
+/**
+ * Creates the ledger for a single run. The run that paid for a call is the only one that can
+ * recover its charge, because no other run holds this ledger: a workflow reusing a cache entry
+ * written by an earlier run, or by an SDK caller outside cost accounting, finds nothing to
+ * claim and is billed nothing. A live call made without a ledger in `ctx` opens no charge.
+ *
+ * A run composed by another one — a `workflow:` step — passes the composing run's ledger as
+ * `parent`. Both bill the same answer at their own boundary: the child bills its step, the
+ * parent bills the output handed back to it. So a charge is opened in both and each settles
+ * its own copy exactly once, while a replay neither of them paid for still claims nothing.
+ */
+export function createLlmSpendLedger(parent?: LlmSpendLedger | null): LlmSpendLedger {
+	// Outstanding charges per cache key, held one entry per call rather than as a count: two
+	// identical calls that race on a cold cache are two provider charges under one key, the
+	// replays that later stand in for them have to be able to settle both, and each carries the
+	// cost of the call that opened it.
+	const unbilled = new Map<string, LlmChargeCost[]>();
+	// Charges this run has already accounted for. A copy of an item that lost its mark can turn
+	// up in any later step, and the only way to tell it from a call nobody has billed yet is to
+	// remember what has been billed. Bounded like the open charges, oldest key first.
+	const billed = new Map<string, LlmChargeCost[]>();
+	function settle(cacheKey: string, charge: LlmChargeCost | undefined) {
+		const seen = billed.get(cacheKey) ?? [];
+		seen.push(charge ?? {});
+		billed.set(cacheKey, seen);
+		for (const oldest of billed.keys()) {
+			if (billed.size <= MAX_UNBILLED_LIVE_INVOCATIONS) break;
+			billed.delete(oldest);
+		}
+	}
+	return {
+		record(cacheKey: string, charge?: LlmChargeCost) {
+			if (!cacheKey) return;
+			parent?.record(cacheKey, charge);
+			const open = unbilled.get(cacheKey) ?? [];
+			open.push({ ...charge });
+			unbilled.set(cacheKey, open);
+			for (const oldest of unbilled.keys()) {
+				if (unbilled.size <= MAX_UNBILLED_LIVE_INVOCATIONS) break;
+				unbilled.delete(oldest);
+			}
+		},
+		/**
+		 * Settles one outstanding charge and hands back what that call cost, or null for the
+		 * caller that must not bill anything. A live item and every replay of it draw on the same
+		 * charges, so a provider call is billed exactly once however many steps re-emit its
+		 * answer — and N calls under one key can be billed N times, never fewer.
+		 *
+		 * The cost comes back because a replay is not a reliable witness of it: identical calls
+		 * that raced on a cold cache each paid their own way, and every replay of them carries
+		 * whichever single answer was stored.
+		 */
+		claim(cacheKey: string, cost?: LlmChargeCost) {
+			const open = unbilled.get(cacheKey);
+			if (!open?.length) return null;
+			// A caller that knows what its own call cost settles that call's charge. A step
+			// retried after an attempt that failed *after* paying has more than one charge under
+			// the key, and they did not cost the same: settling the wrong one leaves the other to
+			// be billed at this call's price instead of its own.
+			const own = cost
+				? open.findIndex(
+						(charge) =>
+							(charge.model ?? null) === (cost.model ?? null) &&
+							sameBillableUsage(charge.usage, cost.usage),
+					)
+				: -1;
+			// Otherwise: a charge that records no cost settles nothing anyone can bill, so it
+			// must not be the one handed to a caller with a real call to account for. Charges
+			// restored from resume state written before they carried a cost are the ones this
+			// can be.
+			const index =
+				own >= 0
+					? own
+					: Math.max(
+							open.findIndex((charge) => charge.usage !== undefined),
+							0,
+						);
+			const [charge] = open.splice(index, 1);
+			if (!open.length) unbilled.delete(cacheKey);
+			settle(cacheKey, charge);
+			return charge ?? {};
+		},
+		/**
+		 * Whether an item carrying a call's numbers but not its in-process mark should be billed.
+		 * A matching open charge is settled so the same provider call is not recorded again by
+		 * end-of-step cleanup. Once no charge is open, however, public fields can never suppress
+		 * usage: only the private provenance symbol can prove an item is a replay.
+		 */
+		billCopy(cacheKey: string | null, model: string | null, usage: Record<string, unknown>) {
+			const isSameCall = (charge: LlmChargeCost) =>
+				(charge.model ?? null) === model && sameBillableUsage(charge.usage, usage);
+			// A copy that still names a cache key is read against that key alone: the key is
+			// evidence of which call it came from, and honoring it keeps one call's copy from
+			// settling another call's charge. A transform can emit `{ model, usage }` and drop
+			// the key with the symbols, leaving the cost as the only evidence there is.
+			for (const key of cacheKey === null ? [...unbilled.keys()] : [cacheKey]) {
+				const open = unbilled.get(key);
+				const index = open?.findIndex(isSameCall) ?? -1;
+				if (!open || index < 0) continue;
+				settle(key, open.splice(index, 1)[0]);
+				if (!open.length) unbilled.delete(key);
+				return true;
+			}
+			return true;
+		},
+		outstanding() {
+			const charges: LlmOutstandingCharge[] = [];
+			for (const [cacheKey, open] of unbilled) {
+				for (const charge of open) charges.push({ cacheKey, count: 1, ...charge });
+			}
+			return charges;
+		},
+		/**
+		 * Reopens charges a paused run had not billed. A pipeline can suspend mid-step — at an
+		 * `ask` gate — after its LLM call has been paid for but before the step succeeded, so
+		 * without this the charge would exist in no run: the paused one never billed it, and the
+		 * resumed one would exempt the replay that stands in for it.
+		 */
+		restore(charges: readonly LlmOutstandingCharge[] | undefined) {
+			if (!Array.isArray(charges)) return;
+			for (const charge of charges) {
+				if (!charge || typeof charge !== "object") continue;
+				if (typeof charge.cacheKey !== "string" || !charge.cacheKey) continue;
+				const count = Math.floor(Number(charge.count ?? 0));
+				if (!Number.isFinite(count) || count < 1) continue;
+				// State written before this field existed carries no cost, and a hand-edited file
+				// should not be able to invent one: only a plain object of numbers is taken.
+				const { cacheKey, count: _count, ...cost } = charge;
+				const restored = sanitizeChargeCost(cost);
+				for (let i = 0; i < count; i++) this.record(cacheKey, restored);
+			}
+		},
+		/**
+		 * The calls this run has already billed. A run that pauses carries this the way it carries
+		 * what it spent: the total says how much, and this says which calls it was for.
+		 */
+		settled() {
+			const charges: LlmOutstandingCharge[] = [];
+			for (const [cacheKey, seen] of billed) {
+				for (const charge of seen) charges.push({ cacheKey, count: 1, ...charge });
+			}
+			return charges;
+		},
+		/**
+		 * Restores what a paused run had billed, so the two halves of its accounting agree after
+		 * the pause. `cost` brings the money back; without this the run that resumes has no record
+		 * of what the money was for, and a later step that re-emits a completed LLM output — `head`
+		 * over `$live.json` — hands on a copy the fresh ledger has never heard of. It is billed on
+		 * top of the restored total: one provider call, twice in `_meta.cost` and against
+		 * `cost_limit`.
+		 *
+		 * A settled charge is only ever read against a cache key, so what this restores can excuse
+		 * a copy of a named call and nothing else. It cannot touch a live call — those settle out
+		 * of the open charges — and the spend it is reconstructing is already in the `cost` this
+		 * same state carries.
+		 */
+		restoreSettled(charges: readonly LlmOutstandingCharge[] | undefined) {
+			if (!Array.isArray(charges)) return;
+			for (const charge of charges) {
+				if (!charge || typeof charge !== "object") continue;
+				if (typeof charge.cacheKey !== "string" || !charge.cacheKey) continue;
+				const count = Math.floor(Number(charge.count ?? 0));
+				if (!Number.isFinite(count) || count < 1) continue;
+				const { cacheKey, count: _count, ...cost } = charge;
+				const restored = sanitizeChargeCost(cost);
+				for (let i = 0; i < count; i++) settle(cacheKey, restored);
+			}
+		},
+	};
+}
+
+/**
+ * Whether two usage records bill the same, asked of the accounting that bills them. Comparing
+ * the records themselves would answer a different question twice over: a live item's usage
+ * carries this module's provenance symbol, which a copy that went through JSON never can, and a
+ * stage that rebuilds an item can drop or recompute a field nothing is charged for.
+ */
+function sameBillableUsage(left: unknown, right: unknown) {
+	if (!left || typeof left !== "object" || !right || typeof right !== "object") return false;
+	const billed = billableTokens(left as Record<string, unknown>);
+	const other = billableTokens(right as Record<string, unknown>);
+	return billed.inputTokens === other.inputTokens && billed.outputTokens === other.outputTokens;
+}
+
+/**
+ * Opens a charge for a live call, and only for one that costs something. An answer that reports
+ * no usage is billed nowhere however many times it is replayed, so a charge for it would sit in
+ * the ledger with nothing to settle it -- and would be handed to the next caller with a real
+ * call to account for, leaving that one's charge open to be billed a second time.
+ */
+function recordLiveCharge(ctx: any, cacheKey: string, item: NormalizedInvocationItem | undefined) {
+	const cost = chargeCostOf(item);
+	if (!cost) return;
+	ledgerFrom(ctx)?.record(cacheKey, cost);
+}
+
+/** The cost of a live call, read from the item this module just built for it. */
+function chargeCostOf(item: NormalizedInvocationItem | undefined): LlmChargeCost | undefined {
+	const usage = item?.usage;
+	if (!usage || typeof usage !== "object") return undefined;
+	return { model: typeof item?.model === "string" ? item.model : null, usage };
+}
+
+function sanitizeChargeCost(cost: Record<string, unknown>): LlmChargeCost {
+	const usage = cost.usage;
+	if (!usage || typeof usage !== "object" || Array.isArray(usage)) return {};
+	const numbers: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(usage)) {
+		if (typeof value === "number" && Number.isFinite(value)) numbers[key] = value;
+	}
+	if (!Object.keys(numbers).length) return {};
+	return {
+		...(typeof cost.stepId === "string" ? { stepId: cost.stepId } : null),
+		model: typeof cost.model === "string" ? cost.model : null,
+		usage: numbers,
+	};
+}
+
+function ledgerFrom(ctx: any): LlmSpendLedger | null {
+	const ledger = ctx?.llmSpendLedger;
+	if (!ledger || typeof ledger !== "object") return null;
+	return typeof ledger.record === "function" && typeof ledger.claim === "function" ? ledger : null;
+}
 
 type CacheEntry = {
 	items: NormalizedInvocationItem[];
@@ -396,6 +802,8 @@ async function runLlmInvoke({
 		schemaVersion,
 		artifactHashes,
 		outputSchema: userOutputSchema,
+		temperature,
+		maxOutputTokens,
 	});
 
 	if (stateKey && !forceRefresh) {
@@ -405,9 +813,12 @@ async function runLlmInvoke({
 		throwIfCancelled(signal);
 		const reused = pickReusableState(stored, cacheKey, config.stateType);
 		if (reused) {
+			const replay: LlmProvenance = { cacheKey, replayed: true };
 			return {
 				output: streamOf(
-					reused.items.map((item) => ({ ...item, source: "run_state", cached: true })),
+					reused.items.map((item) =>
+						markLlmItem({ ...item, source: "run_state", cached: true, replayed: true }, replay),
+					),
 				),
 			};
 		}
@@ -417,8 +828,13 @@ async function runLlmInvoke({
 		const cache = await readCacheEntry(env, cacheKey, config.cacheNamespace, ctx.signal);
 		throwIfCancelled(signal);
 		if (cache) {
+			const replay: LlmProvenance = { cacheKey, replayed: true };
 			return {
-				output: streamOf(cache.items.map((item) => ({ ...item, source: "cache", cached: true }))),
+				output: streamOf(
+					cache.items.map((item) =>
+						markLlmItem({ ...item, source: "cache", cached: true, replayed: true }, replay),
+					),
+				),
 			};
 		}
 	}
@@ -489,6 +905,15 @@ async function runLlmInvoke({
 			attempt,
 			itemKind: config.itemKind,
 		});
+		const live: LlmProvenance = { cacheKey, replayed: false };
+		for (const item of normalized) markLlmItem(item, live);
+		// The provider has answered and been paid, so the charge is opened here rather than at
+		// either of the returns below. An attempt the local validator rejects never reaches one
+		// of them -- it goes round the loop and asks again -- and its call was as real as the one
+		// that eventually satisfies the schema. Opening it here also puts it before the writes
+		// that store the answer: either can fail once run state already holds a replayable copy,
+		// and the retry that replays it must still find a charge to settle.
+		recordLiveCharge(ctx, cacheKey, normalized[0]);
 
 		if (!validator) {
 			ctx.signal?.throwIfAborted();
@@ -914,6 +1339,8 @@ function computeCacheKey({
 	schemaVersion,
 	artifactHashes,
 	outputSchema,
+	temperature,
+	maxOutputTokens,
 }: {
 	provider: SupportedProvider;
 	prompt: string;
@@ -921,14 +1348,26 @@ function computeCacheKey({
 	schemaVersion: string;
 	artifactHashes: string[];
 	outputSchema: any;
+	temperature: number | null;
+	maxOutputTokens: number | null;
 }) {
+	// `null` is the identity of an omitted parameter, distinct from any value a caller can
+	// pass, so an omitted request can never resolve to an entry written with an explicit one.
+	// The version separates this identity from the keys earlier releases wrote, where the two
+	// parameters were absent from the payload and a sampled answer therefore shared a key with
+	// an unsampled request. Bump it whenever the fields below change: entries under older
+	// versions become unreachable, which costs one re-invocation and never a wrong replay.
 	const payload = {
+		cacheKeyVersion: CACHE_KEY_VERSION,
 		provider,
 		prompt,
 		model: model || `${provider}-default`,
 		schemaVersion,
 		artifactHashes,
 		outputSchema: outputSchema ?? null,
+		// The same predicate that decides whether each parameter is sent to the adapter.
+		temperature: Number.isFinite(temperature ?? NaN) ? Number(temperature) : null,
+		maxOutputTokens: Number.isFinite(maxOutputTokens ?? NaN) ? Number(maxOutputTokens) : null,
 	};
 	return createHash("sha256").update(stableStringify(payload)).digest("hex");
 }
@@ -1064,6 +1503,7 @@ async function readCacheEntry(
 	try {
 		return await withFileLock({ filePath, signal, task: read });
 	} catch (err: any) {
+		if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
 		// A cache mounted read-only cannot have an active local writer because a
 		// writer first creates the same coordination lock. Preserve its reusable
 		// entries instead of requiring a lock-directory write for a read.

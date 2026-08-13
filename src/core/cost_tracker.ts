@@ -39,6 +39,20 @@ function toTokenCount(value: unknown): number {
 	return Math.floor(parsed);
 }
 
+/**
+ * The token counts a usage record is billed for, under any of the spellings providers use.
+ * Everything else a record carries — a `totalTokens`, a cache breakdown — costs nothing, so
+ * two records agreeing on these two numbers cost the same.
+ */
+export function billableTokens(usage: Record<string, unknown>) {
+	return {
+		inputTokens: toTokenCount(usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens),
+		outputTokens: toTokenCount(
+			usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens,
+		),
+	};
+}
+
 export class CostTracker {
 	private steps: StepCost[] = [];
 
@@ -57,12 +71,7 @@ export class CostTracker {
 	}
 
 	recordUsage(stepId: string, model: string | null, usage: Record<string, unknown>) {
-		const inputTokens = toTokenCount(
-			usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens,
-		);
-		const outputTokens = toTokenCount(
-			usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens,
-		);
+		const { inputTokens, outputTokens } = billableTokens(usage);
 		const pricingKey = typeof model === "string" && model.trim() ? model : null;
 		const pricing =
 			pricingKey && Object.prototype.hasOwnProperty.call(this.pricing, pricingKey)
@@ -75,6 +84,30 @@ export class CostTracker {
 		const costUsd =
 			(inputTokens * effectivePricing.input + outputTokens * effectivePricing.output) / 1_000_000;
 		this.steps.push({ stepId, model, inputTokens, outputTokens, costUsd });
+	}
+
+	/**
+	 * Seeds this tracker with spend an earlier run of the same workflow already recorded — the
+	 * steps completed before an approval or input gate paused it. A pause is not a spend reset:
+	 * without this, `_meta.cost` after a resume would report only the steps that ran after it,
+	 * and a `cost_limit` could be walked past one gate at a time. Entries are rebuilt through
+	 * the same normalization as live usage rather than trusted verbatim, so a malformed stored
+	 * record cannot poison later totals.
+	 */
+	restore(steps: readonly StepCost[] | undefined) {
+		if (!Array.isArray(steps)) return;
+		for (const step of steps) {
+			if (!step || typeof step !== "object") continue;
+			if (typeof step.stepId !== "string" || !step.stepId) continue;
+			const costUsd = Number(step.costUsd ?? 0);
+			this.steps.push({
+				stepId: step.stepId,
+				model: typeof step.model === "string" ? step.model : null,
+				inputTokens: toTokenCount(step.inputTokens),
+				outputTokens: toTokenCount(step.outputTokens),
+				costUsd: Number.isFinite(costUsd) && costUsd > 0 ? costUsd : 0,
+			});
+		}
 	}
 
 	getSummary(): CostSummary {

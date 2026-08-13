@@ -187,6 +187,7 @@ export function runAbortableProcess({
 		child.stderr?.setEncoding("utf8");
 		child.stdout?.on("data", (data: string) => appendOutput("stdout", data));
 		child.stderr?.on("data", (data: string) => appendOutput("stderr", data));
+		child.stdin?.on("error", () => {});
 		if (typeof stdin === "string") child.stdin?.write(stdin);
 		child.stdin?.end();
 
