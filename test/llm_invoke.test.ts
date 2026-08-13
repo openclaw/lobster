@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { promises as fsp } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createDefaultRegistry } from "../src/commands/registry.js";
+import { keyToPath } from "../src/state/store.js";
 
 function streamOf(items: any[]) {
 	return (async function* () {
@@ -164,6 +166,450 @@ test("llm.invoke uses Pi adapter over local HTTP bridge", async () => {
 	} finally {
 		await rm(cacheDir, { recursive: true, force: true });
 		await closeServer(server);
+	}
+});
+
+test("llm.invoke does not retry schema validation after adapter cancellation", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const controller = new AbortController();
+	let calls = 0;
+
+	await assert.rejects(
+		cmd.run({
+			input: streamOf([]),
+			args: {
+				_: [],
+				provider: "cancel-test",
+				prompt: "Decide",
+				"output-schema": '{"type":"object","required":["decision"]}',
+				"max-validation-retries": 2,
+			},
+			ctx: {
+				...baseCtx({}, registry),
+				signal: controller.signal,
+				llmAdapters: {
+					"cancel-test": {
+						source: "cancel-test",
+						async invoke() {
+							calls += 1;
+							controller.abort(new Error("adapter cancelled during validation"));
+							return {
+								ok: true,
+								result: {
+									runId: "cancelled-attempt",
+									output: { data: { unexpected: true } },
+								},
+							};
+						},
+					},
+				},
+			},
+		} as any),
+		/adapter cancelled during validation/,
+	);
+	assert.equal(calls, 1, "cancellation after an invalid response must suppress retries");
+});
+
+test("llm.invoke aborts while waiting for its reusable run-state lock", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-llm-state-lock-abort-"));
+	const stateDir = path.join(cacheDir, "state");
+	const stateKey = "blocked-run-state";
+	const lockPath = `${keyToPath(stateDir, stateKey)}.lock`;
+	await fsp.mkdir(lockPath, { recursive: true });
+	await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}::live-writer\n`, "utf8");
+
+	try {
+		const controller = new AbortController();
+		const pending = cmd.run({
+			input: streamOf([]),
+			args: {
+				_: [],
+				provider: "state-lock-abort-test",
+				prompt: "Decide",
+				"state-key": stateKey,
+			},
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+				signal: controller.signal,
+				llmAdapters: {
+					"state-lock-abort-test": {
+						source: "state-lock-abort-test",
+						async invoke() {
+							throw new Error("adapter must not run while the state read is locked");
+						},
+					},
+				},
+			},
+		} as any);
+		const completion = pending.then(
+			() => ({ kind: "success" as const }),
+			(error) => ({ kind: "error" as const, error }),
+		);
+		await new Promise((resolve) => setImmediate(resolve));
+		controller.abort(new Error("LLM state read cancelled"));
+		const early = await Promise.race([
+			completion,
+			new Promise<{ kind: "timeout" }>((resolve) =>
+				setTimeout(() => resolve({ kind: "timeout" }), 75),
+			),
+		]);
+		if (early.kind === "timeout") await fsp.rm(lockPath, { recursive: true, force: true });
+		const settled = early.kind === "timeout" ? await completion : early;
+		assert.notEqual(
+			early.kind,
+			"timeout",
+			"state-key reads must observe cancellation while locked",
+		);
+		assert.equal(settled.kind, "error");
+		if (settled.kind === "error") {
+			assert.match(settled.error?.message ?? "", /LLM state read cancelled/);
+		}
+	} finally {
+		await fsp.rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("llm.invoke does not publish a reusable cache entry when cancellation races cache commit", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-cancel-publication-"));
+	const stateDir = path.join(cacheDir, "state");
+	const controller = new AbortController();
+	const originalRename = fsp.rename;
+	let cacheCommitAborted = false;
+	let calls = 0;
+	const adapter = {
+		source: "cache-cancel-test",
+		async invoke() {
+			calls += 1;
+			return {
+				ok: true,
+				result: {
+					runId: `call-${calls}`,
+					output: { data: { call: calls } },
+				},
+			};
+		},
+	};
+	const args = {
+		_: [],
+		provider: "cache-cancel-test",
+		prompt: "Decide",
+		"state-key": "cancelled-cache-publication",
+	};
+
+	try {
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			async value(from: Parameters<typeof fsp.rename>[0], to: Parameters<typeof fsp.rename>[1]) {
+				const result = await originalRename(from, to);
+				if (
+					!cacheCommitAborted &&
+					String(to).startsWith(`${path.join(cacheDir, "llm.invoke")}${path.sep}`) &&
+					String(to).endsWith(".json")
+				) {
+					cacheCommitAborted = true;
+					controller.abort(new Error("cancelled during cache publication"));
+				}
+				return result;
+			},
+		});
+
+		await assert.rejects(
+			cmd.run({
+				input: streamOf([]),
+				args,
+				ctx: {
+					...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+					signal: controller.signal,
+					llmAdapters: { "cache-cancel-test": adapter },
+				},
+			} as any),
+			/cancelled during cache publication/,
+		);
+	} finally {
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			value: originalRename,
+		});
+	}
+
+	const retried = await cmd.run({
+		input: streamOf([]),
+		args,
+		ctx: {
+			...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+			llmAdapters: { "cache-cancel-test": adapter },
+		},
+	} as any);
+	const retriedItems = await collect(retried.output!);
+	assert.equal(
+		calls,
+		2,
+		"a cancelled invocation must not satisfy a later request from cache or run state",
+	);
+	assert.equal(retriedItems[0]?.source, "cache-cancel-test");
+
+	await rm(cacheDir, { recursive: true, force: true });
+});
+
+test("llm.invoke restores the previous cache entry when a refresh is cancelled after commit", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-refresh-cancel-"));
+	const stateDir = path.join(cacheDir, "state");
+	let calls = 0;
+	const adapter = {
+		source: "cache-refresh-cancel-test",
+		async invoke() {
+			calls += 1;
+			return {
+				ok: true,
+				result: {
+					runId: `call-${calls}`,
+					output: { data: { call: calls } },
+				},
+			};
+		},
+	};
+	const args = {
+		_: [],
+		provider: "cache-refresh-cancel-test",
+		prompt: "Decide",
+		"state-key": "refresh-cache-publication",
+	};
+
+	try {
+		const first = await cmd.run({
+			input: streamOf([]),
+			args,
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+				llmAdapters: { "cache-refresh-cancel-test": adapter },
+			},
+		} as any);
+		assert.deepEqual((await collect(first.output!))[0]?.output.data, { call: 1 });
+
+		const controller = new AbortController();
+		const originalRename = fsp.rename;
+		let cacheCommitAborted = false;
+		try {
+			Object.defineProperty(fsp, "rename", {
+				configurable: true,
+				writable: true,
+				async value(from: Parameters<typeof fsp.rename>[0], to: Parameters<typeof fsp.rename>[1]) {
+					const result = await originalRename(from, to);
+					if (
+						!cacheCommitAborted &&
+						String(to).startsWith(`${path.join(cacheDir, "llm.invoke")}${path.sep}`)
+					) {
+						cacheCommitAborted = true;
+						controller.abort(new Error("cancelled during cache refresh publication"));
+					}
+					return result;
+				},
+			});
+
+			await assert.rejects(
+				cmd.run({
+					input: streamOf([]),
+					args: { ...args, refresh: true },
+					ctx: {
+						...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+						signal: controller.signal,
+						llmAdapters: { "cache-refresh-cancel-test": adapter },
+					},
+				} as any),
+				/cancelled during cache refresh publication/,
+			);
+		} finally {
+			Object.defineProperty(fsp, "rename", {
+				configurable: true,
+				writable: true,
+				value: originalRename,
+			});
+		}
+
+		const recovered = await cmd.run({
+			input: streamOf([]),
+			args,
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+				llmAdapters: { "cache-refresh-cancel-test": adapter },
+			},
+		} as any);
+		const recoveredItems = await collect(recovered.output!);
+		assert.equal(calls, 2, "the cancelled refresh must restore the existing run state");
+		assert.equal(recoveredItems[0]?.source, "run_state");
+		assert.deepEqual(recoveredItems[0]?.output.data, { call: 1 });
+
+		const recoveredCache = await cmd.run({
+			input: streamOf([]),
+			args: { _: [], provider: "cache-refresh-cancel-test", prompt: "Decide" },
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+				llmAdapters: { "cache-refresh-cancel-test": adapter },
+			},
+		} as any);
+		const recoveredCacheItems = await collect(recoveredCache.output!);
+		assert.equal(recoveredCacheItems[0]?.source, "cache");
+		assert.deepEqual(recoveredCacheItems[0]?.output.data, { call: 1 });
+	} finally {
+		await rm(cacheDir, { recursive: true, force: true });
+	}
+});
+
+test("llm.invoke rolls back cache and run-state publications after a cache directory sync failure", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-cache-dir-sync-failure-"));
+	const stateDir = path.join(cacheDir, "state");
+	const cacheNamespaceDir = path.join(cacheDir, "llm.invoke");
+	const originalOpen = fsp.open;
+	const fault = Object.assign(new Error("cache directory sync failed"), { code: "EIO" });
+	let failNextCacheDirectorySync = true;
+	let calls = 0;
+	const adapter = {
+		source: "cache-dir-sync-test",
+		async invoke() {
+			calls += 1;
+			return { ok: true, result: { runId: `call-${calls}`, output: { data: { call: calls } } } };
+		},
+	};
+	const args = {
+		_: [],
+		provider: "cache-dir-sync-test",
+		prompt: "Decide",
+		"state-key": "cache-directory-sync-failure",
+	};
+
+	try {
+		await fsp.mkdir(cacheNamespaceDir, { recursive: true });
+		Object.defineProperty(fsp, "open", {
+			configurable: true,
+			writable: true,
+			async value(...openArgs: any[]) {
+				const handle = await (originalOpen as any)(...openArgs);
+				if (
+					failNextCacheDirectorySync &&
+					String(openArgs[0]) === cacheNamespaceDir &&
+					openArgs[1] === "r"
+				) {
+					failNextCacheDirectorySync = false;
+					return new Proxy(handle, {
+						get(target, property, receiver) {
+							if (property === "sync") return async () => Promise.reject(fault);
+							const value = Reflect.get(target, property, receiver);
+							return typeof value === "function" ? value.bind(target) : value;
+						},
+					});
+				}
+				return handle;
+			},
+		});
+
+		await assert.rejects(
+			cmd.run({
+				input: streamOf([]),
+				args,
+				ctx: {
+					...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+					llmAdapters: { "cache-dir-sync-test": adapter },
+				},
+			} as any),
+			/cache directory sync failed/,
+		);
+	} finally {
+		Object.defineProperty(fsp, "open", {
+			configurable: true,
+			writable: true,
+			value: originalOpen,
+		});
+	}
+
+	const retried = await cmd.run({
+		input: streamOf([]),
+		args,
+		ctx: {
+			...baseCtx({ LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir }, registry),
+			llmAdapters: { "cache-dir-sync-test": adapter },
+		},
+	} as any);
+	const items = await collect(retried.output!);
+	assert.equal(calls, 2, "a failed publication must not be reused from cache or run state");
+	assert.equal(items[0]?.source, "cache-dir-sync-test");
+	await rm(cacheDir, { recursive: true, force: true });
+});
+
+test("llm.invoke reads a populated cache when lock creation is forbidden", async () => {
+	const registry = createDefaultRegistry();
+	const cmd = registry.get("llm.invoke");
+	assert.ok(cmd);
+	const cacheDir = await mkdtemp(path.join(tmpdir(), "lobster-readonly-cache-"));
+	const originalMkdir = fsp.mkdir;
+	let calls = 0;
+	const adapter = {
+		source: "readonly-cache-test",
+		async invoke() {
+			calls += 1;
+			return { ok: true, result: { runId: `call-${calls}`, output: { data: { call: calls } } } };
+		},
+	};
+	const args = { _: [], provider: "readonly-cache-test", prompt: "Decide" };
+
+	try {
+		const first = await cmd.run({
+			input: streamOf([]),
+			args,
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir }, registry),
+				llmAdapters: { "readonly-cache-test": adapter },
+			},
+		} as any);
+		await collect(first.output!);
+
+		Object.defineProperty(fsp, "mkdir", {
+			configurable: true,
+			writable: true,
+			async value(
+				filePath: Parameters<typeof fsp.mkdir>[0],
+				options?: Parameters<typeof fsp.mkdir>[1],
+			) {
+				if (String(filePath).endsWith(".lock")) {
+					throw Object.assign(new Error("read-only cache directory"), { code: "EACCES" });
+				}
+				return originalMkdir(filePath, options);
+			},
+		});
+
+		const cached = await cmd.run({
+			input: streamOf([]),
+			args,
+			ctx: {
+				...baseCtx({ LOBSTER_CACHE_DIR: cacheDir }, registry),
+				llmAdapters: { "readonly-cache-test": adapter },
+			},
+		} as any);
+		const items = await collect(cached.output!);
+		assert.equal(calls, 1);
+		assert.equal(items[0]?.source, "cache");
+	} finally {
+		Object.defineProperty(fsp, "mkdir", {
+			configurable: true,
+			writable: true,
+			value: originalMkdir,
+		});
+		await rm(cacheDir, { recursive: true, force: true });
 	}
 });
 

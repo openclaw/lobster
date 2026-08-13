@@ -3,6 +3,22 @@ import path from "node:path";
 import { promises as fsp } from "node:fs";
 import { randomBytes } from "node:crypto";
 
+const CONSUMED_RESUME_STATE_TYPE = "lobster.consumed-resume-state.v1";
+
+export type ConsumedResumeState = {
+	type: typeof CONSUMED_RESUME_STATE_TYPE;
+	consumedAt: string;
+	claimId: string;
+};
+
+export function isConsumedResumeState(value: unknown): value is ConsumedResumeState {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		(value as { type?: unknown }).type === CONSUMED_RESUME_STATE_TYPE
+	);
+}
+
 export function defaultStateDir(env) {
 	return (
 		(env?.LOBSTER_STATE_DIR && String(env.LOBSTER_STATE_DIR).trim()) ||
@@ -36,12 +52,36 @@ export function stableStringify(value) {
 type AtomicWriteOptions = {
 	renameFile?: typeof fsp.rename;
 	syncParentDir?: (filePath: string) => Promise<void>;
+	signal?: AbortSignal;
 };
 
 type AtomicExclusiveWriteOptions = {
 	linkFile?: typeof fsp.link;
 	syncParentDir?: (filePath: string) => Promise<void>;
 };
+
+type PublishedAtomicWriteError = NodeJS.ErrnoException & {
+	atomicWritePublished?: true;
+};
+
+function markAtomicWritePublished(err: unknown) {
+	if (err && (typeof err === "object" || typeof err === "function")) {
+		Object.defineProperty(err, "atomicWritePublished", {
+			value: true,
+			configurable: true,
+		});
+	}
+	return err;
+}
+
+export function atomicWriteWasPublished(err: unknown): err is PublishedAtomicWriteError {
+	return Boolean((err as PublishedAtomicWriteError | undefined)?.atomicWritePublished);
+}
+
+const STATE_LOCK_RETRY_MS = 10;
+const STATE_LOCK_ORPHAN_MS = 30_000;
+const STATE_LOCK_HEARTBEAT_MS = 250;
+const TERMINAL_RESUME_CLEANUP_TIMEOUT_MS = STATE_LOCK_RETRY_MS * 10;
 
 function isDirectorySyncUnsupportedError(err: any): boolean {
 	return [
@@ -101,6 +141,267 @@ export function isJsonSyntaxError(err) {
 	return err instanceof SyntaxError;
 }
 
+async function waitForStateLock(signal?: AbortSignal) {
+	await new Promise<void>((resolve, reject) => {
+		const onAbort = () => {
+			clearTimeout(timer);
+			try {
+				signal?.throwIfAborted();
+			} catch (err) {
+				reject(err);
+			}
+		};
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, STATE_LOCK_RETRY_MS);
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+function isProcessAlive(pid: number) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err: any) {
+		return err?.code !== "ESRCH";
+	}
+}
+
+type StateLockOwner = {
+	pid: number;
+	processStartIdentity: string | null;
+	nonce: string;
+};
+
+function parseStateLockOwner(ownerText: string): StateLockOwner | null {
+	const parts = ownerText.trim().split(":");
+	if (parts.length !== 3) return null;
+	const pid = Number(parts[0]);
+	const processStartIdentity = parts[1] || null;
+	const nonce = parts[2];
+	if (!Number.isInteger(pid) || pid <= 0 || !nonce) return null;
+	return { pid, processStartIdentity, nonce };
+}
+
+async function readProcessStartIdentity(pid: number): Promise<string | null> {
+	if (process.platform !== "linux") return null;
+	try {
+		const stat = await fsp.readFile(`/proc/${pid}/stat`, "utf8");
+		const closeParen = stat.lastIndexOf(")");
+		if (closeParen < 0) return null;
+		// The remainder starts at procfs field 3; starttime is field 22.
+		const fields = stat
+			.slice(closeParen + 1)
+			.trim()
+			.split(/\s+/);
+		return fields[19] || null;
+	} catch {
+		return null;
+	}
+}
+
+async function isStateLockOld(lockPath: string) {
+	try {
+		const stat = await fsp.stat(lockPath);
+		return Date.now() - stat.mtimeMs >= STATE_LOCK_ORPHAN_MS;
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return true;
+		throw err;
+	}
+}
+
+async function hasExpiredStateLockLease(lockPath: string) {
+	let first;
+	try {
+		first = await fsp.stat(lockPath);
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return true;
+		throw err;
+	}
+	if (Date.now() - first.mtimeMs < STATE_LOCK_ORPHAN_MS) return false;
+
+	await new Promise<void>((resolve) => setTimeout(resolve, STATE_LOCK_HEARTBEAT_MS));
+	try {
+		const second = await fsp.stat(lockPath);
+		return second.mtimeMs === first.mtimeMs && Date.now() - second.mtimeMs >= STATE_LOCK_ORPHAN_MS;
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return true;
+		throw err;
+	}
+}
+
+async function reclaimOrphanedStateLock(lockPath: string) {
+	let observedLock: { dev: number; ino: number };
+	try {
+		const stat = await fsp.lstat(lockPath);
+		observedLock = { dev: stat.dev, ino: stat.ino };
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return true;
+		throw err;
+	}
+
+	let stale = false;
+	try {
+		const ownerPath = path.join(lockPath, "owner");
+		const ownerText = (await fsp.readFile(ownerPath, "utf8")).trim();
+		const owner = parseStateLockOwner(ownerText);
+		if (owner && isProcessAlive(owner.pid)) {
+			const processStartIdentity = await readProcessStartIdentity(owner.pid);
+			if (owner.processStartIdentity && processStartIdentity) {
+				stale = owner.processStartIdentity !== processStartIdentity;
+			} else {
+				// A live PID without a matching process-instance identity may have
+				// been reused. Require a conservative expired lease and a second
+				// unchanged observation before reclaiming it.
+				stale = await hasExpiredStateLockLease(ownerPath);
+			}
+		} else if (owner) {
+			stale = true;
+		} else {
+			stale = await isStateLockOld(lockPath);
+		}
+	} catch (err: any) {
+		if (err?.code === "ENOENT") {
+			stale = await isStateLockOld(lockPath);
+		} else {
+			throw err;
+		}
+	}
+	if (!stale) return false;
+
+	// Claim reclamation inside the observed directory before removing it. Renaming
+	// `lockPath` directly is unsafe: another reclaimer can replace that pathname
+	// with a live lock after the stale observation, and a later recursive cleanup
+	// would then delete the new owner's lock while it is in use.
+	const reclaimPath = path.join(lockPath, ".reclaiming");
+	try {
+		await fsp.mkdir(reclaimPath, { mode: 0o700 });
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return true;
+		if (err?.code === "EEXIST") return false;
+		throw err;
+	}
+
+	try {
+		const currentLock = await fsp.lstat(lockPath);
+		if (currentLock.dev !== observedLock.dev || currentLock.ino !== observedLock.ino) {
+			return false;
+		}
+		await fsp.rm(lockPath, { recursive: true, force: true });
+	} finally {
+		// If the path changed before the reclamation marker was claimed, leave the
+		// replacement lock intact and only remove our harmless marker.
+		await fsp.rmdir(reclaimPath).catch(() => {});
+	}
+	return true;
+}
+
+async function stillOwnsStateLock(ownerPath: string, owner: string) {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			return (await fsp.readFile(ownerPath, "utf8")) === owner;
+		} catch (err: any) {
+			if (err?.code === "ENOENT" || attempt === 1) return false;
+			await new Promise<void>((resolve) => setTimeout(resolve, STATE_LOCK_RETRY_MS));
+		}
+	}
+	return false;
+}
+
+async function withStateKeyLock<T>({
+	env,
+	key,
+	signal,
+	task,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	signal?: AbortSignal;
+	task: () => Promise<T>;
+}): Promise<T> {
+	const stateDir = defaultStateDir(env);
+	return withFileLock({
+		filePath: keyToPath(stateDir, key),
+		signal,
+		task,
+	});
+}
+
+/**
+ * Serialize a transition for an arbitrary durable file. Readers that need a
+ * publish-or-rollback decision use the same lock as writers, rather than
+ * observing an atomic rename that cancellation may still need to undo.
+ */
+export async function withFileLock<T>({
+	filePath,
+	signal,
+	task,
+}: {
+	filePath: string;
+	signal?: AbortSignal;
+	task: () => Promise<T>;
+}): Promise<T> {
+	await ensureDirectory(path.dirname(filePath));
+	const lockPath = `${filePath}.lock`;
+	let acquired = false;
+	let owner: string | undefined;
+	let ownerWritten = false;
+	let heartbeat: ReturnType<typeof setInterval> | undefined;
+	try {
+		while (!acquired) {
+			signal?.throwIfAborted();
+			try {
+				await fsp.mkdir(lockPath, { mode: 0o700 });
+				acquired = true;
+				const processStartIdentity = await readProcessStartIdentity(process.pid);
+				owner = `${process.pid}:${processStartIdentity ?? ""}:${randomBytes(6).toString("hex")}\n`;
+				await fsp.writeFile(path.join(lockPath, "owner"), owner, {
+					encoding: "utf8",
+					mode: 0o600,
+				});
+				ownerWritten = true;
+				const ownerPath = path.join(lockPath, "owner");
+				heartbeat = setInterval(() => {
+					void fsp.utimes(ownerPath, new Date(), new Date()).catch(() => {});
+				}, STATE_LOCK_HEARTBEAT_MS);
+				heartbeat.unref?.();
+			} catch (err: any) {
+				if (acquired) throw err;
+				if (err?.code !== "EEXIST") throw err;
+				if (!(await reclaimOrphanedStateLock(lockPath))) {
+					await waitForStateLock(signal);
+				}
+			}
+		}
+		return await task();
+	} finally {
+		if (heartbeat) clearInterval(heartbeat);
+		if (acquired) {
+			const ownerPath = path.join(lockPath, "owner");
+			if (!ownerWritten || !owner || (await stillOwnsStateLock(ownerPath, owner))) {
+				// Detach an owned lock before best-effort cleanup. If a filesystem error
+				// prevents removing the detached directory, the canonical lock path is
+				// already free for a subsequent operation; leaving it in place would
+				// instead look like a live lock owned by this still-running process.
+				const cleanupPath = `${lockPath}.release-${process.pid}-${randomBytes(6).toString("hex")}`;
+				try {
+					await fsp.rename(lockPath, cleanupPath);
+					await fsp.rm(cleanupPath, { recursive: true, force: true }).catch(() => {});
+				} catch (err: any) {
+					if (err?.code !== "ENOENT") {
+						await fsp.rm(lockPath, { recursive: true, force: true }).catch(() => {});
+					}
+				}
+			}
+		}
+	}
+}
+
 function isLinkUnsupportedError(err: any): boolean {
 	return ["ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EXDEV"].includes(err?.code);
 }
@@ -148,9 +449,18 @@ export async function writeFileAtomic(filePath, data, options: AtomicWriteOption
 		await handle.sync();
 		await handle.close();
 		handle = undefined;
+		options.signal?.throwIfAborted();
 		await renameFile(tmpPath, filePath);
-		await syncDir(filePath);
 		cleanup = false;
+		// The rename is the irreversible publication point. Keep propagating a
+		// directory-sync failure, but mark it so a state transition can reconcile
+		// the visible replacement before deciding whether dispatch is safe.
+		try {
+			await syncDir(filePath);
+		} catch (err) {
+			throw markAtomicWritePublished(err);
+		}
+		return { signalAbortedAfterCommit: options.signal?.aborted === true };
 	} finally {
 		if (handle) await handle.close().catch(() => {});
 		if (cleanup) await fsp.rm(tmpPath, { force: true }).catch(() => {});
@@ -202,28 +512,282 @@ export async function writeFileAtomicExclusive(
 	}
 }
 
-export async function readStateJson({ env, key }) {
+export async function readStateJson({
+	env,
+	key,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	signal?: AbortSignal;
+}) {
+	signal?.throwIfAborted();
 	const stateDir = defaultStateDir(env);
 	const filePath = keyToPath(stateDir, key);
 
 	try {
 		const text = await fsp.readFile(filePath, "utf8");
-		return JSON.parse(text);
+		const value = JSON.parse(text);
+		signal?.throwIfAborted();
+		return value;
 	} catch (err) {
 		if (err?.code === "ENOENT") return null;
 		throw err;
 	}
 }
 
-export async function writeStateJson({ env, key, value }) {
+/**
+ * Read a state record only after any in-progress publish-or-rollback transition
+ * for the same key has settled. Callers that compose state with another durable
+ * resource use this to avoid observing a value that cancellation may undo.
+ */
+export async function readStateJsonWithLock({
+	env,
+	key,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	signal?: AbortSignal;
+}) {
+	try {
+		return await withStateKeyLock({ env, key, signal, task: () => readStateJson({ env, key }) });
+	} catch (err: any) {
+		// A readable state directory can deliberately be mounted read-only. In that
+		// case no writer can begin a paired publish-or-rollback transition, so use
+		// the non-mutating JSON read instead of requiring creation of a lock path.
+		if (["EACCES", "EPERM", "EROFS"].includes(err?.code)) {
+			return readStateJson({ env, key, signal });
+		}
+		throw err;
+	}
+}
+
+async function writeStateJsonUnlocked({
+	env,
+	key,
+	value,
+	signal = undefined,
+	atomicWriteOptions = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	value: unknown;
+	signal?: AbortSignal;
+	atomicWriteOptions?: Omit<AtomicWriteOptions, "signal">;
+}) {
 	const stateDir = defaultStateDir(env);
 	const filePath = keyToPath(stateDir, key);
 
 	await ensureDirectory(stateDir);
-	await writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n");
+	return writeFileAtomic(filePath, JSON.stringify(value, null, 2) + "\n", {
+		...atomicWriteOptions,
+		signal,
+	});
 }
 
-export async function deleteStateJson({ env, key }) {
+export async function writeStateJson({
+	env,
+	key,
+	value,
+	signal = undefined,
+	atomicWriteOptions = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	value: unknown;
+	signal?: AbortSignal;
+	atomicWriteOptions?: Omit<AtomicWriteOptions, "signal">;
+}) {
+	return withStateKeyLock({
+		env,
+		key,
+		signal,
+		task: () => writeStateJsonUnlocked({ env, key, value, signal, atomicWriteOptions }),
+	});
+}
+
+/**
+ * Retire a resume capability before its first unsafe execution boundary. The
+ * replacement is deliberately persistent: a failed later unlink must not make
+ * the original token replayable.
+ */
+export async function consumeResumeState({
+	env,
+	key,
+	expectedState,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	expectedState: unknown;
+	signal?: AbortSignal;
+}) {
+	return withStateKeyLock({
+		env,
+		key,
+		signal,
+		task: async () => {
+			const currentState = await readStateJson({ env, key });
+			// A resume snapshot is loaded before command/workflow setup. Re-check it
+			// while holding the state lock so two callers cannot both turn the same
+			// approval into an executable invocation.
+			if (stableStringify(currentState) !== stableStringify(expectedState)) {
+				return { consumed: false as const };
+			}
+			const claimId = randomBytes(16).toString("hex");
+			try {
+				const result = await writeStateJsonUnlocked({
+					env,
+					key,
+					value: {
+						type: CONSUMED_RESUME_STATE_TYPE,
+						consumedAt: new Date().toISOString(),
+						claimId,
+					},
+					signal,
+				});
+				return {
+					consumed: true as const,
+					claimId,
+					signalAbortedAfterCommit: result?.signalAbortedAfterCommit === true,
+				};
+			} catch (err) {
+				if (atomicWriteWasPublished(err)) {
+					const latest = await readStateJson({ env, key });
+					if (isConsumedResumeState(latest) && latest.claimId === claimId) {
+						await writeStateJsonUnlocked({ env, key, value: expectedState });
+					}
+				}
+				throw err;
+			}
+		},
+	});
+}
+
+/**
+ * Undo a just-published consumed marker only when it is still owned by the
+ * caller's pre-dispatch claim. This never overwrites a replacement state or a
+ * concurrent claimant's marker.
+ */
+export async function restoreConsumedResumeState({
+	env,
+	key,
+	expectedState,
+	claimId,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	expectedState: unknown;
+	claimId: string;
+}) {
+	return withStateKeyLock({
+		env,
+		key,
+		task: async () => {
+			const currentState = await readStateJson({ env, key });
+			if (!isConsumedResumeState(currentState) || currentState.claimId !== claimId) {
+				return false;
+			}
+			await writeStateJsonUnlocked({ env, key, value: expectedState });
+			return true;
+		},
+	});
+}
+
+/**
+ * Retire an unconsumed capability at a safe terminal boundary. The snapshot is
+ * first replaced by a caller-owned marker under the state lock, so a
+ * cancellation can restore only the state this caller claimed. A stale resume
+ * that merely observed an earlier snapshot can never recreate a state another
+ * resume has already settled.
+ */
+export async function deleteResumeStateWithRollback({
+	env,
+	key,
+	expectedState,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	expectedState: unknown;
+	signal?: AbortSignal;
+}): Promise<boolean> {
+	return withStateKeyLock({
+		env,
+		key,
+		signal,
+		task: async () => {
+			signal?.throwIfAborted();
+			const currentState = await readStateJson({ env, key });
+			if (stableStringify(currentState) !== stableStringify(expectedState)) return false;
+
+			const claimId = randomBytes(16).toString("hex");
+			let claimPublished = false;
+			let claimMayBePublished = false;
+			let deleted = false;
+			try {
+				let result;
+				try {
+					result = await writeStateJsonUnlocked({
+						env,
+						key,
+						value: {
+							type: CONSUMED_RESUME_STATE_TYPE,
+							consumedAt: new Date().toISOString(),
+							claimId,
+						},
+						signal,
+					});
+				} catch (err) {
+					claimMayBePublished = atomicWriteWasPublished(err);
+					throw err;
+				}
+				claimPublished = true;
+				if (result?.signalAbortedAfterCommit) signal?.throwIfAborted();
+				signal?.throwIfAborted();
+				await deleteStateJsonUnlocked({ env, key });
+				deleted = true;
+				signal?.throwIfAborted();
+				return true;
+			} catch (err) {
+				if ((signal?.aborted && claimPublished) || claimMayBePublished) {
+					const latest = await readStateJson({ env, key });
+					if (
+						(deleted && latest === null) ||
+						(isConsumedResumeState(latest) && latest.claimId === claimId)
+					) {
+						await writeStateJsonUnlocked({ env, key, value: expectedState });
+					}
+				}
+				throw err;
+			}
+		},
+	});
+}
+
+/**
+ * Check physical state presence without parsing it. Cancellation uses this to
+ * retain the authoritative workflow spelling even if the state file is corrupt.
+ */
+export async function stateJsonExists({
+	env,
+	key,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+}) {
+	const filePath = keyToPath(defaultStateDir(env), key);
+	try {
+		await fsp.access(filePath);
+		return true;
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return false;
+		throw err;
+	}
+}
+
+async function deleteStateJsonUnlocked({ env, key }) {
 	const stateDir = defaultStateDir(env);
 	const filePath = keyToPath(stateDir, key);
 	try {
@@ -232,6 +796,82 @@ export async function deleteStateJson({ env, key }) {
 		if (err?.code === "ENOENT") return;
 		throw err;
 	}
+}
+
+export async function deleteStateJson({
+	env,
+	key,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	signal?: AbortSignal;
+}) {
+	return withStateKeyLock({
+		env,
+		key,
+		signal,
+		task: () => deleteStateJsonUnlocked({ env, key }),
+	});
+}
+
+/**
+ * After an effect has started, its consumed marker already prevents replay.
+ * Give terminal cleanup a small, bounded opportunity to remove that marker,
+ * but never let a live state writer turn cancellation into an unbounded wait.
+ */
+export async function deleteStateJsonWithBoundedResumeCleanup({
+	env,
+	key,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+}) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), TERMINAL_RESUME_CLEANUP_TIMEOUT_MS);
+	try {
+		await deleteStateJson({ env, key, signal: controller.signal });
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+/**
+ * Retire a resume capability only while it is still a live, unclaimed state.
+ * A consumed marker belongs to a resume that has already started its atomic
+ * predecessor-to-successor handoff, so cancellation must not delete it and
+ * report success while that successor remains executable.
+ */
+export async function deleteUnconsumedResumeState({
+	env,
+	key,
+	signal = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	signal?: AbortSignal;
+}): Promise<"deleted" | "missing" | "claimed"> {
+	return withStateKeyLock({
+		env,
+		key,
+		signal,
+		task: async () => {
+			let currentState: unknown;
+			try {
+				currentState = await readStateJson({ env, key });
+			} catch (err) {
+				// A corrupt state is not resumable, so explicit cancellation may still
+				// remove it. This keeps the legacy workflow-alias recovery behavior.
+				if (!isJsonSyntaxError(err)) throw err;
+				await deleteStateJsonUnlocked({ env, key });
+				return "deleted";
+			}
+			if (currentState === null) return "missing";
+			if (isConsumedResumeState(currentState)) return "claimed";
+			await deleteStateJsonUnlocked({ env, key });
+			return "deleted";
+		},
+	});
 }
 
 function sanitizeApprovalId(approvalId: string): string {
@@ -383,12 +1023,62 @@ export async function cleanupApprovalIndexByStateKey({
 	}
 }
 
-export async function diffAndStore({ env, key, value }) {
-	const before = await readStateJson({ env, key }).catch((err) => {
-		if (isJsonSyntaxError(err)) return null;
-		throw err;
+export async function diffAndStore({
+	env,
+	key,
+	value,
+	signal = undefined,
+	atomicWriteOptions = undefined,
+	afterStore = undefined,
+}: {
+	env: Record<string, string | undefined>;
+	key: string;
+	value: unknown;
+	signal?: AbortSignal;
+	atomicWriteOptions?: Omit<AtomicWriteOptions, "signal">;
+	afterStore?: (snapshot: { before: unknown; after: unknown; changed: boolean }) => Promise<void>;
+}) {
+	return withStateKeyLock({
+		env,
+		key,
+		signal,
+		task: async () => {
+			const filePath = keyToPath(defaultStateDir(env), key);
+			let beforeExists = true;
+			try {
+				await fsp.access(filePath);
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") throw err;
+				beforeExists = false;
+			}
+			const before = await readStateJson({ env, key }).catch((err) => {
+				if (isJsonSyntaxError(err)) return null;
+				throw err;
+			});
+			const changed = stableStringify(before) !== stableStringify(value);
+			const snapshot = { before, after: value, changed };
+			let stored = false;
+			try {
+				signal?.throwIfAborted();
+				await writeStateJsonUnlocked({ env, key, value, signal, atomicWriteOptions });
+				stored = true;
+				signal?.throwIfAborted();
+				await afterStore?.(snapshot);
+			} catch (err) {
+				// A caller can publish another resource while this state lock is held.
+				// If that coordinated publication fails, restore the state snapshot before
+				// releasing the lock so readers never reuse a cancelled result.
+				const stateWasPublished = stored || atomicWriteWasPublished(err);
+				if (stateWasPublished && (signal?.aborted || afterStore || atomicWriteWasPublished(err))) {
+					if (!beforeExists) {
+						await deleteStateJsonUnlocked({ env, key });
+					} else {
+						await writeStateJsonUnlocked({ env, key, value: before });
+					}
+				}
+				throw err;
+			}
+			return snapshot;
+		},
 	});
-	const changed = stableStringify(before) !== stableStringify(value);
-	await writeStateJson({ env, key, value });
-	return { before, after: value, changed };
 }

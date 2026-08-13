@@ -1,24 +1,31 @@
 import { parsePipeline } from "./parser.js";
 import { createDefaultRegistry } from "./commands/registry.js";
 import { runPipeline } from "./runtime.js";
-import { decodeResumeToken, parseResumeArgs, resolveApprovalId } from "./resume.js";
-import { cleanupApprovalIndexByStateKey, deleteApprovalId } from "./state/store.js";
-import {
-	WorkflowResumeArgumentError,
-	loadWorkflowFile,
-	resolveWorkflowArgs,
-	runWorkflowFile,
-} from "./workflows/file.js";
+import { parseResumeArgs } from "./resume.js";
+import { resumeToolRequest } from "./core/tool_runtime.js";
+import { loadWorkflowFile, resolveWorkflowArgs, runWorkflowFile } from "./workflows/file.js";
 import { renderWorkflowGraph } from "./workflows/graph.js";
 import type { WorkflowGraphFormat } from "./workflows/graph.js";
-import { deleteStateJson } from "./state/store.js";
-import {
-	finalizePipelineToolRun,
-	loadPipelineResumeState,
-	validatePipelineInputResponse,
-} from "./pipeline_resume_state.js";
+import { finalizePipelineToolRun } from "./pipeline_resume_state.js";
+import { forceTerminateAbortableProcesses } from "./abortable_process.js";
 
 export async function runCli(argv) {
+	const cancellation = createCliCancellation();
+	try {
+		await runCliWithSignal(argv, cancellation.signal, cancellation.signal);
+	} finally {
+		if (cancellation.exitCode !== undefined) {
+			process.exitCode = cancellation.exitCode;
+		}
+		cancellation.dispose();
+	}
+}
+
+async function runCliWithSignal(
+	argv,
+	signal: AbortSignal,
+	forceTerminationSignal: AbortSignal = signal,
+) {
 	const registry = createDefaultRegistry();
 
 	if (argv.length === 0 || argv.includes("-h") || argv.includes("--help")) {
@@ -48,7 +55,7 @@ export async function runCli(argv) {
 	}
 
 	if (argv[0] === "doctor") {
-		await handleDoctor({ argv: argv.slice(1), registry });
+		await handleDoctor({ argv: argv.slice(1), registry, signal, forceTerminationSignal });
 		return;
 	}
 
@@ -58,17 +65,57 @@ export async function runCli(argv) {
 	}
 
 	if (argv[0] === "run") {
-		await handleRun({ argv: argv.slice(1), registry });
+		await handleRun({ argv: argv.slice(1), registry, signal, forceTerminationSignal });
 		return;
 	}
 
 	if (argv[0] === "resume") {
-		await handleResume({ argv: argv.slice(1), registry });
+		await handleResume({ argv: argv.slice(1), registry, signal, forceTerminationSignal });
 		return;
 	}
 
 	// Default: treat argv as a pipeline string.
-	await handleRun({ argv, registry });
+	await handleRun({ argv, registry, signal, forceTerminationSignal });
+}
+
+function createCliCancellation() {
+	const controller = new AbortController();
+	let received: NodeJS.Signals | undefined;
+	const terminatingSignals: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
+	const abort = (receivedSignal: NodeJS.Signals) => {
+		if (received) {
+			forceTerminateAbortableProcesses(controller.signal);
+			return;
+		}
+		received = receivedSignal;
+		controller.abort(new Error(`Received ${receivedSignal}`));
+	};
+	const listeners = new Map<NodeJS.Signals, () => void>();
+	for (const terminatingSignal of terminatingSignals) {
+		const listener = () => abort(terminatingSignal);
+		listeners.set(terminatingSignal, listener);
+		process.on(terminatingSignal, listener);
+	}
+
+	return {
+		signal: controller.signal,
+		get exitCode() {
+			if (!received) return undefined;
+			return (
+				{
+					SIGINT: 130,
+					SIGHUP: 129,
+					SIGQUIT: 131,
+					SIGTERM: 143,
+				} as const
+			)[received];
+		},
+		dispose() {
+			for (const [terminatingSignal, listener] of listeners) {
+				process.removeListener(terminatingSignal, listener);
+			}
+		},
+	};
 }
 
 async function handleGraph({ argv }) {
@@ -132,7 +179,17 @@ function isWorkflowGraphFormat(value: string): value is WorkflowGraphFormat {
 	return value === "mermaid" || value === "dot" || value === "ascii";
 }
 
-async function handleRun({ argv, registry }) {
+async function handleRun({
+	argv,
+	registry,
+	signal,
+	forceTerminationSignal,
+}: {
+	argv;
+	registry;
+	signal: AbortSignal;
+	forceTerminationSignal: AbortSignal;
+}) {
 	const parsed = parseRunArgs(argv);
 	const { mode, argsJson } = parsed;
 	const normalizedMode = normalizeMode(mode);
@@ -173,6 +230,8 @@ async function handleRun({ argv, registry }) {
 					mode: normalizedMode,
 					registry,
 					dryRun,
+					signal,
+					forceTerminationSignal,
 				},
 			});
 
@@ -276,6 +335,9 @@ async function handleRun({ argv, registry }) {
 			env: process.env,
 			mode: normalizedMode,
 			dryRun,
+			signal,
+			forceTerminationSignal,
+			haltAfterStageOnAbort: true,
 		});
 
 		if (normalizedMode === "tool") {
@@ -283,6 +345,7 @@ async function handleRun({ argv, registry }) {
 				env: process.env,
 				pipeline,
 				output,
+				signal,
 			});
 			writeToolEnvelope({
 				ok: true,
@@ -504,28 +567,20 @@ async function resolveWorkflowFile(candidate) {
 	return resolved;
 }
 
-async function handleResume({ argv, registry }) {
-	const mode = "tool";
-	let approved: boolean | undefined;
-	let response: unknown = undefined;
-	let cancel = false;
-	let payload: any;
-	let resolvedApprovalId: string | null = null;
+async function handleResume({
+	argv,
+	registry,
+	signal,
+	forceTerminationSignal,
+}: {
+	argv;
+	registry;
+	signal: AbortSignal;
+	forceTerminationSignal: AbortSignal;
+}) {
+	let parsed;
 	try {
-		const parsed = parseResumeArgs(argv);
-		approved = parsed.approved;
-		response = parsed.response;
-		cancel = parsed.cancel === true;
-		resolvedApprovalId = parsed.approvalId;
-
-		// Resolve short approval ID to token if provided
-		let token: string;
-		if (parsed.approvalId) {
-			token = await resolveApprovalId(parsed.approvalId, process.env);
-		} else {
-			token = parsed.token!;
-		}
-		payload = decodeResumeToken(token);
+		parsed = parseResumeArgs(argv);
 	} catch (err) {
 		writeToolEnvelope({
 			ok: false,
@@ -535,230 +590,35 @@ async function handleResume({ argv, registry }) {
 		return;
 	}
 
-	// Helper: clean up approval ID index after successful use
-	const cleanupIndex = async () => {
-		if (resolvedApprovalId) {
-			await deleteApprovalId({ env: process.env, approvalId: resolvedApprovalId });
-		} else if (payload.stateKey) {
-			await cleanupApprovalIndexByStateKey({ env: process.env, stateKey: payload.stateKey });
-		}
-	};
-
-	if (cancel === true) {
-		await cleanupIndex();
-		if (payload.kind === "workflow-file" && payload.stateKey) {
-			await deleteStateJson({ env: process.env, key: payload.stateKey });
-		}
-		if (payload.kind === "pipeline-resume" && payload.stateKey) {
-			await deleteStateJson({ env: process.env, key: payload.stateKey });
-		}
-		writeToolEnvelope({
-			ok: true,
-			status: "cancelled",
-			output: [],
-			requiresApproval: null,
-			requiresInput: null,
-		});
-		return;
-	}
-
-	if (payload.kind === "workflow-file") {
-		try {
-			const output = await runWorkflowFile({
-				filePath: payload.filePath,
-				ctx: {
-					stdin: process.stdin,
-					stdout: process.stdout,
-					stderr: process.stderr,
-					env: process.env,
-					mode: "tool",
-					registry,
-				},
-				resume: payload,
-				approved,
-				response,
-				cancel,
-			});
-
-			if (output.status === "needs_approval") {
-				writeToolEnvelope({
-					ok: true,
-					status: "needs_approval",
-					output: [],
-					requiresApproval: output.requiresApproval ?? null,
-					requiresInput: null,
-				});
-				return;
-			}
-
-			if (output.status === "needs_input") {
-				writeToolEnvelope({
-					ok: true,
-					status: "needs_input",
-					output: [],
-					requiresApproval: null,
-					requiresInput: output.requiresInput ?? null,
-				});
-				return;
-			}
-
-			await cleanupIndex();
-			if (output.status === "cancelled") {
-				writeToolEnvelope({
-					ok: true,
-					status: "cancelled",
-					output: [],
-					requiresApproval: null,
-					requiresInput: null,
-				});
-				return;
-			}
-			writeToolEnvelope({
-				ok: true,
-				status: "ok",
-				output: output.output,
-				requiresApproval: null,
-				requiresInput: null,
-			});
-			return;
-		} catch (err) {
-			if (err instanceof WorkflowResumeArgumentError) {
-				writeToolEnvelope({ ok: false, error: { type: "parse_error", message: err.message } });
-				process.exitCode = 2;
-				return;
-			}
-			// Don't clean up index on error — allow retry by --id
-			writeToolEnvelope({
-				ok: false,
-				error: { type: "runtime_error", message: err?.message ?? String(err) },
-			});
-			process.exitCode = 1;
-			return;
-		}
-	}
-	const previousStateKey = payload.stateKey;
-	let resumeState;
+	let envelope;
 	try {
-		resumeState = await loadPipelineResumeState(process.env, previousStateKey);
-	} catch (err) {
-		writeToolEnvelope({
+		envelope = await resumeToolRequest({
+			token: parsed.token ?? undefined,
+			approvalId: parsed.approvalId ?? undefined,
+			approved: parsed.approved,
+			response: parsed.response,
+			cancel: parsed.cancel,
+			ctx: {
+				cwd: process.cwd(),
+				env: process.env,
+				mode: "tool",
+				stdin: process.stdin,
+				stdout: process.stdout,
+				stderr: process.stderr,
+				registry,
+				signal,
+				forceTerminationSignal,
+			},
+		});
+	} catch (err: any) {
+		envelope = {
 			ok: false,
 			error: { type: "runtime_error", message: err?.message ?? String(err) },
-		});
-		process.exitCode = 1;
-		return;
+		};
 	}
-	if (resumeState.haltType === "input_request") {
-		if (approved !== undefined) {
-			writeToolEnvelope({
-				ok: false,
-				error: {
-					type: "parse_error",
-					message: "pipeline input resumes require --response-json <json>",
-				},
-			});
-			process.exitCode = 2;
-			return;
-		}
-		if (response === undefined) {
-			writeToolEnvelope({
-				ok: false,
-				error: {
-					type: "parse_error",
-					message: "pipeline input resumes require --response-json <json>",
-				},
-			});
-			process.exitCode = 2;
-			return;
-		}
-		try {
-			validatePipelineInputResponse(resumeState.inputSchema, response);
-		} catch (err) {
-			writeToolEnvelope({
-				ok: false,
-				error: { type: "parse_error", message: err?.message ?? String(err) },
-			});
-			process.exitCode = 2;
-			return;
-		}
-	} else {
-		if (response !== undefined) {
-			writeToolEnvelope({
-				ok: false,
-				error: {
-					type: "parse_error",
-					message: "approval resumes require --approve yes|no, not --response-json",
-				},
-			});
-			process.exitCode = 2;
-			return;
-		}
-		if (approved !== true) {
-			await cleanupIndex();
-			await deleteStateJson({ env: process.env, key: previousStateKey });
-			writeToolEnvelope({
-				ok: true,
-				status: "cancelled",
-				output: [],
-				requiresApproval: null,
-				requiresInput: null,
-			});
-			return;
-		}
-	}
-
-	const isSameStageInput =
-		resumeState.haltType === "input_request" && resumeState.resumeMode === "same_stage";
-	const remaining = resumeState.pipeline.slice(resumeState.resumeAtIndex);
-	const input = isSameStageInput
-		? resumeState.items
-		: resumeState.haltType === "input_request"
-			? [response]
-			: resumeState.items;
-	const requestInputResume = isSameStageInput
-		? {
-				state: resumeState.commandInput!,
-				response,
-				onConsumed: async () => {
-					await cleanupIndex();
-					await deleteStateJson({ env: process.env, key: previousStateKey });
-				},
-			}
-		: undefined;
-
-	try {
-		const output = await runPipeline({
-			pipeline: remaining,
-			registry,
-			stdin: process.stdin,
-			stdout: process.stdout,
-			stderr: process.stderr,
-			env: process.env,
-			mode,
-			input,
-			requestInputResume,
-		});
-		await cleanupIndex();
-		const finalized = await finalizePipelineToolRun({
-			env: process.env,
-			pipeline: remaining,
-			output,
-			previousStateKey,
-		});
-		writeToolEnvelope({
-			ok: true,
-			status: finalized.status,
-			output: finalized.output,
-			requiresApproval: finalized.requiresApproval,
-			requiresInput: finalized.requiresInput,
-		});
-	} catch (err) {
-		// Don't clean up index on error — allow retry by --id
-		writeToolEnvelope({
-			ok: false,
-			error: { type: "runtime_error", message: err?.message ?? String(err) },
-		});
-		process.exitCode = 1;
+	writeToolEnvelope(envelope);
+	if (!envelope.ok) {
+		process.exitCode = envelope.error?.type === "parse_error" ? 2 : 1;
 	}
 }
 
@@ -773,7 +633,17 @@ async function readVersion() {
 	return pkg.version ?? "0.0.0";
 }
 
-async function handleDoctor({ argv, registry }) {
+async function handleDoctor({
+	argv,
+	registry,
+	signal,
+	forceTerminationSignal,
+}: {
+	argv;
+	registry;
+	signal: AbortSignal;
+	forceTerminationSignal: AbortSignal;
+}) {
 	const mode = "tool";
 	const pipeline = "exec --json --shell 'echo [1]'";
 	const output: any = await (async () => {
@@ -788,6 +658,9 @@ async function handleDoctor({ argv, registry }) {
 				stderr: process.stderr,
 				env: process.env,
 				mode,
+				signal,
+				forceTerminationSignal,
+				haltAfterStageOnAbort: true,
 			});
 		} catch (err: any) {
 			return { error: err };

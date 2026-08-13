@@ -72,6 +72,7 @@ export const gogGmailSendCommand = {
 		);
 	},
 	async run({ input, args, ctx }) {
+		ctx.signal?.throwIfAborted();
 		const dryRun = Boolean(args.dryRun ?? args["dry-run"] ?? false);
 		const gogBinRaw = String(ctx.env.GOG_BIN ?? "gog");
 		const isScript = /\.(mjs|cjs|js|ts)$/i.test(gogBinRaw);
@@ -80,6 +81,10 @@ export const gogGmailSendCommand = {
 		const results: any[] = [];
 
 		for await (const item of input) {
+			if (ctx.signal?.aborted) {
+				if (results.length > 0) break;
+				ctx.signal.throwIfAborted();
+			}
 			const draft = parseDraft(item);
 
 			if (dryRun) {
@@ -111,6 +116,7 @@ export const gogGmailSendCommand = {
 			}
 
 			results.push(parsed);
+			if (ctx.signal?.aborted) break;
 		}
 
 		return {

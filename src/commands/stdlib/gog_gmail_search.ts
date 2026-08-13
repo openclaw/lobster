@@ -1,31 +1,4 @@
-import { spawn } from "node:child_process";
-
-function run(cmd: string, argv: string[], env: Record<string, string | undefined>, cwd?: string) {
-	return new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
-		const child = spawn(cmd, argv, {
-			env: { ...process.env, ...env },
-			cwd,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-
-		let stdout = "";
-		let stderr = "";
-		child.stdout?.on("data", (d) => (stdout += String(d)));
-		child.stderr?.on("data", (d) => (stderr += String(d)));
-
-		child.on("error", (err: any) => {
-			if (err?.code === "ENOENT") {
-				reject(new Error("gog not found on PATH (install: https://github.com/steipete/gogcli)"));
-				return;
-			}
-			reject(err);
-		});
-
-		child.on("close", (code) => {
-			resolve({ stdout, stderr, code });
-		});
-	});
-}
+import { runAbortableProcess } from "../../abortable_process.js";
 
 export const gogGmailSearchCommand = {
 	name: "gog.gmail.search",
@@ -55,10 +28,12 @@ export const gogGmailSearchCommand = {
 		);
 	},
 	async run({ input, args, ctx }) {
+		ctx.signal?.throwIfAborted();
 		// Drain input
 		for await (const _item of input) {
 			// no-op
 		}
+		ctx.signal?.throwIfAborted();
 
 		const query = String(args.query ?? "newer_than:1d");
 		const max = Number(args.max ?? args.limit ?? 20);
@@ -75,7 +50,15 @@ export const gogGmailSearchCommand = {
 		const gogBin = isScript ? process.execPath : gogBinRaw;
 		const argv = isScript ? [gogBinRaw, ...argvBase] : argvBase;
 
-		const res = await run(gogBin, argv, ctx.env, process.cwd());
+		const res = await runAbortableProcess({
+			command: gogBin,
+			argv,
+			env: { ...process.env, ...ctx.env },
+			cwd: process.cwd(),
+			signal: ctx.signal,
+			forceTerminationSignal: ctx.forceTerminationSignal,
+			notFoundMessage: "gog not found on PATH (install: https://github.com/steipete/gogcli)",
+		});
 		if (res.code !== 0) {
 			throw new Error(`gog.gmail.search failed (${res.code ?? "?"}): ${res.stderr.slice(0, 400)}`);
 		}
