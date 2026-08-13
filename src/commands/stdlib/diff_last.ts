@@ -25,7 +25,12 @@ export const diffLastCommand = {
 		for await (const item of input) afterItems.push(item);
 
 		const after = afterItems.length === 1 ? afterItems[0] : afterItems;
-		const { before, changed } = await diffAndStore({ env: ctx.env, key, value: after });
+		const { before, changed } = await diffAndStore({
+			env: ctx.env,
+			key,
+			value: after,
+			signal: ctx.signal,
+		});
 
 		return {
 			output: (async function* () {

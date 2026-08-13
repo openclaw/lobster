@@ -1,35 +1,17 @@
-import { spawn } from "node:child_process";
+import { runAbortableProcess } from "../abortable_process.js";
 
-function runProcess(command, argv, { env, cwd }) {
-	return new Promise((resolve, reject) => {
-		const child = spawn(command, argv, { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
-
-		let stdout = "";
-		let stderr = "";
-
-		child.stdout.setEncoding("utf8");
-		child.stderr.setEncoding("utf8");
-
-		child.stdout.on("data", (d) => {
-			stdout += d;
-		});
-		child.stderr.on("data", (d) => {
-			stderr += d;
-		});
-
-		child.on("error", (err: any) => {
-			if (err?.code === "ENOENT") {
-				reject(new Error("gh not found on PATH (install GitHub CLI)"));
-				return;
-			}
-			reject(err);
-		});
-
-		child.on("close", (code) => {
-			if (code === 0) return resolve({ stdout, stderr });
-			reject(new Error(`gh failed (${code}): ${stderr.trim() || stdout.trim()}`));
-		});
+async function runProcess(command, argv, { env, cwd, signal, forceTerminationSignal }) {
+	const { stdout, stderr, code } = await runAbortableProcess({
+		command,
+		argv,
+		env,
+		cwd,
+		signal,
+		forceTerminationSignal,
+		notFoundMessage: "gh not found on PATH (install GitHub CLI)",
 	});
+	if (code === 0) return { stdout, stderr };
+	throw new Error(`gh failed (${code}): ${stderr.trim() || stdout.trim()}`);
 }
 
 import { diffAndStore } from "../state/store.js";
@@ -83,6 +65,7 @@ function formatPrChangeMessage({ repo, pr, changedFields, prInfo }) {
 }
 
 export async function runGithubPrMonitorWorkflow({ args, ctx }) {
+	ctx.signal?.throwIfAborted();
 	const repo = args.repo;
 	const pr = args.pr;
 	if (!repo || !pr) throw new Error("github.pr.monitor requires args.repo and args.pr");
@@ -101,7 +84,13 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 		"number,title,url,state,isDraft,mergeable,reviewDecision,author,baseRefName,headRefName,updatedAt",
 	];
 
-	const { stdout } = (await runProcess("gh", argv, { env: ctx.env, cwd: process.cwd() })) as any;
+	const { stdout } = (await runProcess("gh", argv, {
+		env: ctx.env,
+		cwd: process.cwd(),
+		signal: ctx.signal,
+		forceTerminationSignal: ctx.forceTerminationSignal,
+	})) as any;
+	ctx.signal?.throwIfAborted();
 
 	let current;
 	try {
@@ -110,7 +99,12 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 		throw new Error("gh returned non-JSON output");
 	}
 
-	const { changed, before } = await diffAndStore({ env: ctx.env, key, value: current });
+	const { changed, before } = await diffAndStore({
+		env: ctx.env,
+		key,
+		value: current,
+		signal: ctx.signal,
+	});
 
 	if (changesOnly && !changed) {
 		return {

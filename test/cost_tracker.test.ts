@@ -1300,17 +1300,30 @@ test("workflow cost tracking carries an unbilled call across a pipeline input re
 	}
 });
 
-// The provider is paid the moment it answers, before Lobster stores anything. If a store then
-// fails — an unwritable cache directory, here a plain file where a directory belongs — the
-// step fails after run state already holds a replayable copy, and the retry succeeds from that
-// replay. The charge has to have been opened before those writes, or the replay is exempt and
-// a completed provider call is billed nowhere.
-test("workflow cost tracking bills a replay when the cache write failed after the call", async () => {
+// The provider is paid the moment it answers, before Lobster stores anything. A coordinated
+// state/cache publication failure rolls both stores back, so the retry makes another live call.
+// Both calls must be charged even though only the retry produces a step result.
+test("workflow cost tracking bills both calls when the first cache write fails", async () => {
 	const provider = await startFakeProvider();
 	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-unwritable-"));
-	const cachePath = path.join(tmpDir, "cache-is-a-file");
-	await fsp.writeFile(cachePath, "not a directory", "utf8");
+	const cacheDir = path.join(tmpDir, "cache");
+	const cacheNamespaceDir = path.join(cacheDir, "llm.invoke");
+	const originalMkdir = fsp.mkdir;
+	let cacheNamespaceMkdirs = 0;
 	try {
+		Object.defineProperty(fsp, "mkdir", {
+			configurable: true,
+			writable: true,
+			async value(
+				target: Parameters<typeof fsp.mkdir>[0],
+				options?: Parameters<typeof fsp.mkdir>[1],
+			) {
+				if (String(target) === cacheNamespaceDir && ++cacheNamespaceMkdirs === 2) {
+					throw Object.assign(new Error("cache directory unavailable"), { code: "EIO" });
+				}
+				return originalMkdir(target, options);
+			},
+		});
 		const { result } = await runWorkflow(
 			{
 				steps: [
@@ -1323,16 +1336,21 @@ test("workflow cost tracking bills a replay when the cache write failed after th
 			},
 			{
 				OPENCLAW_URL: provider.url,
-				LOBSTER_CACHE_DIR: cachePath,
+				LOBSTER_CACHE_DIR: cacheDir,
 				LOBSTER_RUN_STATE_KEY: "cost-tracker-unwritable-cache",
 			},
 		);
 
 		assert.equal(result.status, "ok");
-		assert.equal(provider.requests(), 1);
-		assert.equal(result._meta?.cost?.totalInputTokens, 1000);
-		assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+		assert.equal(provider.requests(), 2);
+		assert.equal(result._meta?.cost?.totalInputTokens, 2000);
+		assert.equal(result._meta?.cost?.totalOutputTokens, 1000);
 	} finally {
+		Object.defineProperty(fsp, "mkdir", {
+			configurable: true,
+			writable: true,
+			value: originalMkdir,
+		});
 		await provider.close();
 		await fsp.rm(tmpDir, { recursive: true, force: true });
 	}

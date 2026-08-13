@@ -6,12 +6,14 @@ import { billableTokens } from "../../core/cost_tracker.js";
 import type { ErrorObject } from "ajv";
 
 import {
+	diffAndStore,
 	ensureDirectory,
+	atomicWriteWasPublished,
 	isJsonSyntaxError,
-	readStateJson,
+	readStateJsonWithLock,
 	stableStringify,
+	withFileLock,
 	writeFileAtomic,
-	writeStateJson,
 } from "../../state/store.js";
 import { createCompileCached } from "../../validation.js";
 import type { LobsterCommand } from "../types.js";
@@ -582,6 +584,7 @@ type Adapter = {
 		env: any;
 		args: any;
 		payload: Record<string, any>;
+		signal?: AbortSignal;
 	}) => Promise<LlmResponseEnvelope>;
 };
 
@@ -591,6 +594,7 @@ type DirectAdapter =
 			args: any;
 			payload: Record<string, any>;
 			ctx: any;
+			signal?: AbortSignal;
 	  }) => Promise<LlmResponseEnvelope>)
 	| {
 			source?: string;
@@ -599,6 +603,7 @@ type DirectAdapter =
 				args: any;
 				payload: Record<string, any>;
 				ctx: any;
+				signal?: AbortSignal;
 			}) => Promise<LlmResponseEnvelope>;
 	  };
 
@@ -679,7 +684,8 @@ export function createLlmInvokeCommand(config: CommandConfig): LobsterCommand {
 					"schema-version": { type: "string", description: "Logical schema version for caching" },
 					"max-validation-retries": {
 						type: "number",
-						description: "Retries when schema validation fails",
+						description:
+							"Extra model calls allowed after the first when schema validation fails (default 1)",
 					},
 					temperature: { type: "number", description: "Sampling temperature" },
 					"max-output-tokens": { type: "number", description: "Max completion tokens" },
@@ -705,7 +711,8 @@ export function createLlmInvokeCommand(config: CommandConfig): LobsterCommand {
 				"Features:",
 				"  - Typed payload validation before invoking the adapter.",
 				"  - Run-state + file cache so resumes do not re-call the LLM.",
-				"  - Optional JSON-schema enforcement with bounded retries.",
+				"  - Optional JSON-schema enforcement, retried at most --max-validation-retries times",
+				"    after the first call.",
 				"",
 				"Config:",
 				...config.helpConfig.map((line) => `  - ${line}`),
@@ -789,7 +796,7 @@ async function runLlmInvoke({
 	});
 
 	if (stateKey && !forceRefresh) {
-		const stored = await readReusableLlmState(env, stateKey);
+		const stored = await readReusableLlmState(env, stateKey, ctx.signal);
 		const reused = pickReusableState(stored, cacheKey, config.stateType);
 		if (reused) {
 			const replay: LlmProvenance = { cacheKey, replayed: true };
@@ -804,7 +811,7 @@ async function runLlmInvoke({
 	}
 
 	if (!disableCache && !forceRefresh) {
-		const cache = await readCacheEntry(env, cacheKey, config.cacheNamespace);
+		const cache = await readCacheEntry(env, cacheKey, config.cacheNamespace, ctx.signal);
 		if (cache) {
 			const replay: LlmProvenance = { cacheKey, replayed: true };
 			return {
@@ -850,7 +857,9 @@ async function runLlmInvoke({
 
 		let responseEnvelope: LlmResponseEnvelope;
 		try {
-			responseEnvelope = await adapter.invoke({ env, args, payload });
+			ctx.signal?.throwIfAborted();
+			responseEnvelope = await adapter.invoke({ env, args, payload, signal: ctx.signal });
+			ctx.signal?.throwIfAborted();
 		} catch (err: any) {
 			throw new Error(`${config.name} request failed: ${err?.message ?? String(err)}`);
 		}
@@ -884,32 +893,40 @@ async function runLlmInvoke({
 		recordLiveCharge(ctx, cacheKey, normalized[0]);
 
 		if (!validator) {
+			ctx.signal?.throwIfAborted();
 			await persistOutputs({
 				env,
 				stateKey,
 				cacheKey,
 				items: normalized,
 				stateType: config.stateType,
+				signal: ctx.signal,
+				afterStore: disableCache
+					? undefined
+					: () => writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace, ctx.signal),
 			});
-			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
 			return { output: streamOf(normalized) };
 		}
 
 		const structured = normalized[0]?.output?.data ?? null;
 		if (validator(structured)) {
+			ctx.signal?.throwIfAborted();
 			await persistOutputs({
 				env,
 				stateKey,
 				cacheKey,
 				items: normalized,
 				stateType: config.stateType,
+				signal: ctx.signal,
+				afterStore: disableCache
+					? undefined
+					: () => writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace, ctx.signal),
 			});
-			if (!disableCache) await writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace);
 			return { output: streamOf(normalized) };
 		}
 
 		lastValidationErrors = collectAjvErrors(validator.errors);
-		if (attempt > maxValidationRetries + 1) {
+		if (attempt > maxValidationRetries) {
 			throw new Error(
 				`${config.name} output failed schema validation: ${lastValidationErrors.join("; ")}`,
 			);
@@ -968,8 +985,8 @@ function resolveAdapter({
 		return {
 			provider,
 			source: typeof direct === "function" ? provider : (direct.source ?? provider),
-			async invoke({ payload }) {
-				return invoke({ env, args, payload, ctx });
+			async invoke({ payload, signal }) {
+				return invoke({ env, args, payload, ctx, signal });
 			},
 		};
 	}
@@ -984,8 +1001,8 @@ function resolveAdapter({
 		return {
 			provider,
 			source: config.sourceForProvider?.(provider) ?? "openclaw",
-			async invoke({ payload }) {
-				return invokeOpenClawAdapter({ endpoint, token, payload });
+			async invoke({ payload, signal }) {
+				return invokeOpenClawAdapter({ endpoint, token, payload, signal });
 			},
 		};
 	}
@@ -999,8 +1016,13 @@ function resolveAdapter({
 		return {
 			provider,
 			source: config.sourceForProvider?.(provider) ?? "pi",
-			async invoke({ payload }) {
-				return invokeHttpAdapter({ endpoint: buildAdapterEndpoint(adapterUrl), token, payload });
+			async invoke({ payload, signal }) {
+				return invokeHttpAdapter({
+					endpoint: buildAdapterEndpoint(adapterUrl),
+					token,
+					payload,
+					signal,
+				});
 			},
 		};
 	}
@@ -1013,8 +1035,13 @@ function resolveAdapter({
 	return {
 		provider,
 		source: config.sourceForProvider?.(provider) ?? "http",
-		async invoke({ payload }) {
-			return invokeHttpAdapter({ endpoint: buildAdapterEndpoint(adapterUrl), token, payload });
+		async invoke({ payload, signal }) {
+			return invokeHttpAdapter({
+				endpoint: buildAdapterEndpoint(adapterUrl),
+				token,
+				payload,
+				signal,
+			});
 		},
 	};
 }
@@ -1042,13 +1069,16 @@ async function invokeOpenClawAdapter({
 	endpoint,
 	token,
 	payload,
+	signal,
 }: {
 	endpoint: URL;
 	token: string;
 	payload: any;
+	signal?: AbortSignal;
 }) {
 	const res = await fetch(endpoint, {
 		method: "POST",
+		signal,
 		headers: {
 			"content-type": "application/json",
 			...(token ? { authorization: `Bearer ${token}` } : null),
@@ -1091,13 +1121,16 @@ async function invokeHttpAdapter({
 	endpoint,
 	token,
 	payload,
+	signal,
 }: {
 	endpoint: URL;
 	token: string;
 	payload: any;
+	signal?: AbortSignal;
 }) {
 	const res = await fetch(endpoint, {
 		method: "POST",
+		signal,
 		headers: {
 			"content-type": "application/json",
 			...(token ? { authorization: `Bearer ${token}` } : null),
@@ -1297,14 +1330,21 @@ async function persistOutputs({
 	cacheKey,
 	items,
 	stateType,
+	signal,
+	afterStore,
 }: {
 	env: any;
 	stateKey: string | null;
 	cacheKey: string;
 	items: NormalizedInvocationItem[];
 	stateType: string;
+	signal?: AbortSignal;
+	afterStore?: () => Promise<void>;
 }) {
-	if (!stateKey) return;
+	if (!stateKey) {
+		await afterStore?.();
+		return;
+	}
 	const record = {
 		type: stateType,
 		version: STATE_VERSION,
@@ -1312,12 +1352,18 @@ async function persistOutputs({
 		items,
 		storedAt: new Date().toISOString(),
 	};
-	await writeStateJson({ env, key: stateKey, value: record });
+	await diffAndStore({
+		env,
+		key: stateKey,
+		value: record,
+		signal,
+		afterStore: afterStore ? () => afterStore() : undefined,
+	});
 }
 
-async function readReusableLlmState(env: any, stateKey: string) {
+async function readReusableLlmState(env: any, stateKey: string, signal?: AbortSignal) {
 	try {
-		return await readStateJson({ env, key: stateKey });
+		return await readStateJsonWithLock({ env, key: stateKey, signal });
 	} catch (err: any) {
 		if (isJsonSyntaxError(err)) return null;
 		throw err;
@@ -1341,16 +1387,29 @@ async function readCacheEntry(
 	env: any,
 	key: string,
 	cacheNamespace: string,
+	signal?: AbortSignal,
 ): Promise<CacheEntry | null> {
 	const filePath = path.join(getCacheDir(env), cacheNamespace, `${key}.json`);
+	const read = async () => {
+		try {
+			const text = await fsp.readFile(filePath, "utf8");
+			const parsed = JSON.parse(text) as Partial<CacheEntry>;
+			if (parsed?.cacheKey !== key || !Array.isArray(parsed.items)) return null;
+			return parsed as CacheEntry;
+		} catch (err: any) {
+			if (err?.code === "ENOENT") return null;
+			if (isJsonSyntaxError(err)) return null;
+			throw err;
+		}
+	};
 	try {
-		const text = await fsp.readFile(filePath, "utf8");
-		const parsed = JSON.parse(text) as Partial<CacheEntry>;
-		if (parsed?.cacheKey !== key || !Array.isArray(parsed.items)) return null;
-		return parsed as CacheEntry;
+		return await withFileLock({ filePath, signal, task: read });
 	} catch (err: any) {
 		if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
-		if (isJsonSyntaxError(err)) return null;
+		// A cache mounted read-only cannot have an active local writer because a
+		// writer first creates the same coordination lock. Preserve its reusable
+		// entries instead of requiring a lock-directory write for a read.
+		if (["EACCES", "EPERM", "EROFS"].includes(err?.code)) return read();
 		throw err;
 	}
 }
@@ -1360,14 +1419,50 @@ async function writeCacheEntry(
 	key: string,
 	items: NormalizedInvocationItem[],
 	cacheNamespace: string,
+	signal?: AbortSignal,
 ) {
 	const dir = path.join(getCacheDir(env), cacheNamespace);
+	signal?.throwIfAborted();
 	await ensureDirectory(dir);
 	const filePath = path.join(dir, `${key}.json`);
-	await writeFileAtomic(
+	const content =
+		JSON.stringify({ items, cacheKey: key, storedAt: new Date().toISOString() }, null, 2) + "\n";
+	await withFileLock({
 		filePath,
-		JSON.stringify({ items, cacheKey: key, storedAt: new Date().toISOString() }, null, 2) + "\n",
-	);
+		signal,
+		task: async () => {
+			let previousContent: Buffer | null = null;
+			try {
+				previousContent = await fsp.readFile(filePath);
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") throw err;
+			}
+			const restorePreviousContent = async () => {
+				// No cache reader or competing cache writer can observe this entry
+				// until this lock is released. Restore an entry replaced by a refresh;
+				// only remove the just-published file when none existed beforehand.
+				if (previousContent === null) await fsp.rm(filePath, { force: true });
+				else await writeFileAtomic(filePath, previousContent);
+			};
+			let cacheWasPublished = false;
+			try {
+				signal?.throwIfAborted();
+				const result = await writeFileAtomic(filePath, content, { signal });
+				cacheWasPublished = true;
+				if (result?.signalAbortedAfterCommit || signal?.aborted) {
+					await restorePreviousContent();
+					cacheWasPublished = false;
+					signal?.throwIfAborted();
+					throw new Error("LLM cache publication cancelled");
+				}
+			} catch (err) {
+				if (cacheWasPublished || atomicWriteWasPublished(err)) {
+					await restorePreviousContent();
+				}
+				throw err;
+			}
+		},
+	});
 }
 
 function getCacheDir(env: any) {

@@ -22,9 +22,12 @@ export async function runPipeline({
 	llmAdapters = undefined,
 	llmSpendLedger = undefined,
 	signal = undefined,
+	forceTerminationSignal = undefined,
+	haltAfterStageOnAbort = false,
 	dryRun = false,
 	requestInputResume = undefined,
 	requestInputEnabled = true,
+	onExecutionStart = undefined,
 }: {
 	pipeline: any[];
 	registry: any;
@@ -38,9 +41,12 @@ export async function runPipeline({
 	llmAdapters?: Record<string, any> | undefined;
 	llmSpendLedger?: LlmSpendLedger | undefined;
 	signal?: AbortSignal | undefined;
+	forceTerminationSignal?: AbortSignal | undefined;
+	haltAfterStageOnAbort?: boolean;
 	dryRun?: boolean;
 	requestInputResume?: CommandInputResume | undefined;
 	requestInputEnabled?: boolean;
+	onExecutionStart?: (() => void | Promise<void>) | undefined;
 }) {
 	if (dryRun) {
 		return dryRunPipeline({ pipeline, registry, stderr });
@@ -52,6 +58,16 @@ export async function runPipeline({
 	let halted = false;
 	let haltedAt = null;
 	let pipelineOutputStarted = false;
+	let executionStarted = false;
+	let executionStart: Promise<void> | undefined;
+	const markExecutionStarted = async () => {
+		if (executionStart) return executionStart;
+		executionStart = (async () => {
+			await onExecutionStart?.();
+			executionStarted = true;
+		})();
+		return executionStart;
+	};
 
 	const baseCtx = {
 		stdin,
@@ -66,13 +82,18 @@ export async function runPipeline({
 		// can still be charged to the run that made it. Absent outside a cost-tracked run.
 		llmSpendLedger,
 		signal,
+		forceTerminationSignal,
 	};
 
 	for (let idx = 0; idx < pipeline.length; idx++) {
+		if (haltAfterStageOnAbort) signal?.throwIfAborted();
 		const stage = pipeline[idx];
 		const command = registry.get(stage.name);
 		if (!command) {
 			throw new Error(`Unknown command: ${stage.name}`);
+		}
+		if (command.meta?.resumeSafeBeforeInput !== true) {
+			await markExecutionStarted();
 		}
 
 		const inputTracker = createInputTracker(stream);
@@ -109,6 +130,8 @@ export async function runPipeline({
 						getInactiveReason: () => inactiveReason,
 						isOutputStarted: () => pipelineOutputStarted || commandOutputStarted,
 						resume: stageResume,
+						onResumedInput:
+							command.meta?.resumeSafeAfterInput === true ? undefined : markExecutionStarted,
 					})
 				: createUnsupportedRequestInput(),
 		};
@@ -127,15 +150,17 @@ export async function runPipeline({
 			rendered = true;
 		}
 
+		const terminalOutput = Boolean(result?.halt);
+		let stageHalted = Boolean(terminalOutput || (haltAfterStageOnAbort && signal?.aborted));
 		const output = result?.output;
 		if (Array.isArray(output)) {
 			stream = output;
 			await finishStage();
-		} else if (output && !result?.halt && idx < pipeline.length - 1) {
+		} else if (output && idx < pipeline.length - 1 && !terminalOutput) {
 			commandActive = false;
 			inactiveReason = "requestInput cannot suspend from lazy output before downstream stages";
 			assertRequestInputResumeConsumed(stageResume);
-			stream = trackCommandOutput(
+			const trackedOutput = trackCommandOutput(
 				output,
 				() => {
 					commandOutputStarted = true;
@@ -144,22 +169,34 @@ export async function runPipeline({
 				(err) => assertNoUnconsumedResumeAfterError(stageResume, err),
 				finishStage,
 			);
+			stream = haltAfterStageOnAbort
+				? throwIfAbortedAfterDrain(trackedOutput, signal)
+				: trackedOutput;
 		} else {
-			stream = output
-				? trackCommandOutput(
-						output,
-						() => {
-							commandOutputStarted = true;
-						},
-						() => assertRequestInputResumeConsumed(stageResume),
-						(err) => assertNoUnconsumedResumeAfterError(stageResume, err),
-						finishStage,
-					)
-				: [];
-			if (!output) await finishStage();
+			if (output) {
+				const trackedOutput = trackCommandOutput(
+					output,
+					() => {
+						commandOutputStarted = true;
+					},
+					() => assertRequestInputResumeConsumed(stageResume),
+					(err) => assertNoUnconsumedResumeAfterError(stageResume, err),
+					finishStage,
+				);
+				// Terminal output is drained after the stage loop as well. It needs the
+				// same abort-aware read as a handoff, otherwise a stalled final iterator
+				// can prevent the tool cancellation from settling forever.
+				stream = haltAfterStageOnAbort
+					? throwIfAbortedAfterDrain(trackedOutput, signal)
+					: trackedOutput;
+			} else {
+				stream = [];
+				await finishStage();
+			}
 		}
 
-		if (result?.halt) {
+		stageHalted ||= Boolean(haltAfterStageOnAbort && signal?.aborted);
+		if (stageHalted) {
 			halted = true;
 			haltedAt = { index: idx, stage };
 			break;
@@ -177,9 +214,10 @@ export async function runPipeline({
 			throw err;
 		}
 	}
+	if (haltAfterStageOnAbort) signal?.throwIfAborted();
 	assertRequestInputResumeConsumed(requestInputResume);
 
-	return { items, rendered, renderedItems, halted, haltedAt };
+	return { items, rendered, renderedItems, halted, haltedAt, executionStarted };
 
 	function haltForInputRequest(err: unknown) {
 		if (!(err instanceof InputRequestSuspension)) return false;
@@ -221,7 +259,14 @@ function dryRunPipeline({
 	lines.push("");
 	stderr.write(lines.join("\n"));
 	// Return rendered:true so the CLI does not print an empty JSON array to stdout.
-	return { items: [], rendered: true, renderedItems: [], halted: false, haltedAt: null };
+	return {
+		items: [],
+		rendered: true,
+		renderedItems: [],
+		halted: false,
+		haltedAt: null,
+		executionStarted: false,
+	};
 }
 
 function formatStageArgs(args: Record<string, unknown>) {
@@ -264,6 +309,82 @@ function streamFromItems(items: unknown[]) {
 	})();
 }
 
+function throwIfAbortedAfterDrain(input: AsyncIterable<unknown>, signal?: AbortSignal) {
+	return (async function* () {
+		const iterator = input[Symbol.asyncIterator]();
+		let completed = false;
+		try {
+			while (true) {
+				const next = await nextWithAbort(iterator, signal);
+				if (next.done) {
+					completed = true;
+					break;
+				}
+				signal?.throwIfAborted();
+				yield next.value;
+			}
+			signal?.throwIfAborted();
+		} finally {
+			if (!completed) await closeAfterAbortedRead(input, iterator, signal);
+		}
+	})();
+}
+
+type CancellableLazyOutput = {
+	abort?: (reason?: unknown) => void | Promise<void>;
+};
+
+async function closeAfterAbortedRead(
+	input: AsyncIterable<unknown>,
+	iterator: AsyncIterator<unknown>,
+	signal?: AbortSignal,
+) {
+	const cancellable = iterator as AsyncIterator<unknown> & CancellableLazyOutput;
+	const inputCancellable = input as AsyncIterable<unknown> & CancellableLazyOutput;
+	const abort = cancellable.abort ?? inputCancellable.abort;
+	try {
+		// A source that owns a pending timer, socket, or process can expose this
+		// small cancellation hook. It must release the pending next() operation.
+		if (signal?.aborted && abort) await abort(signal.reason);
+		if (typeof iterator.return !== "function") return;
+		const close = iterator.return();
+		if (signal?.aborted && !abort) {
+			// Legacy iterators cannot interrupt an in-flight next(). Keep the
+			// existing prompt cancellation behavior, while resource-owning sources
+			// opt into the abort hook above so their cleanup is awaited.
+			void Promise.resolve(close).catch(() => {});
+			return;
+		}
+		await close;
+	} catch (err) {
+		if (!signal?.aborted) throw err;
+	}
+}
+
+async function nextWithAbort(iterator: AsyncIterator<unknown>, signal?: AbortSignal) {
+	if (!signal) return iterator.next();
+	signal.throwIfAborted();
+
+	let onAbort!: () => void;
+	const aborted = new Promise<never>((_resolve, reject) => {
+		onAbort = () => {
+			try {
+				signal.throwIfAborted();
+			} catch (err) {
+				reject(err);
+			}
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	if (signal.aborted) onAbort();
+
+	try {
+		return await Promise.race([iterator.next(), aborted]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
 function trackCommandOutput(
 	output: AsyncIterable<unknown> | Iterable<unknown>,
 	markOutput: () => void,
@@ -274,13 +395,27 @@ function trackCommandOutput(
 		suppressCloseErrors?: boolean;
 	}) => Promise<void>,
 ) {
-	return (async function* () {
+	const source = output as AsyncIterable<unknown> & CancellableLazyOutput & AsyncIterator<unknown>;
+	let sourceIterator: AsyncIterator<unknown> | undefined;
+	const tracked = (async function* () {
 		let completed = false;
 		try {
-			for await (const item of output) {
-				assertResumeConsumed();
-				markOutput();
-				yield item;
+			if (typeof source[Symbol.asyncIterator] === "function") {
+				sourceIterator = source[Symbol.asyncIterator]();
+				const iteratorInput: AsyncIterable<unknown> = {
+					[Symbol.asyncIterator]: () => sourceIterator!,
+				};
+				for await (const item of iteratorInput) {
+					assertResumeConsumed();
+					markOutput();
+					yield item;
+				}
+			} else {
+				for (const item of output as Iterable<unknown>) {
+					assertResumeConsumed();
+					markOutput();
+					yield item;
+				}
 			}
 			completed = true;
 		} catch (err) {
@@ -291,6 +426,23 @@ function trackCommandOutput(
 			await finishStage({ assertResume: completed });
 		}
 	})();
+	// Iterator-owned abort hooks are only discoverable after iterator acquisition.
+	// A getter lets the abort-aware wrapper find that hook once a read is pending,
+	// without performing acquisition outside the generator's guarded cleanup path.
+	Object.defineProperty(tracked, "abort", {
+		configurable: true,
+		get() {
+			const cancellationOwner =
+				sourceIterator && typeof (sourceIterator as CancellableLazyOutput).abort === "function"
+					? (sourceIterator as CancellableLazyOutput)
+					: source;
+			const abort = cancellationOwner.abort;
+			return typeof abort === "function"
+				? (reason?: unknown) => abort.call(cancellationOwner, reason)
+				: undefined;
+		},
+	});
+	return tracked;
 }
 
 function assertNoUnconsumedResumeAfterError(resume: CommandInputResume | undefined, err: unknown) {

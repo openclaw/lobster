@@ -8,7 +8,7 @@ import os from "node:os";
 import { createDefaultRegistry } from "../src/commands/registry.js";
 import { runWorkflowFile } from "../src/workflows/file.js";
 import { decodeResumeToken } from "../src/resume.js";
-import { readStateJson } from "../src/state/store.js";
+import { keyToPath, readStateJsonWithLock as readStateJson } from "../src/state/store.js";
 
 function streamOf(items: unknown[]) {
 	return (async function* () {
@@ -92,6 +92,61 @@ test("workflow file runs with approval and resume", async () => {
 	assert.deepEqual(resumeStateFiles, []);
 });
 
+test("sequential workflow approvals reclaim superseded resume markers", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-sequential-approval-"));
+	try {
+		const stateDir = path.join(tmpDir, "state");
+		const filePath = path.join(tmpDir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		await fsp.writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "first", approval: "First?" },
+					{ id: "second", approval: "Second?" },
+					{ id: "finish", command: "node -e \"process.stdout.write('{}')\"" },
+				],
+			}),
+			"utf8",
+		);
+
+		const ctx = {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool" as const,
+		};
+		const first = await runWorkflowFile({ filePath, ctx });
+		assert.equal(first.status, "needs_approval");
+		const firstPayload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+		assert.equal(firstPayload.kind, "workflow-file");
+		const second = await runWorkflowFile({
+			filePath,
+			ctx,
+			resume: firstPayload,
+			approved: true,
+		});
+		assert.equal(second.status, "needs_approval");
+		const secondPayload = decodeResumeToken(second.requiresApproval?.resumeToken ?? "");
+		assert.equal(secondPayload.kind, "workflow-file");
+		const completed = await runWorkflowFile({
+			filePath,
+			ctx,
+			resume: secondPayload,
+			approved: true,
+		});
+		assert.equal(completed.status, "ok");
+		const stateFiles = await fsp.readdir(stateDir);
+		assert.deepEqual(
+			stateFiles.filter((name) => name.startsWith("workflow_resume_")),
+			[],
+		);
+	} finally {
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
+});
+
 test("workflow resume cancellation cleans up resume state", async () => {
 	const workflow = {
 		steps: [
@@ -152,6 +207,562 @@ test("workflow resume cancellation cleans up resume state", async () => {
 	const files = await fsp.readdir(stateDir);
 	const resumeStateFiles = files.filter((name) => name.startsWith("workflow_resume_"));
 	assert.deepEqual(resumeStateFiles, []);
+});
+
+test("direct workflow resume consumes its capability after cancellation starts an effect", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-direct-cancel-"));
+	const stateDir = path.join(tmpDir, "state");
+	const effectPath = path.join(tmpDir, "effects.log");
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{
+					id: "approve",
+					command:
+						"node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?',items:[{id:1}]}}))\"",
+					approval: "required",
+				},
+				{
+					id: "effect",
+					run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+					condition: "$approve.approved",
+				},
+			],
+		}),
+		"utf8",
+	);
+	const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+	const first = await runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		},
+	});
+	assert.equal(first.status, "needs_approval");
+	const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+	assert.equal(payload.kind, "workflow-file");
+	assert.ok(payload.stateKey);
+
+	const controller = new AbortController();
+	const resumed = runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+			signal: controller.signal,
+		},
+		resume: payload,
+		approved: true,
+	});
+	for (let attempt = 0; attempt < 100; attempt++) {
+		try {
+			await fsp.access(effectPath);
+			break;
+		} catch {
+			if (attempt === 99) throw new Error("workflow effect did not start");
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	controller.abort(new Error("cancel after dispatch"));
+	await assert.rejects(() => resumed, /cancel after dispatch/);
+	assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+	const stateFiles = await fsp.readdir(stateDir);
+	assert.equal(
+		stateFiles.some((file) => file.startsWith("approval_")),
+		false,
+	);
+
+	await assert.rejects(
+		() =>
+			runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			}),
+		/Workflow resume state not found/,
+	);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+});
+
+test("workflow template setup failure preserves an unstarted approval capability", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-template-resume-"));
+	try {
+		const stateDir = path.join(tmpDir, "state");
+		const filePath = path.join(tmpDir, "workflow.lobster");
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const broken = {
+			steps: [
+				{ id: "approve", approval: "Continue?" },
+				{
+					id: "effect",
+					run: "node -e \"process.stdout.write('should not run')\"",
+					stdin: "$missing.stdout",
+				},
+			],
+		};
+		await fsp.writeFile(filePath, JSON.stringify(broken), "utf8");
+
+		const first = await runWorkflowFile({
+			filePath,
+			ctx: {
+				stdin: process.stdin,
+				stdout: process.stdout,
+				stderr: process.stderr,
+				env,
+				mode: "tool",
+			},
+		});
+		assert.equal(first.status, "needs_approval");
+		const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+		assert.equal(payload.kind, "workflow-file");
+		assert.ok(payload.stateKey);
+
+		await assert.rejects(
+			() =>
+				runWorkflowFile({
+					filePath,
+					ctx: {
+						stdin: process.stdin,
+						stdout: process.stdout,
+						stderr: process.stderr,
+						env,
+						mode: "tool",
+					},
+					resume: payload,
+					approved: true,
+				}),
+			/Unknown step reference: missing\.stdout/,
+		);
+		assert.notEqual(await readStateJson({ env, key: payload.stateKey! }), null);
+
+		await fsp.writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "approve", approval: "Continue?" },
+					{ id: "effect", run: "node -e \"process.stdout.write('ok')\"" },
+				],
+			}),
+			"utf8",
+		);
+		const retried = await runWorkflowFile({
+			filePath,
+			ctx: {
+				stdin: process.stdin,
+				stdout: process.stdout,
+				stderr: process.stderr,
+				env,
+				mode: "tool",
+			},
+			resume: payload,
+			approved: true,
+		});
+		assert.equal(retried.status, "ok");
+		assert.deepEqual(retried.output, ["ok"]);
+	} finally {
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow resume consumes its capability after a step timeout starts an effect", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-step-timeout-"));
+	const stateDir = path.join(tmpDir, "state");
+	const effectPath = path.join(tmpDir, "effects.log");
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{
+					id: "approve",
+					command:
+						"node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?',items:[{id:1}]}}))\"",
+					approval: "required",
+				},
+				{
+					id: "effect",
+					run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+					condition: "$approve.approved",
+					timeout_ms: 1500,
+				},
+			],
+		}),
+		"utf8",
+	);
+	const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+	const first = await runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		},
+	});
+	assert.equal(first.status, "needs_approval");
+	const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+	assert.equal(payload.kind, "workflow-file");
+	assert.ok(payload.stateKey);
+
+	await assert.rejects(
+		() =>
+			runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			}),
+		/timed out|timeout|abort|cancel/i,
+	);
+	assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+	await assert.rejects(
+		() =>
+			runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			}),
+		/Workflow resume state not found/,
+	);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+});
+
+test("workflow resume applies on_error after a timed-out effect", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-timeout-on-error-"));
+	const stateDir = path.join(tmpDir, "state");
+	const effectPath = path.join(tmpDir, "effects.log");
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{
+					id: "approve",
+					command:
+						"node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?',items:[{id:1}]}}))\"",
+					approval: "required",
+				},
+				{
+					id: "effect",
+					run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+					condition: "$approve.approved",
+					timeout_ms: 1500,
+					on_error: "continue",
+				},
+				{ id: "after", run: "echo continued" },
+			],
+		}),
+		"utf8",
+	);
+	const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+	const first = await runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		},
+	});
+	assert.equal(first.status, "needs_approval");
+	const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+	assert.equal(payload.kind, "workflow-file");
+	assert.ok(payload.stateKey);
+
+	const resumed = await runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		},
+		resume: payload,
+		approved: true,
+	});
+	assert.equal(resumed.status, "ok");
+	assert.deepEqual(resumed.output, ["continued\n"]);
+	assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+});
+
+test("workflow resume retries a timed-out effect before consuming its capability", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-timeout-retry-"));
+	const stateDir = path.join(tmpDir, "state");
+	const attemptsPath = path.join(tmpDir, "attempts");
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{
+					id: "approve",
+					command:
+						"node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?',items:[{id:1}]}}))\"",
+					approval: "required",
+				},
+				{
+					id: "effect",
+					run: `node -e "const fs=require('fs'); const file=process.argv[1]; const attempt=fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0; fs.writeFileSync(file, String(attempt + 1)); if (attempt === 0) setInterval(() => {}, 1000); else process.stdout.write('retried');" ${JSON.stringify(attemptsPath)}`,
+					condition: "$approve.approved",
+					timeout_ms: 1500,
+					retry: { max: 2, delay_ms: 10 },
+				},
+			],
+		}),
+		"utf8",
+	);
+	const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+	const first = await runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		},
+	});
+	assert.equal(first.status, "needs_approval");
+	const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+	assert.equal(payload.kind, "workflow-file");
+	assert.ok(payload.stateKey);
+
+	const resumed = await runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		},
+		resume: payload,
+		approved: true,
+	});
+	assert.equal(resumed.status, "ok");
+	assert.deepEqual(resumed.output, ["retried"]);
+	assert.equal(await fsp.readFile(attemptsPath, "utf8"), "2");
+	assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+});
+
+test("workflow resume retries a claim blocked by a state lock before dispatch", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-claim-retry-"));
+	try {
+		const stateDir = path.join(tmpDir, "state");
+		const filePath = path.join(tmpDir, "workflow.lobster");
+		await fsp.writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{ id: "approve", approval: "Proceed?" },
+					{
+						id: "effect",
+						run: "printf ran",
+						condition: "$approve.approved",
+						timeout_ms: 1000,
+						retry: { max: 2, delay_ms: 250 },
+					},
+				],
+			}),
+			"utf8",
+		);
+		const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+		const first = await runWorkflowFile({
+			filePath,
+			ctx: {
+				stdin: process.stdin,
+				stdout: process.stdout,
+				stderr: process.stderr,
+				env,
+				mode: "tool",
+			},
+		});
+		assert.equal(first.status, "needs_approval");
+		const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+		assert.equal(payload.kind, "workflow-file");
+		assert.ok(payload.stateKey);
+
+		const lockPath = `${keyToPath(stateDir, payload.stateKey!)}.lock`;
+		const originalRename = fsp.rename;
+		const originalRm = fsp.rm;
+		let releasedInitialReadLocks = 0;
+		let lockReplaced!: () => void;
+		const replacedInitialReadLocks = new Promise<void>((resolve) => {
+			lockReplaced = resolve;
+		});
+		Object.defineProperty(fsp, "rename", {
+			configurable: true,
+			writable: true,
+			async value(
+				oldPath: Parameters<typeof fsp.rename>[0],
+				newPath: Parameters<typeof fsp.rename>[1],
+			) {
+				const result = await originalRename(oldPath, newPath);
+				if (String(oldPath) === lockPath && ++releasedInitialReadLocks === 2) {
+					await fsp.mkdir(lockPath);
+					await fsp.writeFile(
+						path.join(lockPath, "owner"),
+						`${process.pid}::live-writer\n`,
+						"utf8",
+					);
+					lockReplaced();
+				}
+				return result;
+			},
+		});
+		try {
+			const resumedRun = runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			});
+			await replacedInitialReadLocks;
+			const release = setTimeout(
+				() => void originalRm(lockPath, { recursive: true, force: true }),
+				1200,
+			);
+			const resumed = await resumedRun;
+			clearTimeout(release);
+			assert.equal(resumed.status, "ok");
+			assert.deepEqual(resumed.output, ["ran"]);
+			assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+		} finally {
+			Object.defineProperty(fsp, "rename", {
+				configurable: true,
+				writable: true,
+				value: originalRename,
+			});
+			await fsp.rm(lockPath, { recursive: true, force: true });
+		}
+	} finally {
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow resume consumes its capability after a parallel timeout starts an effect", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-parallel-timeout-"));
+	const stateDir = path.join(tmpDir, "state");
+	const effectPath = path.join(tmpDir, "effects.log");
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.writeFile(
+		filePath,
+		JSON.stringify({
+			steps: [
+				{
+					id: "approve",
+					command:
+						"node -e \"process.stdout.write(JSON.stringify({requiresApproval:{prompt:'Proceed?',items:[{id:1}]}}))\"",
+					approval: "required",
+				},
+				{
+					id: "effect",
+					condition: "$approve.approved",
+					parallel: {
+						timeout_ms: 1500,
+						branches: [
+							{
+								id: "side-effect",
+								run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+							},
+						],
+					},
+				},
+			],
+		}),
+		"utf8",
+	);
+	const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+	const first = await runWorkflowFile({
+		filePath,
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env,
+			mode: "tool",
+		},
+	});
+	assert.equal(first.status, "needs_approval");
+	const payload = decodeResumeToken(first.requiresApproval?.resumeToken ?? "");
+	assert.equal(payload.kind, "workflow-file");
+	assert.ok(payload.stateKey);
+
+	await assert.rejects(
+		() =>
+			runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			}),
+		/timed out|timeout|abort|cancel/i,
+	);
+	assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
+	await assert.rejects(
+		() =>
+			runWorkflowFile({
+				filePath,
+				ctx: {
+					stdin: process.stdin,
+					stdout: process.stdout,
+					stderr: process.stderr,
+					env,
+					mode: "tool",
+				},
+				resume: payload,
+				approved: true,
+			}),
+		/Workflow resume state not found/,
+	);
+	assert.equal((await fsp.readFile(effectPath, "utf8")).trim().split(/\r?\n/).length, 1);
 });
 
 test("workflow resume accepts workflow-resume_ state key aliases and cleans up state", async () => {
@@ -383,6 +994,7 @@ test("workflow pipeline requestInput resume invariant bypasses on_error", async 
 	let sideEffects = 0;
 	const choose = {
 		name: "choose",
+		meta: { resumeSafeBeforeInput: true },
 		async run({ ctx }: any) {
 			calls += 1;
 			if (calls > 1) return { output: streamOf([{ skipped: true }]) };
@@ -1244,6 +1856,76 @@ test("workflow conditions reject standalone bare identifiers", async () => {
 			}),
 		/Unsupported condition: approve/,
 	);
+});
+
+test("parallel wait:any fails promptly when a registered loser ignores cancellation", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-parallel-unsettled-"));
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	const registry = {
+		get(name: string) {
+			if (name === "winner") {
+				return {
+					name,
+					help: () => "winner",
+					async run() {
+						return { output: [{ winner: true }] };
+					},
+				};
+			}
+			if (name === "never") {
+				return {
+					name,
+					help: () => "never",
+					async run() {
+						await new Promise<void>(() => {});
+					},
+				};
+			}
+			return undefined;
+		},
+	};
+
+	try {
+		await fsp.writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{
+						id: "parallel",
+						parallel: {
+							wait: "any",
+							branches: [
+								{ id: "winner", pipeline: "winner" },
+								{ id: "never", pipeline: "never" },
+							],
+						},
+					},
+				],
+			}),
+			"utf8",
+		);
+		await assert.rejects(
+			Promise.race([
+				runWorkflowFile({
+					filePath,
+					ctx: {
+						stdin: process.stdin,
+						stdout: process.stdout,
+						stderr: process.stderr,
+						env: { ...process.env },
+						mode: "tool",
+						registry,
+					},
+				}),
+				new Promise<never>((_resolve, reject) =>
+					setTimeout(() => reject(new Error("workflow did not finish")), 1_000),
+				),
+			]),
+			/Parallel branches did not settle after cancellation/,
+		);
+	} finally {
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
 });
 
 test("workflow conditions reject unknown step refs even under negation", async () => {
