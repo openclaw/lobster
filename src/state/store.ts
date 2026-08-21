@@ -27,11 +27,12 @@ export function defaultStateDir(env) {
 }
 
 export function keyToPath(stateDir, key) {
-	const safe = String(key)
+	let safe = String(key)
 		.toLowerCase()
 		.replace(/[^a-z0-9._-]+/g, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "");
+		.replace(/_+/g, "_");
+	if (safe.startsWith("_")) safe = safe.slice(1);
+	if (safe.endsWith("_")) safe = safe.slice(0, -1);
 	if (!safe) throw new Error("state key is empty/invalid");
 	return path.join(stateDir, `${safe}.json`);
 }

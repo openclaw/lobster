@@ -28,6 +28,17 @@ function streamOf(items) {
 	})();
 }
 
+test("state keys normalize long separator runs without changing filenames", () => {
+	const tmp = path.join(os.tmpdir(), "lobster-state");
+	const separators = "_".repeat(100_000);
+
+	assert.equal(
+		keyToPath(tmp, `${separators}Demo KEY${separators}`),
+		path.join(tmp, "demo_key.json"),
+	);
+	assert.throws(() => keyToPath(tmp, separators), /state key is empty\/invalid/);
+});
+
 test("state.set writes and state.get reads", async () => {
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-state-"));
 	const registry = createDefaultRegistry();
