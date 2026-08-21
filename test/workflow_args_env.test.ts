@@ -11,13 +11,14 @@ test("workflow file exposes args as LOBSTER_ARG_* env vars (safe for quotes)", a
 		name: "args-env",
 		args: {
 			text: { default: "" },
+			__edge__key__: { default: "" },
 		},
 		steps: [
 			{
 				id: "echo",
 				// Avoid embedding the arg into the shell command; read from env instead.
 				command:
-					'node -e "process.stdout.write(JSON.stringify({text: process.env.LOBSTER_ARG_TEXT}))"',
+					'node -e "process.stdout.write(JSON.stringify({text: process.env.LOBSTER_ARG_TEXT, edge: process.env.LOBSTER_ARG_EDGE_KEY}))"',
 			},
 		],
 	};
@@ -29,10 +30,11 @@ test("workflow file exposes args as LOBSTER_ARG_* env vars (safe for quotes)", a
 
 	const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
 	const text = 'hello "world" $HOME `backticks` $(whoami)';
+	const edge = "preserved";
 
 	const result = await runWorkflowFile({
 		filePath,
-		args: { text },
+		args: { text, __edge__key__: edge },
 		ctx: {
 			stdin: process.stdin,
 			stdout: process.stdout,
@@ -43,5 +45,5 @@ test("workflow file exposes args as LOBSTER_ARG_* env vars (safe for quotes)", a
 	});
 
 	assert.equal(result.status, "ok");
-	assert.deepEqual(result.output, [{ text }]);
+	assert.deepEqual(result.output, [{ text, edge }]);
 });

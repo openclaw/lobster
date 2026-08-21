@@ -2494,8 +2494,11 @@ function normalizeArgEnvKey(key: string): string | null {
 	// Keep it predictable for shells: uppercase and [A-Z0-9_]
 	const up = trimmed.toUpperCase();
 	let normalized = up.replace(/[^A-Z0-9]+/g, "_");
-	if (normalized.startsWith("_")) normalized = normalized.slice(1);
-	if (normalized.endsWith("_")) normalized = normalized.slice(0, -1);
+	let start = 0;
+	while (normalized[start] === "_") start++;
+	let end = normalized.length;
+	while (end > start && normalized[end - 1] === "_") end--;
+	normalized = normalized.slice(start, end);
 	return normalized || null;
 }
 
