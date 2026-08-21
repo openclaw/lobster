@@ -128,3 +128,50 @@ test("template filter splitter handles quoted pipe characters", async () => {
 	const out = await run("template --text '{{line | split \"|\" | first}}'", [{ line: "a|b|c" }]);
 	assert.deepEqual(out, ["a"]);
 });
+
+test("parseFilterExpression handles escaped quotes inside a quoted arg", () => {
+	assert.deepEqual(parseFilterExpression('foo "a\\"b"'), ["foo", 'a"b']);
+});
+
+test("parseFilterExpression treats empty and whitespace-only input as a single empty token", () => {
+	assert.deepEqual(parseFilterExpression(""), [""]);
+	assert.deepEqual(parseFilterExpression("   "), [""]);
+});
+
+test("parseFilterExpression closes an unterminated quote at end of input", () => {
+	assert.deepEqual(parseFilterExpression('x "unterminated'), ["x", "unterminated"]);
+});
+
+test("applyFilters truncate uses default length 80 and leaves short input unchanged", () => {
+	assert.equal(applyFilters("x".repeat(85), ["truncate"]), `${"x".repeat(80)}...`);
+	assert.equal(applyFilters("hi", ["truncate 80"]), "hi");
+});
+
+test("applyFilters round passes through non-numeric input and defaults to 0 decimals", () => {
+	assert.equal(applyFilters("abc", ["round 2"]), "abc");
+	assert.equal(applyFilters(3.7, ["round"]), 4);
+});
+
+test("applyFilters length/join/first/last fall back for non-collection input", () => {
+	assert.equal(applyFilters(42, ["length"]), 0);
+	assert.equal(applyFilters("plain", ["join"]), "plain");
+	assert.equal(applyFilters("solo", ["first"]), "solo");
+	assert.equal(applyFilters("solo", ["last"]), "solo");
+});
+
+test("applyFilters default treats an empty string as missing", () => {
+	assert.equal(applyFilters("", ['default "fb"']), "fb");
+});
+
+test("applyFilters date returns ISO when no format is given", () => {
+	assert.equal(applyFilters(1710000000000, ["date"]), "2024-03-09T16:00:00.000Z");
+});
+
+test("applyFilters date returns the input verbatim when unparseable", () => {
+	assert.equal(applyFilters("not-a-date", ["date"]), "not-a-date");
+});
+
+test("applyFilters date accepts numeric strings and full format tokens", () => {
+	assert.equal(applyFilters("1710000000000", ['date "YYYY-MM-DD"']), "2024-03-09");
+	assert.equal(applyFilters(1710000000000, ['date "YYYY-MM-DD HH:mm:ss"']), "2024-03-09 16:00:00");
+});
