@@ -28,15 +28,20 @@ function streamOf(items) {
 	})();
 }
 
-test("state keys normalize long separator runs without changing filenames", () => {
+test("state key boundary trimming preserves normalized filenames", () => {
 	const tmp = path.join(os.tmpdir(), "lobster-state");
-	const separators = "_".repeat(100_000);
 
-	assert.equal(
-		keyToPath(tmp, `${separators}Demo KEY${separators}`),
-		path.join(tmp, "demo_key.json"),
-	);
-	assert.throws(() => keyToPath(tmp, separators), /state key is empty\/invalid/);
+	for (const [key, filename] of [
+		["_Demo KEY_", "demo_key.json"],
+		["___Demo KEY___", "demo_key.json"],
+		[" Demo KEY ", "demo_key.json"],
+		["-Demo KEY-", "-demo_key-.json"],
+		[".Demo KEY.", ".demo_key..json"],
+	]) {
+		assert.equal(keyToPath(tmp, key), path.join(tmp, filename));
+	}
+	assert.throws(() => keyToPath(tmp, "_"), /state key is empty\/invalid/);
+	assert.throws(() => keyToPath(tmp, "___"), /state key is empty\/invalid/);
 });
 
 test("state.set writes and state.get reads", async () => {
