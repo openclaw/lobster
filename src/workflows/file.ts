@@ -23,7 +23,6 @@ import {
 	writeStateJson,
 } from "../state/store.js";
 import { readLineFromStream } from "../read_line.js";
-import { resolveInlineShellCommand } from "../shell.js";
 import { compileCached } from "../validation.js";
 import {
 	createLlmSpendLedger,
@@ -3533,17 +3532,15 @@ async function runShellCommand({
 }) {
 	signal?.throwIfAborted();
 	signal?.throwIfAborted();
-	const shell = resolveInlineShellCommand({ command, env });
 	const { stdout, stderr, code } = await runAbortableProcess({
-		command: shell.command,
-		argv: shell.argv,
+		shellCommand: command,
 		env,
 		cwd,
 		stdin,
 		signal,
 		forceTerminationSignal,
 		killSignal,
-		notFoundMessage: `workflow command not found: ${shell.command}`,
+		notFoundMessage: "workflow shell not found; check LOBSTER_SHELL or ComSpec",
 	});
 	if (code === 0) return { stdout, stderr };
 	throw new Error(

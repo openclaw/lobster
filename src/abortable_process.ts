@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptionsWithoutStdio } from "node:child_process";
+import { resolveInlineShellCommand } from "./shell.js";
 
 const ABORT_FORCE_KILL_AFTER_MS = 250;
 const forceTerminationCallbacks = new WeakMap<AbortSignal, Set<() => void>>();
@@ -9,9 +10,7 @@ type ProcessResult = {
 	code: number | null;
 };
 
-type RunAbortableProcessOptions = {
-	command: string;
-	argv: string[];
+type RunAbortableOptions = {
 	env: NodeJS.ProcessEnv;
 	cwd?: string;
 	stdin?: string | null;
@@ -22,6 +21,12 @@ type RunAbortableProcessOptions = {
 	outputLimitMessage?: string;
 	notFoundMessage: string;
 };
+
+type RunAbortableProcessOptions = RunAbortableOptions &
+	(
+		| { command: string; argv: string[]; shellCommand?: never }
+		| { shellCommand: string; command?: never; argv?: never }
+	);
 
 export function forceTerminateAbortableProcesses(signal: AbortSignal) {
 	for (const terminate of forceTerminationCallbacks.get(signal) ?? []) terminate();
@@ -59,19 +64,18 @@ function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): Prom
 	return Promise.resolve();
 }
 
-export function runAbortableProcess({
-	command,
-	argv,
-	env,
-	cwd,
-	stdin,
-	signal,
-	forceTerminationSignal,
-	killSignal,
-	maxOutputBytes,
-	outputLimitMessage,
-	notFoundMessage,
-}: RunAbortableProcessOptions): Promise<ProcessResult> {
+export function runAbortableProcess(options: RunAbortableProcessOptions): Promise<ProcessResult> {
+	const {
+		env,
+		cwd,
+		stdin,
+		signal,
+		forceTerminationSignal,
+		killSignal,
+		maxOutputBytes,
+		outputLimitMessage,
+		notFoundMessage,
+	} = options;
 	return new Promise((resolve, reject) => {
 		if (
 			maxOutputBytes !== undefined &&
@@ -86,16 +90,25 @@ export function runAbortableProcess({
 			reject(err);
 			return;
 		}
-		const child = spawn(command, argv, {
+		const spawnOptions: SpawnOptionsWithoutStdio = {
 			env,
 			cwd,
 			shell: false,
-			stdio: ["pipe", "pipe", "pipe"],
+			stdio: "pipe",
 			// Create a dedicated POSIX process group only when this runner owns a
 			// cancellation signal for it. Direct APIs without one must retain the
 			// caller's terminal process group so Ctrl-C still reaches their child.
 			detached: process.platform !== "win32" && signal !== undefined,
-		});
+		};
+		// Keep direct argv and shell command dataflow at distinct spawn sites.
+		// Merging them makes shell interpretation leak into direct executable callers.
+		const child =
+			"shellCommand" in options
+				? (() => {
+						const shell = resolveInlineShellCommand({ command: options.shellCommand, env });
+						return spawn(shell.command, shell.argv, spawnOptions);
+					})()
+				: spawn(options.command, options.argv, spawnOptions);
 
 		let stdout = "";
 		let stderr = "";

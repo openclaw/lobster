@@ -1,5 +1,4 @@
 import { runAbortableProcess } from "../../abortable_process.js";
-import { resolveInlineShellCommand } from "../../shell.js";
 
 export const execCommand = {
 	name: "exec",
@@ -104,8 +103,18 @@ async function runProcess(command, argv, { env, cwd, stdin, signal, forceTermina
 }
 
 function runShellLine(commandLine, { env, cwd, stdin, signal, forceTerminationSignal }) {
-	const shell = resolveInlineShellCommand({ command: commandLine, env });
-	return runProcess(shell.command, shell.argv, { env, cwd, stdin, signal, forceTerminationSignal });
+	return runAbortableProcess({
+		shellCommand: commandLine,
+		env,
+		cwd,
+		stdin,
+		signal,
+		forceTerminationSignal,
+		notFoundMessage: "exec shell not found; check LOBSTER_SHELL or ComSpec",
+	}).then(({ stdout, stderr, code }) => {
+		if (code === 0) return { stdout, stderr };
+		throw new Error(`exec failed (${code}): ${stderr.trim() || stdout.trim() || commandLine}`);
+	});
 }
 
 function encodeStdin(items, mode) {
