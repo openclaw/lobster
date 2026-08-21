@@ -64,6 +64,32 @@ test("runAbortableProcess preserves UTF-8 characters split across pipe chunks", 
 	assert.equal(result.stdout, "€");
 });
 
+test(
+	"runAbortableProcess does not shell-interpret an executable path",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-process-path-"));
+		try {
+			const marker = join(dir, "injected");
+			const executable = join(dir, "node;touch injected");
+			await fsp.symlink(process.execPath, executable);
+
+			const result = await runAbortableProcess({
+				command: executable,
+				argv: ["-e", "process.stdout.write('ok')"],
+				cwd: dir,
+				env: process.env,
+				notFoundMessage: "node missing",
+			});
+
+			assert.equal(result.stdout, "ok");
+			assert.equal(await fileExists(marker), false);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
+
 test("runAbortableProcess does not spawn when its signal is already aborted", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "lobster-pre-aborted-process-"));
 	try {

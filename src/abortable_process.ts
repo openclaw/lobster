@@ -89,6 +89,7 @@ export function runAbortableProcess({
 		const child = spawn(command, argv, {
 			env,
 			cwd,
+			shell: false,
 			stdio: ["pipe", "pipe", "pipe"],
 			// Create a dedicated POSIX process group only when this runner owns a
 			// cancellation signal for it. Direct APIs without one must retain the
