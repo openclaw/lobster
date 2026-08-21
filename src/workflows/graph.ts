@@ -23,7 +23,7 @@ type RenderGraphParams = {
 
 function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
 	return input.replace(/\$\{([A-Za-z0-9_-]+)\}/g, (match, key) => {
-		if (key in args) return String(args[key]);
+		if (Object.hasOwn(args, key)) return String(args[key]);
 		return match;
 	});
 }
@@ -163,7 +163,14 @@ function sanitizeMermaidId(id: string) {
 }
 
 function escapeMermaidLabel(value: string) {
-	return value.replace(/"/g, '\\"');
+	const entities = {
+		"&": "&amp;",
+		'"': "&quot;",
+		"<": "&lt;",
+		">": "&gt;",
+		"|": "&#124;",
+	} as const;
+	return value.replace(/[&"<>|]/g, (character) => entities[character as keyof typeof entities]);
 }
 
 function renderMermaid(nodes: GraphNode[], edges: GraphEdge[]) {

@@ -36,14 +36,26 @@ test("workflow graph renderer outputs mermaid nodes and labeled edges", () => {
 	assert.match(output, /confirm\{"confirm\\napproval gate"\}/);
 	assert.match(
 		output,
-		/advice\["advice\\npipeline: llm\.invoke --prompt \\"Summarize this weather\\""\]/,
+		/advice\["advice\\npipeline: llm\.invoke --prompt &quot;Summarize this weather&quot;"\]/,
 	);
 	assert.match(output, /fetch -->\|stdin\| confirm/);
 	assert.match(output, /fetch -->\|stdin\| advice/);
 	assert.match(
 		output,
-		/confirm -->\|when: \$confirm\.approved && \$fetch\.json\.temp > 70\| advice/,
+		/confirm -->\|when: \$confirm\.approved &amp;&amp; \$fetch\.json\.temp &gt; 70\| advice/,
 	);
+});
+
+test("workflow graph renderer contains Mermaid metacharacters in labels", () => {
+	const output = renderWorkflowGraph({
+		workflow: {
+			steps: [{ id: "unsafe", run: 'echo \\"quoted" | next <tag>' }],
+		},
+		format: "mermaid",
+	});
+
+	assert.match(output, /echo \\&quot;quoted&quot; &#124; next &lt;tag&gt;/);
+	assert.doesNotMatch(output, /"quoted"/);
 });
 
 test("workflow graph renderer outputs dot with approval shape", () => {

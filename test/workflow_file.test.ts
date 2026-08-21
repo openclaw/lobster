@@ -16,6 +16,11 @@ function streamOf(items: unknown[]) {
 	})();
 }
 
+const APPEND_EFFECT_AND_WAIT =
+	"node -e \"require('fs').appendFileSync(process.env.LOBSTER_TEST_EFFECT_PATH, 'run\\n'); setInterval(() => {}, 1000)\"";
+const COUNT_ATTEMPTS_AND_RETRY =
+	"node -e \"const fs=require('fs'); const file=process.env.LOBSTER_TEST_ATTEMPTS_PATH; const attempt=fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0; fs.writeFileSync(file, String(attempt + 1)); if (attempt === 0) setInterval(() => {}, 1000); else process.stdout.write('retried');\"";
+
 test("workflow file runs with approval and resume", async () => {
 	const workflow = {
 		name: "sample",
@@ -226,7 +231,8 @@ test("direct workflow resume consumes its capability after cancellation starts a
 				},
 				{
 					id: "effect",
-					run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+					run: APPEND_EFFECT_AND_WAIT,
+					env: { LOBSTER_TEST_EFFECT_PATH: effectPath },
 					condition: "$approve.approved",
 				},
 			],
@@ -397,7 +403,8 @@ test("workflow resume consumes its capability after a step timeout starts an eff
 				},
 				{
 					id: "effect",
-					run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+					run: APPEND_EFFECT_AND_WAIT,
+					env: { LOBSTER_TEST_EFFECT_PATH: effectPath },
 					condition: "$approve.approved",
 					timeout_ms: 1500,
 				},
@@ -475,7 +482,8 @@ test("workflow resume applies on_error after a timed-out effect", async () => {
 				},
 				{
 					id: "effect",
-					run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+					run: APPEND_EFFECT_AND_WAIT,
+					env: { LOBSTER_TEST_EFFECT_PATH: effectPath },
 					condition: "$approve.approved",
 					timeout_ms: 1500,
 					on_error: "continue",
@@ -536,7 +544,8 @@ test("workflow resume retries a timed-out effect before consuming its capability
 				},
 				{
 					id: "effect",
-					run: `node -e "const fs=require('fs'); const file=process.argv[1]; const attempt=fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0; fs.writeFileSync(file, String(attempt + 1)); if (attempt === 0) setInterval(() => {}, 1000); else process.stdout.write('retried');" ${JSON.stringify(attemptsPath)}`,
+					run: COUNT_ATTEMPTS_AND_RETRY,
+					env: { LOBSTER_TEST_ATTEMPTS_PATH: attemptsPath },
 					condition: "$approve.approved",
 					timeout_ms: 1500,
 					retry: { max: 2, delay_ms: 10 },
@@ -703,7 +712,8 @@ test("workflow resume consumes its capability after a parallel timeout starts an
 						branches: [
 							{
 								id: "side-effect",
-								run: `node -e "require('fs').appendFileSync(process.argv[1], 'run\\n'); setInterval(() => {}, 1000)" ${JSON.stringify(effectPath)}`,
+								run: APPEND_EFFECT_AND_WAIT,
+								env: { LOBSTER_TEST_EFFECT_PATH: effectPath },
 							},
 						],
 					},
@@ -904,6 +914,64 @@ test("workflow file input steps pause and resume with structured responses", asy
 
 	assert.equal(resumed.status, "ok");
 	assert.deepEqual(resumed.output, [{ decision: "approve", subject: "hello" }]);
+});
+
+test("workflow input resume contains prototype-named step ids", async () => {
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-prototype-step-"));
+	const stateDir = path.join(tmpDir, "state");
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	const objectPrototype = Object.prototype as Record<string, unknown>;
+	try {
+		await fsp.writeFile(
+			filePath,
+			JSON.stringify({
+				steps: [
+					{
+						id: "__proto__",
+						input: {
+							prompt: "Continue?",
+							responseSchema: {
+								type: "object",
+								properties: { decision: { type: "string" } },
+								required: ["decision"],
+							},
+						},
+					},
+					{
+						id: "finish",
+						run: 'node -e "process.stdout.write(JSON.stringify({decision:process.env.DECISION}))"',
+						env: { DECISION: "$__proto__.response.decision" },
+					},
+				],
+			}),
+			"utf8",
+		);
+		const ctx = {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env: { ...process.env, LOBSTER_STATE_DIR: stateDir },
+			mode: "tool" as const,
+		};
+
+		const first = await runWorkflowFile({ filePath, ctx });
+		const payload = decodeResumeToken(first.requiresInput?.resumeToken ?? "");
+		assert.equal(payload.kind, "workflow-file");
+		const resumed = await runWorkflowFile({
+			filePath,
+			ctx,
+			resume: payload,
+			response: { decision: "approve" },
+		});
+
+		assert.equal(Object.hasOwn(objectPrototype, "response"), false);
+		assert.equal(Object.hasOwn(objectPrototype, "subject"), false);
+		assert.deepEqual(resumed.output, [{ decision: "approve" }]);
+	} finally {
+		delete objectPrototype.response;
+		delete objectPrototype.subject;
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
 });
 
 test("workflow pipeline command input pauses and resumes the same pipeline step", async () => {
