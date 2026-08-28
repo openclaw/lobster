@@ -4,6 +4,7 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Run Node 24 CI on pull requests and pushes to `main`, checking workflow syntax, frozen dependency installation, build, types, formatting, lint, and tests.
 - Refresh development tooling and the `fast-uri` override, align pnpm on 11.24.0, and update GitHub Actions.
 - Honor cancellation and step timeouts in `gog.gmail.send` by terminating the gog process tree the same way `gog.gmail.search` already does.
 - Do not automatically retry a timed-out or failed `gog.gmail.send` step. Killing the local client cannot prove Gmail did not already accept the message.
