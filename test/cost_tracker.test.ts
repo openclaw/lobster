@@ -142,7 +142,11 @@ test("CostTracker checkLimit warns when action=warn and limit exceeded", () => {
 	assert.match(out, /\[WARN\] Cost/);
 });
 
-async function runWorkflow(workflow: unknown, envOverride?: Record<string, string>) {
+async function runWorkflow(
+	workflow: unknown,
+	envOverride?: Record<string, string>,
+	llmAdapters?: Record<string, unknown>,
+) {
 	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-"));
 	const stateDir = path.join(tmpDir, "state");
 	const filePath = path.join(tmpDir, "workflow.lobster");
@@ -162,6 +166,7 @@ async function runWorkflow(workflow: unknown, envOverride?: Record<string, strin
 			env: { ...process.env, LOBSTER_STATE_DIR: stateDir, ...envOverride },
 			mode: "tool",
 			registry: createDefaultRegistry(),
+			llmAdapters,
 		},
 	});
 
@@ -2273,10 +2278,40 @@ test("a ledger's settled and open charges survive a round trip through resume st
 // arrives. Whether that spend reached the workflow's own total used to depend on nothing but how
 // long the run happened to live afterwards, so the same workflow over the same three calls billed
 // two of them or three. The discarded branch's output is thrown away and its cost goes with it.
-async function runDiscardedBranchRace(tailMs: number) {
-	const provider = await startFakeProvider(1, undefined, (prompt) =>
-		prompt === "Slow" ? 300 : prompt === "Tail" ? tailMs : 0,
-	);
+async function runDiscardedBranchRace(finishSlowDuringRun: boolean) {
+	let requests = 0;
+	let slowStarted: () => void;
+	const slowEntered = new Promise<void>((resolve) => (slowStarted = resolve));
+	let releaseSlow: () => void;
+	const slowReleased = new Promise<void>((resolve) => (releaseSlow = resolve));
+	const response = {
+		ok: true,
+		result: {
+			model: "gpt-4o",
+			output: { data: { summary: "hello" } },
+			usage: { inputTokens: 1000, outputTokens: 500 },
+		},
+	};
+	let slowFinished = false;
+	const slowResponse = slowReleased.then(() => {
+		slowFinished = true;
+		return response;
+	});
+	const adapter = async ({ payload }: { payload: { prompt: string } }) => {
+		requests += 1;
+		if (payload.prompt === "Slow") {
+			slowStarted();
+			return slowResponse;
+		}
+		if (payload.prompt === "Fast") {
+			// Both calls must start, but only Fast can finish before the tail begins.
+			await slowEntered;
+		} else if (finishSlowDuringRun) {
+			releaseSlow();
+			await slowResponse;
+		}
+		return response;
+	};
 	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
 	try {
 		const { result } = await runWorkflow(
@@ -2295,23 +2330,23 @@ async function runDiscardedBranchRace(tailMs: number) {
 					{ id: "tail", pipeline: "llm.invoke --model gpt-4o --prompt Tail | json" },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_PROVIDER: "race", LOBSTER_CACHE_DIR: cacheDir },
+			{ race: adapter },
 		);
-		return { result, requests: provider.requests() };
+		assert.equal(slowFinished, finishSlowDuringRun);
+		return { result, requests };
 	} finally {
-		// Let the abandoned branch finish paying before the provider goes away, so the case
-		// measures where its charge lands rather than whether it was ever made.
-		await new Promise((resolve) => setTimeout(resolve, 500));
-		await provider.close();
+		releaseSlow();
+		await slowResponse;
 		await fsp.rm(cacheDir, { recursive: true, force: true });
 	}
 }
 
 test("workflow cost tracking leaves a discarded wait:any branch out of the total", async () => {
 	// The run ends while the losing branch is still waiting on its provider.
-	const ended = await runDiscardedBranchRace(0);
+	const ended = await runDiscardedBranchRace(false);
 	// The run is still going when that branch pays.
-	const running = await runDiscardedBranchRace(700);
+	const running = await runDiscardedBranchRace(true);
 
 	for (const { result, requests } of [ended, running]) {
 		assert.equal(result.status, "ok");

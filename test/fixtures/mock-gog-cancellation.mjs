@@ -17,7 +17,7 @@ function startDescendant() {
 			`const { writeFileSync } = require("node:fs");
 process.once("SIGTERM", () => {});
 writeFileSync(process.env.MOCK_GOG_DESCENDANT_STARTED_FILE, String(process.pid));
-setTimeout(() => writeFileSync(process.env.MOCK_GOG_DESCENDANT_COMPLETED_FILE, "completed"), 650);`,
+setTimeout(() => writeFileSync(process.env.MOCK_GOG_DESCENDANT_COMPLETED_FILE, "completed"), 10000);`,
 		],
 		{ env: process.env, stdio: "ignore" },
 	);
@@ -26,7 +26,7 @@ setTimeout(() => writeFileSync(process.env.MOCK_GOG_DESCENDANT_COMPLETED_FILE, "
 
 function waitForCompletion({ startedFile, terminatedFile, completedFile, output }) {
 	const terminationDelayMs = Number(process.env.MOCK_GOG_TERMINATION_DELAY_MS ?? 0);
-	const completionDelayMs = Number(process.env.MOCK_GOG_COMPLETION_DELAY_MS ?? 1200);
+	const completionDelayMs = Number(process.env.MOCK_GOG_COMPLETION_DELAY_MS ?? 10000);
 	process.once("SIGTERM", () => {
 		mark(terminatedFile, "SIGTERM");
 		setTimeout(() => process.exit(143), terminationDelayMs);

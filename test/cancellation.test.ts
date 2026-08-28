@@ -11,7 +11,7 @@ import {
 	rm,
 	writeFile,
 } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -140,7 +140,7 @@ test(
 			});
 			await waitForFile(groupFile, 5000);
 			await waitForFile(startedFile, 5000);
-			const processGroup = Number(await readFile(groupFile, "utf8"));
+			const processGroup = await waitForPid(groupFile);
 			assert.ok(Number.isInteger(processGroup) && processGroup > 0);
 			process.kill(-processGroup, "SIGINT");
 			await new Promise((resolve) => setTimeout(resolve, 900));
@@ -182,6 +182,39 @@ async function waitForFile(path: string, timeoutMs = 2000) {
 	}
 	throw new Error(`Timed out waiting for ${path}`);
 }
+
+async function waitForPid(path: string, timeoutMs = 5000) {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		try {
+			const text = (await readFile(path, "utf8")).trim();
+			const pid = Number(text);
+			if (/^[1-9]\d*$/.test(text) && Number.isSafeInteger(pid)) return pid;
+		} catch (error: any) {
+			if (error?.code !== "ENOENT") throw error;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(`Timed out waiting for a positive PID in ${path}`);
+}
+
+test("PID markers wait for content instead of interpreting an empty file as process group zero", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "lobster-pid-marker-"));
+	try {
+		const file = join(dir, "pid");
+		await writeFile(file, "");
+		const pending = waitForPid(file);
+		const empty = await observeSettlement(pending, 25);
+		await writeFile(file, "0");
+		const zero = await observeSettlement(pending, 25);
+		await writeFile(file, String(process.pid));
+		assert.equal(await pending, process.pid);
+		assert.equal(empty.settled, false);
+		assert.equal(zero.settled, false);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
 
 async function waitForChildProcess(parentPid: number, timeoutMs = 5000) {
 	const childrenPath = `/proc/${parentPid}/task/${parentPid}/children`;
@@ -267,6 +300,12 @@ async function observeSettlement<T>(promise: Promise<T>, timeoutMs: number) {
 }
 
 function processIsRunning(pid: number) {
+	assert.ok(Number.isSafeInteger(pid) && pid > 0, `Invalid child PID: ${pid}`);
+	if (process.platform === "darwin") {
+		// kill(pid, 0) also succeeds for zombies awaiting reaping on macOS.
+		const result = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+		if (result.stdout?.trim().startsWith("Z")) return false;
+	}
 	try {
 		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
 		const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
@@ -2405,8 +2444,8 @@ test("parent cancellation terminates the gog process tree and skips Gmail sends"
 
 		await waitForFile(searchStarted);
 		await waitForFile(descendantStarted);
-		const childPid = Number(await readFile(searchStarted, "utf8"));
-		const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+		const childPid = await waitForPid(searchStarted);
+		const descendantPid = await waitForPid(descendantStarted);
 		const abortedAt = Date.now();
 		controller.abort();
 		const immediate = await observeSettlement(run, 50);
@@ -2475,7 +2514,7 @@ test("workflow shell cancellation terminates descendant processes", async () => 
 
 		await waitForFile(searchStarted);
 		await waitForFile(descendantStarted);
-		const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+		const descendantPid = await waitForPid(descendantStarted);
 		controller.abort();
 		const immediate = await observeSettlement(run, 50);
 		const envelope = await run;
@@ -2519,7 +2558,7 @@ test("exec cancellation terminates descendant processes", async () => {
 
 		await waitForFile(searchStarted);
 		await waitForFile(descendantStarted);
-		const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+		const descendantPid = await waitForPid(descendantStarted);
 		controller.abort();
 		const envelope = await run;
 
@@ -2662,7 +2701,7 @@ test(
 			);
 			await waitForFile(searchStarted, 5000);
 			await waitForFile(descendantStarted, 5000);
-			const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+			const descendantPid = await waitForPid(descendantStarted);
 			assert.equal(cli.kill("SIGINT"), true);
 			const exited = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
 				(resolve, reject) => {
@@ -2726,7 +2765,7 @@ test(
 			);
 			await waitForFile(searchStarted, 5000);
 			await waitForFile(descendantStarted, 5000);
-			const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+			const descendantPid = await waitForPid(descendantStarted);
 			assert.equal(cli.kill("SIGHUP"), true);
 			const exited = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
 				(resolve, reject) => {
@@ -2793,7 +2832,7 @@ test(
 			);
 			await waitForFile(searchStarted, 5000);
 			await waitForFile(descendantStarted, 5000);
-			descendantPid = Number(await readFile(descendantStarted, "utf8"));
+			descendantPid = await waitForPid(descendantStarted);
 			assert.equal(cli.kill("SIGINT"), true);
 			await waitForFile(searchTerminated, 5000);
 			assert.equal(cli.kill("SIGINT"), true);
@@ -3356,7 +3395,7 @@ test("process-tree escalation survives a short-lived caller", async () => {
 
 		assert.equal(exitCode, 0, "the caller should settle cancellation before it exits");
 		await waitForFile(descendantStarted);
-		const descendantPid = Number(await readFile(descendantStarted, "utf8"));
+		const descendantPid = await waitForPid(descendantStarted);
 		await new Promise((resolve) => setTimeout(resolve, 900));
 		assert.equal(processIsRunning(descendantPid), false);
 		assert.equal(
@@ -3420,7 +3459,7 @@ test("an in-flight gog.gmail.send is terminated and the pipeline halts after can
 		});
 
 		await waitForFile(sendStarted);
-		const childPid = Number(await readFile(sendStarted, "utf8"));
+		const childPid = await waitForPid(sendStarted);
 		controller.abort();
 		const immediate = await observeSettlement(run, 50);
 		const envelope = await run;
@@ -3588,7 +3627,7 @@ test("workflow pipeline terminates an in-flight send and halts under cancellatio
 		});
 
 		await waitForFile(sendStarted);
-		const childPid = Number(await readFile(sendStarted, "utf8"));
+		const childPid = await waitForPid(sendStarted);
 		controller.abort();
 		const immediate = await observeSettlement(run, 50);
 		const envelope = await run;
@@ -3631,7 +3670,7 @@ test("parallel timeout kills in-flight sends without retrying", async () => {
 						id: "send",
 						retry: { max: 2, delay_ms: 0 },
 						parallel: {
-							timeout_ms: 80,
+							timeout_ms: 3000,
 							branches: [
 								{
 									id: "mail",
@@ -3658,12 +3697,12 @@ test("parallel timeout kills in-flight sends without retrying", async () => {
 					MOCK_GOG_SEND_STARTED_FILE: sendStarted,
 					MOCK_GOG_SEND_COMPLETED_FILE: sendCompleted,
 					MOCK_GOG_SEND_INVOCATIONS_FILE: sendInvocations,
-					MOCK_GOG_COMPLETION_DELAY_MS: "300",
+					MOCK_GOG_COMPLETION_DELAY_MS: "30000",
 				},
 			},
 		});
 
-		await waitForFile(sendStarted);
+		await waitForFile(sendStarted, 10000);
 		const result = await run;
 		assert.equal(result.ok, false);
 		assert.match(result.error?.message ?? "", /timed out|timeout|abort|cancel/i);
@@ -3704,7 +3743,7 @@ test("a templated Gmail send pipeline is not retried after timeout", async () =>
 						id: "send",
 						pipeline: "${send_pipeline}",
 						stdin: "$draft.json",
-						timeout_ms: 80,
+						timeout_ms: 3000,
 						retry: { max: 2, delay_ms: 0 },
 					},
 				],
@@ -3723,12 +3762,12 @@ test("a templated Gmail send pipeline is not retried after timeout", async () =>
 					GOG_BIN: mockGog,
 					MOCK_GOG_SEND_STARTED_FILE: sendStarted,
 					MOCK_GOG_SEND_INVOCATIONS_FILE: sendInvocations,
-					MOCK_GOG_COMPLETION_DELAY_MS: "300",
+					MOCK_GOG_COMPLETION_DELAY_MS: "30000",
 				},
 			},
 		});
 
-		await waitForFile(sendStarted);
+		await waitForFile(sendStarted, 10000);
 		const result = await run;
 		assert.equal(result.ok, false);
 		assert.match(result.error?.message ?? "", /timed out|timeout|abort|cancel/i);
@@ -5761,7 +5800,7 @@ test(
 			});
 
 			await waitForFile(started, 15_000);
-			const childPid = Number(await readFile(started, "utf8"));
+			const childPid = await waitForPid(started);
 			controller.abort();
 			const immediate = await observeSettlement(run, 50);
 			const observed = await observeSettlement(run, 500);

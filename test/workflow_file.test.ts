@@ -269,17 +269,21 @@ test("direct workflow resume consumes its capability after cancellation starts a
 		resume: payload,
 		approved: true,
 	});
-	for (let attempt = 0; attempt < 100; attempt++) {
-		try {
-			await fsp.access(effectPath);
-			break;
-		} catch {
-			if (attempt === 99) throw new Error("workflow effect did not start");
-			await new Promise((resolve) => setTimeout(resolve, 10));
+	try {
+		for (let attempt = 0; attempt < 1000; attempt++) {
+			try {
+				await fsp.access(effectPath);
+				break;
+			} catch {
+				if (attempt === 999) throw new Error("workflow effect did not start");
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
 		}
+	} finally {
+		// A startup failure must still cancel and reap the hanging fixture.
+		controller.abort(new Error("cancel after dispatch"));
+		await assert.rejects(() => resumed, /cancel after dispatch/);
 	}
-	controller.abort(new Error("cancel after dispatch"));
-	await assert.rejects(() => resumed, /cancel after dispatch/);
 	assert.equal(await readStateJson({ env, key: payload.stateKey! }), null);
 	const stateFiles = await fsp.readdir(stateDir);
 	assert.equal(
@@ -708,7 +712,7 @@ test("workflow resume consumes its capability after a parallel timeout starts an
 					id: "effect",
 					condition: "$approve.approved",
 					parallel: {
-						timeout_ms: 1500,
+						timeout_ms: 5000,
 						branches: [
 							{
 								id: "side-effect",
