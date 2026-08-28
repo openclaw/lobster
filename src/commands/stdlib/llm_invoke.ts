@@ -1062,7 +1062,6 @@ function resolveAdapter({
 	config: CommandConfig;
 	ctx: any;
 }): Adapter {
-	const signal: AbortSignal | undefined = ctx?.signal;
 	const direct = getDirectAdapter(ctx, provider);
 	if (direct) {
 		const invoke = typeof direct === "function" ? direct : direct.invoke;

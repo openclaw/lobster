@@ -4,6 +4,7 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Refresh development tooling and the `fast-uri` override, align pnpm on 11.24.0, and update GitHub Actions.
 - Honor cancellation and step timeouts in `gog.gmail.send` by terminating the gog process tree the same way `gog.gmail.search` already does.
 - Do not automatically retry a timed-out or failed `gog.gmail.send` step. Killing the local client cannot prove Gmail did not already accept the message.
 - Add first-class `openclaw.agent` workflow turns with configured agent, session, model, thinking, and timeout selection delegated to OpenClaw. Thanks to [@Stoff81](https://github.com/Stoff81) (Issue [#117](https://github.com/openclaw/lobster/issues/117)).
