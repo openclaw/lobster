@@ -267,11 +267,12 @@ async function reclaimOrphanedStateLock(lockPath: string) {
 		throw err;
 	}
 
+	const ownerPath = path.join(lockPath, "owner");
+	let observedOwner: string | undefined;
 	let stale = false;
 	try {
-		const ownerPath = path.join(lockPath, "owner");
-		const ownerText = (await fsp.readFile(ownerPath, "utf8")).trim();
-		const owner = parseStateLockOwner(ownerText);
+		observedOwner = await fsp.readFile(ownerPath, "utf8");
+		const owner = parseStateLockOwner(observedOwner);
 		if (owner && isProcessAlive(owner.pid)) {
 			const processStartIdentity = await readProcessStartIdentity(owner.pid);
 			if (owner.processStartIdentity && processStartIdentity) {
@@ -314,6 +315,14 @@ async function reclaimOrphanedStateLock(lockPath: string) {
 		if (currentLock.dev !== observedLock.dev || currentLock.ino !== observedLock.ino) {
 			return false;
 		}
+		// A replacement directory can reuse the inode; its owner must still match too.
+		let currentOwner: string | undefined;
+		try {
+			currentOwner = await fsp.readFile(ownerPath, "utf8");
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") throw err;
+		}
+		if (currentOwner !== observedOwner) return false;
 		await fsp.rm(lockPath, { recursive: true, force: true });
 	} finally {
 		// If the path changed before the reclamation marker was claimed, leave the

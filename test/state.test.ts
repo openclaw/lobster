@@ -837,20 +837,23 @@ test(
 	},
 );
 
-test("withFileLock does not reclaim a replacement lock after observing a stale one", async () => {
+test("withFileLock does not reclaim a replacement lock when its inode is reused", async () => {
 	const tmp = mkdtempSync(path.join(os.tmpdir(), "lobster-state-lock-replacement-"));
 	const filePath = path.join(tmp, "snapshot.json");
 	const lockPath = `${filePath}.lock`;
 	await fsp.mkdir(lockPath);
-	await fsp.writeFile(path.join(lockPath, "owner"), `${process.pid}:0:stale-owner\n`, "utf8");
+	await fsp.writeFile(path.join(lockPath, "owner"), "2147483647::stale-owner\n", "utf8");
 	const staleAt = new Date(Date.now() - 10_000);
 	await fsp.utimes(lockPath, staleAt, staleAt);
 	await fsp.utimes(path.join(lockPath, "owner"), staleAt, staleAt);
 
 	const originalReadFile = fsp.readFile;
+	const originalLstat = fsp.lstat;
+	const staleLock = await originalLstat(lockPath);
 	let replaced = false;
 	let replacementActive = false;
 	let overlap = false;
+	let original: Promise<void> | undefined;
 	let replacement: Promise<void> | undefined;
 	let releaseReplacement!: () => void;
 	const replacementReleased = new Promise<void>((resolve) => {
@@ -859,6 +862,23 @@ test("withFileLock does not reclaim a replacement lock after observing a stale o
 	let replacementStarted!: () => void;
 	const replacementEntered = new Promise<void>((resolve) => {
 		replacementStarted = resolve;
+	});
+	let markReplacementObserved!: () => void;
+	const replacementObserved = new Promise<void>((resolve) => {
+		markReplacementObserved = resolve;
+	});
+
+	Object.defineProperty(fsp, "lstat", {
+		configurable: true,
+		writable: true,
+		async value(...args: Parameters<typeof fsp.lstat>) {
+			const stat = await originalLstat(...args);
+			if (replaced && String(args[0]) === lockPath) {
+				// Linux can recycle a deleted directory's inode for its replacement.
+				Object.assign(stat, { dev: staleLock.dev, ino: staleLock.ino });
+			}
+			return stat;
+		},
 	});
 
 	Object.defineProperty(fsp, "readFile", {
@@ -882,25 +902,34 @@ test("withFileLock does not reclaim a replacement lock after observing a stale o
 					},
 				});
 				await replacementEntered;
+			} else if (replacementActive && String(filePathArg) === path.join(lockPath, "owner")) {
+				markReplacementObserved();
 			}
 			return result;
 		},
 	});
 
 	try {
-		const original = withFileLock({
+		original = withFileLock({
 			filePath,
 			task: async () => {
 				if (replacementActive) overlap = true;
 			},
 		});
 		await replacementEntered;
-		await new Promise((resolve) => setTimeout(resolve, 25));
+		await Promise.race([original, replacementObserved]);
 		assert.equal(overlap, false, "the stale reclaimer must not enter beside the replacement");
 		releaseReplacement();
 		if (!replacement) throw new Error("replacement lock did not start");
 		await Promise.all([original, replacement]);
 	} finally {
+		releaseReplacement();
+		await Promise.allSettled([original, replacement]);
+		Object.defineProperty(fsp, "lstat", {
+			configurable: true,
+			writable: true,
+			value: originalLstat,
+		});
 		Object.defineProperty(fsp, "readFile", {
 			configurable: true,
 			writable: true,
