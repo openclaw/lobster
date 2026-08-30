@@ -8,7 +8,8 @@ export const workflowsListCommand = {
     sideEffects: [],
   },
   help() {
-    return `workflows.list — list available Lobster workflows\n\nUsage:\n  workflows.list\n\nNotes:\n  - Intended for OpenClaw to discover workflows dynamically.\n`;
+    return `workflows.list — list available Lobster workflows\n\nUsage:\n  workflows.list\n\nNotes:\n  - Intended for OpenClaw to discover workflows dynamically.\n  - Output includes workflow name, description, and agent pipeline metadata.\n`;
+
   },
   async run({ input }) {
     // Drain input.
