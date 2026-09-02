@@ -17,6 +17,7 @@ import {
 } from "../../state/store.js";
 import { createCompileCached } from "../../validation.js";
 import type { LobsterCommand } from "../types.js";
+import { HTTP_RESPONSE_MAX_BYTES, readResponseTextCapped } from "../../read_response_text.js";
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 const compileCachedLocal = createCompileCached(ajv);
@@ -1173,7 +1174,7 @@ async function invokeOpenClawAdapter({
 		}),
 	});
 
-	const text = await res.text();
+	const text = await readResponseTextCapped(res, HTTP_RESPONSE_MAX_BYTES);
 	if (!res.ok) {
 		throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 400)}`);
 	}
@@ -1221,7 +1222,7 @@ async function invokeHttpAdapter({
 		body: JSON.stringify(payload),
 	});
 
-	const text = await res.text();
+	const text = await readResponseTextCapped(res, HTTP_RESPONSE_MAX_BYTES);
 	if (!res.ok) {
 		throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 400)}`);
 	}
