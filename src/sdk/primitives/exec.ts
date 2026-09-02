@@ -9,7 +9,7 @@
  *   .pipe(items => items.filter(e => e.unread))
  */
 
-import { spawn } from "node:child_process";
+import { DEFAULT_MAX_OUTPUT_BYTES, runAbortableProcess } from "../../abortable_process.js";
 import { resolveInlineShellCommand } from "../../shell.js";
 
 /**
@@ -19,40 +19,19 @@ import { resolveInlineShellCommand } from "../../shell.js";
  * @param {Object} options
  * @returns {Promise<{stdout: string, stderr: string}>}
  */
-function runProcess(command, argv, { env, cwd }) {
-	return new Promise<any>((resolve, reject) => {
-		const child = spawn(command, argv, {
-			env,
-			cwd,
-			stdio: ["ignore", "pipe", "pipe"],
-			shell: false,
-		});
-
-		let stdout = "";
-		let stderr = "";
-
-		child.stdout.setEncoding("utf8");
-		child.stderr.setEncoding("utf8");
-
-		child.stdout.on("data", (d) => {
-			stdout += d;
-		});
-		child.stderr.on("data", (d) => {
-			stderr += d;
-		});
-
-		child.on("error", (err) => {
-			reject(new Error(`Failed to execute ${command}: ${err.message}`));
-		});
-
-		child.on("close", (code) => {
-			if (code === 0) {
-				resolve({ stdout, stderr });
-			} else {
-				reject(new Error(`${command} exited with code ${code}: ${stderr.trim() || stdout.trim()}`));
-			}
-		});
+async function runProcess(command, argv, { env, cwd }) {
+	const { stdout, stderr, code } = await runAbortableProcess({
+		command,
+		argv,
+		env,
+		cwd,
+		maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
+		notFoundMessage: `Failed to execute ${command}: spawn ${command} ENOENT`,
 	});
+	if (code === 0) {
+		return { stdout, stderr };
+	}
+	throw new Error(`${command} exited with code ${code}: ${stderr.trim() || stdout.trim()}`);
 }
 
 /**

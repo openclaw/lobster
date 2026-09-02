@@ -1,4 +1,4 @@
-import { runAbortableProcess } from "../../abortable_process.js";
+import { DEFAULT_MAX_OUTPUT_BYTES, runAbortableProcess } from "../../abortable_process.js";
 
 export const execCommand = {
 	name: "exec",
@@ -96,6 +96,7 @@ async function runProcess(command, argv, { env, cwd, stdin, signal, forceTermina
 		stdin,
 		signal,
 		forceTerminationSignal,
+		maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
 		notFoundMessage: `exec command not found: ${command}`,
 	});
 	if (code === 0) return { stdout, stderr };
@@ -110,6 +111,7 @@ function runShellLine(commandLine, { env, cwd, stdin, signal, forceTerminationSi
 		stdin,
 		signal,
 		forceTerminationSignal,
+		maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
 		notFoundMessage: "exec shell not found; check LOBSTER_SHELL or ComSpec",
 	}).then(({ stdout, stderr, code }) => {
 		if (code === 0) return { stdout, stderr };

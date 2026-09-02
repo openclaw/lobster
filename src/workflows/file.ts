@@ -43,7 +43,7 @@ import {
 	validateCommandInputState,
 	type CommandInputState,
 } from "../input_request.js";
-import { runAbortableProcess } from "../abortable_process.js";
+import { DEFAULT_MAX_OUTPUT_BYTES, runAbortableProcess } from "../abortable_process.js";
 
 export type WorkflowFile = {
 	name?: string;
@@ -3557,6 +3557,7 @@ async function runShellCommand({
 		signal,
 		forceTerminationSignal,
 		killSignal,
+		maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
 		notFoundMessage: "workflow shell not found; check LOBSTER_SHELL or ComSpec",
 	});
 	if (code === 0) return { stdout, stderr };
