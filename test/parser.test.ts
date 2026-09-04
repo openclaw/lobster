@@ -43,3 +43,56 @@ test("parsePipeline preserves escaped apostrophes in single-quoted args", () => 
 	const parsed = JSON.parse(raw);
 	assert.equal(parsed.prompt, "don't");
 });
+
+test("parsePipeline parses inline --key=value arguments", () => {
+	const p = parsePipeline("where --field=name --limit=10");
+	assert.equal(p.length, 1);
+	assert.equal(p[0].args["field"], "name");
+	assert.equal(p[0].args["limit"], "10");
+});
+
+test("parsePipeline keeps an empty inline --key= value as an empty string", () => {
+	const p = parsePipeline("cmd --note=");
+	assert.equal(p[0].args["note"], "");
+});
+
+test("parsePipeline treats a trailing --flag as a boolean true", () => {
+	const p = parsePipeline("cmd --verbose");
+	assert.equal(p[0].args["verbose"], true);
+});
+
+test("parsePipeline treats --flag followed by another --flag as boolean", () => {
+	const p = parsePipeline("cmd --dry-run --out file");
+	assert.equal(p[0].args["dry-run"], true);
+	assert.equal(p[0].args["out"], "file");
+});
+
+test("parsePipeline unescapes \\$ and \\` inside double quotes", () => {
+	const p = parsePipeline('echo "\\$HOME \\`id\\`"');
+	assert.deepEqual(p[0].args._, ["$HOME `id`"]);
+});
+
+test("parsePipeline joins a backslash-newline line continuation in double quotes", () => {
+	const p = parsePipeline('echo "line1\\\nline2"');
+	assert.deepEqual(p[0].args._, ["line1line2"]);
+});
+
+test("parsePipeline tolerates a trailing pipe (no empty final stage)", () => {
+	const p = parsePipeline("exec x |");
+	assert.equal(p.length, 1);
+	assert.equal(p[0].name, "exec");
+});
+
+test("parsePipeline throws on an empty or whitespace-only pipeline", () => {
+	assert.throws(() => parsePipeline(""), /Empty pipeline/);
+	assert.throws(() => parsePipeline("   "), /Empty pipeline/);
+});
+
+test("parsePipeline throws on an empty stage between pipes", () => {
+	assert.throws(() => parsePipeline("exec x | | json"), /Empty command stage/);
+});
+
+test("parsePipeline throws on an unclosed single or double quote", () => {
+	assert.throws(() => parsePipeline("exec 'unclosed"), /Unclosed quote/);
+	assert.throws(() => parsePipeline('exec "unclosed'), /Unclosed quote/);
+});
