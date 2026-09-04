@@ -1,3 +1,5 @@
+import { HTTP_RESPONSE_MAX_BYTES, readResponseTextCapped } from "../../read_response_text.js";
+
 function createInvokeCommand(commandName: string) {
 	return {
 		name: commandName,
@@ -105,7 +107,7 @@ function createInvokeCommand(commandName: string) {
 					}),
 				});
 
-				const text = await res.text();
+				const text = await readResponseTextCapped(res, HTTP_RESPONSE_MAX_BYTES);
 				if (!res.ok) {
 					throw new Error(`${commandName} failed (${res.status}): ${text.slice(0, 400)}`);
 				}
