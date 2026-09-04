@@ -1,4 +1,4 @@
-import { runAbortableProcess } from "../../abortable_process.js";
+import { DEFAULT_MAX_OUTPUT_BYTES, runAbortableProcess } from "../../abortable_process.js";
 
 export const gogGmailSearchCommand = {
 	name: "gog.gmail.search",
@@ -57,6 +57,7 @@ export const gogGmailSearchCommand = {
 			cwd: process.cwd(),
 			signal: ctx.signal,
 			forceTerminationSignal: ctx.forceTerminationSignal,
+			maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
 			notFoundMessage: "gog not found on PATH (install: https://github.com/steipete/gogcli)",
 		});
 		if (res.code !== 0) {

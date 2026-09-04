@@ -2,6 +2,7 @@ import { spawn, type ChildProcess, type SpawnOptionsWithoutStdio } from "node:ch
 import { resolveInlineShellCommand } from "./shell.js";
 
 const ABORT_FORCE_KILL_AFTER_MS = 250;
+export const DEFAULT_MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 const forceTerminationCallbacks = new WeakMap<AbortSignal, Set<() => void>>();
 
 type ProcessResult = {

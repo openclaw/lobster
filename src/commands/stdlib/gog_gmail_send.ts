@@ -1,4 +1,4 @@
-import { runAbortableProcess } from "../../abortable_process.js";
+import { DEFAULT_MAX_OUTPUT_BYTES, runAbortableProcess } from "../../abortable_process.js";
 
 type Draft = {
 	to: string;
@@ -84,6 +84,7 @@ export const gogGmailSendCommand = {
 				cwd: process.cwd(),
 				signal: ctx.signal,
 				forceTerminationSignal: ctx.forceTerminationSignal,
+				maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
 				notFoundMessage: "gog not found on PATH (install: https://github.com/steipete/gogcli)",
 			});
 			if (res.code !== 0) {
