@@ -4,19 +4,27 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
-- Prevent automatic workflow retries after dispatching `openclaw.invoke`, `clawd.invoke`, or `openclaw.agent`, avoiding duplicate remote actions after timeouts or failures. Thanks to [@SebTardif](https://github.com/SebTardif) (PR [#153](https://github.com/openclaw/lobster/pull/153)).
+**Highlights:** Run configured OpenClaw agents directly from workflows, stop cancelled work before further side effects, and track LLM spend without charging cached answers again.
 
-- Honor cancellation in `ghPrView()` and both exported GitHub monitor recipes, stopping the GitHub CLI before returning an error. Thanks to [@SebTardif](https://github.com/SebTardif) (PR [#145](https://github.com/openclaw/lobster/pull/145)).
-- Honor SDK cancellation in `exec()` and shell commands, including constructor signals on run, clone, and resume. Thanks to [@SebTardif](https://github.com/SebTardif) (PR [#144](https://github.com/openclaw/lobster/pull/144)).
-- Refresh Node.js type definitions and Oxc tooling, and align development, CI hydration, and release tooling on pnpm 11.25.0.
-- Run Node 24 CI on pull requests and pushes to `main`, checking workflow syntax, frozen dependency installation, build, types, formatting, lint, and tests.
-- Preserve a replacement state lock when the filesystem reuses the stale lock's inode, preventing overlapping state writers.
-- Refresh development tooling and the `fast-uri` override, align pnpm on 11.24.0, and update GitHub Actions.
-- Honor cancellation and step timeouts in `gog.gmail.send` by terminating the gog process tree the same way `gog.gmail.search` already does.
-- Do not automatically retry a timed-out or failed `gog.gmail.send` step. Killing the local client cannot prove Gmail did not already accept the message.
 - Add first-class `openclaw.agent` workflow turns with configured agent, session, model, thinking, and timeout selection delegated to OpenClaw. Thanks to [@Stoff81](https://github.com/Stoff81) (Issue [#117](https://github.com/openclaw/lobster/issues/117)).
-
-- Update the `fast-uri` dependency override to 4.1.4 and align development, CI hydration, and release tooling on pnpm 12.3.1.
+- Prevent automatic workflow retries after dispatching `openclaw.invoke`, `clawd.invoke`, or `openclaw.agent`, avoiding duplicate remote actions after timeouts or failures, including requests carrying the gateway's currently ignored `dryRun` flag. Thanks to [@SebTardif](https://github.com/SebTardif) (PR [#153](https://github.com/openclaw/lobster/pull/153)).
+- Stop cancelled CLI, tool-runtime, and SDK workflows before later commands or side effects; interrupt prompts and stalled streams, terminate child process trees, and prevent replay of approval/input resumes after an effect starts. Thanks to [@zhangguiping-xydt](https://github.com/zhangguiping-xydt) (PR [#119](https://github.com/openclaw/lobster/pull/119)).
+- Honor SDK cancellation in `exec()` and shell commands, including constructor signals on run, clone, and resume. Thanks to [@SebTardif](https://github.com/SebTardif) (PR [#144](https://github.com/openclaw/lobster/pull/144)).
+- Honor cancellation in `ghPrView()` and both exported GitHub monitor recipes, stopping the GitHub CLI before returning an error without saving a cancelled snapshot. Thanks to [@SebTardif](https://github.com/SebTardif) (PR [#145](https://github.com/openclaw/lobster/pull/145)).
+- Cancel timed-out `gog.gmail.send` process trees and suppress automatic retries after dispatch because termination cannot prove Gmail did not accept the message. Thanks to [@SebTardif](https://github.com/SebTardif) (PR [#136](https://github.com/openclaw/lobster/pull/136)).
+- Honor LLM step timeouts and cancellation across adapter calls, cached results, and persistence; stop waiting even when a host adapter ignores its abort signal. Thanks to [@Yigtwxx](https://github.com/Yigtwxx) (PR [#132](https://github.com/openclaw/lobster/pull/132)).
+- Count each model call once across cached answers, pipeline projections, sub-workflows, and resumes; preserve accumulated spend across approval/input pauses so `cost_limit` covers the whole run. Thanks to [@Yigtwxx](https://github.com/Yigtwxx) (PR [#134](https://github.com/openclaw/lobster/pull/134)).
+- Include temperature and maximum output tokens in LLM cache identity so changing generation settings does not return stale answers. Thanks to [@Yigtwxx](https://github.com/Yigtwxx) (PR [#130](https://github.com/openclaw/lobster/pull/130)).
+- Enforce `--max-validation-retries` as the number of extra model calls after the first, avoiding an additional billed call on schema failures. Thanks to [@Yigtwxx](https://github.com/Yigtwxx) (PR [#128](https://github.com/openclaw/lobster/pull/128)).
+- Serialize state updates and roll back cancelled cache/snapshot publications; preserve a replacement state lock when the filesystem reuses a stale lock's inode.
+- Create cache and state directory chains correctly on Windows. Thanks to [@Yigtwxx](https://github.com/Yigtwxx) (PR [#126](https://github.com/openclaw/lobster/pull/126)).
+- Handle subprocess stdin closing early without crashing workflow execution with `EPIPE`. Thanks to [@kesslerio](https://github.com/kesslerio) (PR [#122](https://github.com/openclaw/lobster/pull/122)).
+- Keep direct executable arguments separate from explicit shell commands, preserving literal shell metacharacters in direct calls. Thanks to [@vincentkoc](https://github.com/vincentkoc) (PRs [#139](https://github.com/openclaw/lobster/pull/139), [#141](https://github.com/openclaw/lobster/pull/141)).
+- Contain prototype-named workflow arguments and step IDs, preserve argument environment names, and escape Mermaid graph labels. Thanks to [@vincentkoc](https://github.com/vincentkoc) (PR [#140](https://github.com/openclaw/lobster/pull/140)).
+- Normalize long state keys without expensive regular-expression backtracking. Thanks to [@vincentkoc](https://github.com/vincentkoc) (PR [#138](https://github.com/openclaw/lobster/pull/138)).
+- Resolve invocation shims relative to the installed package, reject non-HTTP invocation URLs, and require an explicit token before sending gateway credentials to a remote endpoint. Thanks to [@vincentkoc](https://github.com/vincentkoc).
+- Refresh TypeScript, Node.js types, and Oxc tooling; align development and CI on pnpm 11.25.0, retain the two-day dependency release-age policy, and update the `fast-uri` override to 4.1.4.
+- Run Node 24 CI on pull requests and pushes to `main`, checking workflow syntax, frozen dependency installation, build, types, formatting, lint, and tests; strengthen parser/filter coverage and cancellation-test readiness.
 
 ## 2026.6.11
 
