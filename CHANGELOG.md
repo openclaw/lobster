@@ -14,7 +14,7 @@ All notable changes to Lobster will be documented in this file.
 - Do not automatically retry a timed-out or failed `gog.gmail.send` step. Killing the local client cannot prove Gmail did not already accept the message.
 - Add first-class `openclaw.agent` workflow turns with configured agent, session, model, thinking, and timeout selection delegated to OpenClaw. Thanks to [@Stoff81](https://github.com/Stoff81) (Issue [#117](https://github.com/openclaw/lobster/issues/117)).
 
-- Update the `fast-uri` dependency override to 4.1.4.
+- Update the `fast-uri` dependency override to 4.1.4 and align development, CI hydration, and release tooling on pnpm 12.3.1.
 
 ## 2026.6.11
 
