@@ -23,7 +23,7 @@ All notable changes to Lobster will be documented in this file.
 - Contain prototype-named workflow arguments and step IDs, preserve argument environment names, and escape Mermaid graph labels. Thanks to [@vincentkoc](https://github.com/vincentkoc) (PR [#140](https://github.com/openclaw/lobster/pull/140)).
 - Normalize long state keys without expensive regular-expression backtracking. Thanks to [@vincentkoc](https://github.com/vincentkoc) (PR [#138](https://github.com/openclaw/lobster/pull/138)).
 - Resolve invocation shims relative to the installed package, reject non-HTTP invocation URLs, and require an explicit token before sending gateway credentials to a remote endpoint. Thanks to [@vincentkoc](https://github.com/vincentkoc).
-- Refresh TypeScript, Node.js types, and Oxc tooling; align development and CI on pnpm 11.25.0, retain the two-day dependency release-age policy, and update the `fast-uri` override to 4.1.4.
+- Refresh TypeScript, Node.js types, and Oxc tooling; align development and CI on pnpm 12.3.1, retain the two-day dependency release-age policy, and update the `fast-uri` override to 4.1.4.
 - Run Node 24 CI on pull requests and pushes to `main`, checking workflow syntax, frozen dependency installation, build, types, formatting, lint, and tests; strengthen parser/filter coverage and cancellation-test readiness.
 
 ## 2026.6.11
