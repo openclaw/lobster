@@ -89,6 +89,7 @@ function createInvokeCommand(commandName: string) {
 			const dryRun = args.dryRun ?? args["dry-run"] ?? null;
 
 			const invokeOnce = async (argsValue: unknown) => {
+				ctx.onNonRetryableSideEffect?.();
 				const res = await fetch(endpoint, {
 					method: "POST",
 					signal: ctx.signal,

@@ -89,6 +89,7 @@ export function createOpenClawAgentCommand(
 
 			const env = (ctx?.env ?? process.env) as NodeJS.ProcessEnv;
 			const executable = optionalString(env.LOBSTER_OPENCLAW_BIN) ?? "openclaw";
+			ctx.onNonRetryableSideEffect?.();
 			const response = await runCli({
 				executable,
 				argv,
