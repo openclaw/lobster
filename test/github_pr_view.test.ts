@@ -1,8 +1,9 @@
 import test from "node:test";
+import { waitForPid } from "./helpers/wait_for_pid.js";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { spawnSync } from "node:child_process";
-import { access, chmod, copyFile, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { access, chmod, copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,19 +16,6 @@ const __dirname = dirname(__filename);
 
 function emptyInput() {
 	return (async function* () {})();
-}
-
-async function waitForFile(path: string, timeoutMs = 5000) {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		try {
-			await access(path);
-			return;
-		} catch {
-			await new Promise((resolve) => setTimeout(resolve, 10));
-		}
-	}
-	throw new Error(`Timed out waiting for ${path}`);
 }
 
 async function fileExists(path: string) {
@@ -94,8 +82,7 @@ test(
 				},
 			});
 
-			await waitForFile(started);
-			const pid = Number((await readFile(started, "utf8")).trim());
+			const pid = await waitForPid(started);
 			assert.equal(processIsRunning(pid), true);
 			controller.abort(new Error("abort stuck gh pr view"));
 			await assert.rejects(() => pending, /abort stuck gh pr view/);
@@ -139,8 +126,7 @@ test(
 				.pipe(ghPrView({ repo: "openclaw/lobster", pr: 1 }))
 				.run();
 
-			await waitForFile(started);
-			const pid = Number((await readFile(started, "utf8")).trim());
+			const pid = await waitForPid(started);
 			assert.equal(processIsRunning(pid), true);
 			controller.abort(new Error("abort public lobster gh pr view"));
 			const result = await pending;
@@ -184,8 +170,7 @@ for (const recipe of [prMonitor, prMonitorNotify]) {
 					MOCK_GH_COMPLETION_DELAY_MS: "5000",
 				});
 				pending = recipe({ repo: "example/repo", pr: 1, signal: controller.signal }).run();
-				await waitForFile(started);
-				const pid = Number((await readFile(started, "utf8")).trim());
+				const pid = await waitForPid(started);
 				controller.abort(new Error(`cancel ${recipe.name}`));
 				const result = await pending;
 				assert.equal(result.ok, false);

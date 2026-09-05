@@ -1,8 +1,9 @@
 import test from "node:test";
+import { waitForPid } from "./helpers/wait_for_pid.js";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { spawnSync } from "node:child_process";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,19 +25,6 @@ function longChildCommand() {
 		"setTimeout(() => {}, 30000);",
 	].join("");
 	return `${quote(process.execPath)} -e ${quote(script)}`;
-}
-
-async function waitForFile(path: string, timeoutMs = 5000) {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		try {
-			await access(path);
-			return;
-		} catch {
-			await new Promise((resolve) => setTimeout(resolve, 10));
-		}
-	}
-	throw new Error(`Timed out waiting for ${path}`);
 }
 
 function processIsRunning(pid: number) {
@@ -83,8 +71,7 @@ test("sdk exec abort signal kills a long-running child", async () => {
 			controller.signal,
 			dir,
 		);
-		await waitForFile(pidFile);
-		const pid = Number((await readFile(pidFile, "utf8")).trim());
+		const pid = await waitForPid(pidFile);
 		assert.equal(processIsRunning(pid), true);
 		controller.abort(new Error("abort long exec"));
 		await assert.rejects(() => pending, /abort long exec/);
@@ -104,8 +91,7 @@ test("sdk shell abort signal kills a long-running child", async () => {
 			controller.signal,
 			dir,
 		);
-		await waitForFile(pidFile);
-		const pid = Number((await readFile(pidFile, "utf8")).trim());
+		const pid = await waitForPid(pidFile);
 		assert.equal(processIsRunning(pid), true);
 		controller.abort(new Error("abort long shell"));
 		await assert.rejects(() => pending, /abort long shell/);
@@ -126,8 +112,7 @@ test("public Lobster pipe run forwards constructor abort signal", async () => {
 		})
 			.pipe(exec(longChildCommand(), { json: false }))
 			.run();
-		await waitForFile(pidFile);
-		const pid = Number((await readFile(pidFile, "utf8")).trim());
+		const pid = await waitForPid(pidFile);
 		assert.equal(processIsRunning(pid), true);
 		controller.abort(new Error("abort public lobster"));
 		const result = await pending;
@@ -159,8 +144,7 @@ for (const entry of ["clone", "resume"] as const) {
 			} else {
 				pending = workflow.clone().run();
 			}
-			await waitForFile(pidFile);
-			const pid = Number((await readFile(pidFile, "utf8")).trim());
+			const pid = await waitForPid(pidFile);
 			controller.abort(new Error(`cancel ${entry}`));
 			const result = await pending;
 			assert.equal(result.ok, false);
