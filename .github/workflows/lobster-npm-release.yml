@@ -561,9 +561,23 @@ jobs:
           printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$HOME/.npmrc"
           npm whoami >/dev/null
           npm dist-tag add "${PACKAGE_NAME}@${RELEASE_VERSION}" latest
-          promoted_latest="$(npm view "${PACKAGE_NAME}" dist-tags.latest)"
-          if [[ "${promoted_latest}" != "${RELEASE_VERSION}" ]]; then
-            echo "npm latest points at ${promoted_latest}, expected ${RELEASE_VERSION} after promotion." >&2
-            exit 1
-          fi
+
+          # The registry can lag behind a successful dist-tag write, so poll the
+          # read-back with backoff (about two minutes total) before failing.
+          max_attempts=10
+          promoted_latest=""
+          for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+            promoted_latest="$(npm view "${PACKAGE_NAME}" dist-tags.latest 2>/dev/null || true)"
+            if [[ "${promoted_latest}" == "${RELEASE_VERSION}" ]]; then
+              break
+            fi
+            if (( attempt == max_attempts )); then
+              echo "npm latest points at ${promoted_latest:-<unavailable>}, expected ${RELEASE_VERSION} after promotion (${max_attempts} attempts)." >&2
+              exit 1
+            fi
+            delay=$(( attempt * 3 ))
+            (( delay > 20 )) && delay=20
+            echo "npm latest still reports ${promoted_latest:-<unavailable>} (attempt ${attempt}/${max_attempts}); retrying in ${delay}s."
+            sleep "${delay}"
+          done
           echo "Promoted ${PACKAGE_NAME}@${RELEASE_VERSION} from beta to latest."

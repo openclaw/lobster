@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Retry the npm `latest` dist-tag read-back with backoff after promoting a beta release, so registry propagation delay no longer fails a promotion that already succeeded.
+
 ## 2026.9.5
 
 **Highlights:** Run configured OpenClaw agents directly from workflows, stop cancelled work before further side effects, and track LLM spend without charging cached answers again.
