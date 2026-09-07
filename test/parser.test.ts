@@ -67,6 +67,25 @@ test("parsePipeline treats --flag followed by another --flag as boolean", () => 
 	assert.equal(p[0].args["out"], "file");
 });
 
+test("parsePipeline keeps the command after exec --json", () => {
+	for (const command of ["cat rows.json", "'echo [1,2,3]'"]) {
+		const stage = parsePipeline(`exec --json ${command}`)[0];
+		assert.equal(stage.args["json"], true);
+		assert.deepEqual(
+			stage.args._,
+			command.startsWith("'") ? ["echo [1,2,3]"] : ["cat", "rows.json"],
+		);
+	}
+});
+
+test("parsePipeline preserves value-taking options beside exec --json", () => {
+	const stage = parsePipeline("exec --stdin json --json cat")[0];
+	assert.equal(stage.args["stdin"], "json");
+	assert.equal(stage.args["json"], true);
+	assert.deepEqual(stage.args._, ["cat"]);
+	assert.equal(parsePipeline("custom --json payload")[0].args["json"], "payload");
+});
+
 test("parsePipeline unescapes \\$ and \\` inside double quotes", () => {
 	const p = parsePipeline('echo "\\$HOME \\`id\\`"');
 	assert.deepEqual(p[0].args._, ["$HOME `id`"]);

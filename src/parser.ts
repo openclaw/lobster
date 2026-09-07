@@ -118,7 +118,7 @@ function tokenizeCommand(input) {
 	return tokens;
 }
 
-function parseArgs(tokens) {
+function parseArgs(tokens, booleanFlags: readonly string[] = []) {
 	const args = { _: [] };
 
 	for (let i = 0; i < tokens.length; i++) {
@@ -135,7 +135,7 @@ function parseArgs(tokens) {
 
 			const key = tok.slice(2);
 			const next = tokens[i + 1];
-			if (!next || next.startsWith("--")) {
+			if (booleanFlags.includes(key) || !next || next.startsWith("--")) {
 				args[key] = true;
 				continue;
 			}
@@ -158,7 +158,8 @@ export function parsePipeline(input) {
 		const tokens = tokenizeCommand(stage);
 		if (tokens.length === 0) throw new Error("Empty command stage");
 		const name = tokens[0];
-		const args = parseArgs(tokens.slice(1));
+		// exec's JSON switch must not consume the child executable as its value.
+		const args = parseArgs(tokens.slice(1), name === "exec" ? ["json"] : []);
 		return { name, args, raw: stage };
 	});
 }

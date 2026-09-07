@@ -191,6 +191,7 @@ conventional interrupt exit status.
 ## Commands
 
 - `exec`: run OS commands
+- `exec --json <command...>`: parse subprocess stdout as JSON before the next stage
 - `exec --stdin raw|json|jsonl`: feed pipeline input into subprocess stdin
 - `where`, `pick`, `head`: data shaping
 - `json`, `table`: renderers
