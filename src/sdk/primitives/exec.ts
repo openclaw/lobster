@@ -10,36 +10,12 @@
  */
 
 import { runAbortableProcess } from "../../abortable_process.js";
-import { resolveInlineShellCommand } from "../../shell.js";
-
-/**
- * Run a process and capture output
- * @param {string} command
- * @param {string[]} argv
- * @param {Object} options
- * @returns {Promise<{stdout: string, stderr: string}>}
- */
-async function runProcess(command, argv, { env, cwd, signal, forceTerminationSignal }) {
-	const { stdout, stderr, code } = await runAbortableProcess({
-		command,
-		argv,
-		env,
-		cwd,
-		signal,
-		forceTerminationSignal,
-		notFoundMessage: `Failed to execute ${command}: spawn ${command} ENOENT`,
-	});
-	if (code === 0) {
-		return { stdout, stderr };
-	}
-	throw new Error(`${command} exited with code ${code}: ${stderr.trim() || stdout.trim()}`);
-}
 
 /**
  * Parse a shell command string into command and arguments
  * Simple parsing - for complex cases, use options.shell
  * @param {string} cmdString
- * @returns {{command: string, args: string[]}}
+ * @returns {{command: string, argv: string[]}}
  */
 function parseCommand(cmdString) {
 	const tokens = [];
@@ -83,8 +59,8 @@ function parseCommand(cmdString) {
 		tokens.push(current);
 	}
 
-	const [command, ...args] = tokens;
-	return { command, args };
+	const [command, ...argv] = tokens;
+	return { command, argv };
 }
 
 /**
@@ -113,26 +89,20 @@ export function exec(cmdString, options: any = {}) {
 			}
 
 			const env = ctx.env ?? process.env;
-
-			let stdout;
-
-			const processOptions = {
+			const invocation = useShell ? { shellCommand: cmdString } : parseCommand(cmdString);
+			const command = "command" in invocation ? invocation.command : cmdString;
+			const { stdout, stderr, code } = await runAbortableProcess({
+				...invocation,
 				env,
 				cwd,
 				signal: ctx.signal,
 				forceTerminationSignal: ctx.forceTerminationSignal,
-			};
-
-			if (useShell) {
-				// Shell execution
-				const shell = resolveInlineShellCommand({ command: cmdString, env });
-				const result = await runProcess(shell.command, shell.argv, processOptions);
-				stdout = result.stdout;
-			} else {
-				// Direct execution
-				const { command, args } = parseCommand(cmdString);
-				const result = await runProcess(command, args, processOptions);
-				stdout = result.stdout;
+				notFoundMessage: useShell
+					? "exec shell not found; check LOBSTER_SHELL or ComSpec"
+					: `Failed to execute ${command}: spawn ${command} ENOENT`,
+			});
+			if (code !== 0) {
+				throw new Error(`${command} exited with code ${code}: ${stderr.trim() || stdout.trim()}`);
 			}
 
 			// Parse output

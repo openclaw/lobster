@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { Lobster, exec } from "../src/sdk/index.js";
 import { runAbortableProcess } from "../src/abortable_process.js";
 import { waitForPid } from "./helpers/wait_for_pid.js";
+import { nodeShellFixture } from "./helpers/node_shell_fixture.js";
 
 const run = promisify(execFile);
 const large = 10 * 1024 * 1024 + 1;
@@ -123,12 +124,11 @@ for (const mode of ["overflow", "interrupt", "host-handler", "once-handler", "ho
 			let wrapper: ReturnType<typeof spawn> | undefined;
 			let pid: number | undefined;
 			try {
-				const producer = path.join(dir, "producer.cjs"),
-					runner = path.join(dir, "runner.mjs");
+				const runner = path.join(dir, "runner.mjs");
 				const marker = path.join(dir, "pid"),
 					received = path.join(dir, "signal");
-				await writeFile(
-					producer,
+				const fixture = await nodeShellFixture(
+					dir,
 					`const fs=require('node:fs');
 process.on('SIGTERM',()=>{});
 process.on('SIGINT',()=>fs.writeFileSync(${quote(received)}, 'SIGINT'));
@@ -141,10 +141,11 @@ setInterval(()=>{${mode === "overflow" ? "process.stdout.write('x'.repeat(2048))
 ${mode === "host-handler" || mode === "once-handler" ? `process.${mode === "once-handler" ? "once" : "on"}('SIGINT',()=>console.log('host handled SIGINT'));` : ""}
 ${mode === "host-exit" ? "process.on('SIGUSR2',()=>process.exit(0));" : ""}
 const result=await new Lobster({env:{...process.env,LOBSTER_MAX_OUTPUT_BYTES:'1024'}})
-.pipe(exec(${quote(`${quote(process.execPath)} ${quote(producer)} & wait`)},{shell:true,json:false})).run();
+.pipe(exec(${quote(`${fixture.command} & wait`)},{shell:true,json:false})).run();
 console.log(JSON.stringify(result));`,
 				);
 				wrapper = spawn(process.execPath, [runner], {
+					env: { ...process.env, ...fixture.env },
 					detached: true,
 					stdio: ["ignore", "pipe", "pipe"],
 				});

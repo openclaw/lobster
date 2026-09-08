@@ -1,9 +1,10 @@
 import test from "node:test";
 import { waitForPid } from "./helpers/wait_for_pid.js";
+import { nodeShellFixture } from "./helpers/node_shell_fixture.js";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { spawnSync } from "node:child_process";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,13 +20,11 @@ function quote(value: string) {
 	return JSON.stringify(value);
 }
 
-function longChildCommand() {
-	const script = [
-		'require("node:fs").writeFileSync(process.env.LOBSTER_EXEC_PID_FILE, String(process.pid));',
-		"setTimeout(() => {}, 30000);",
-	].join("");
-	return `${quote(process.execPath)} -e ${quote(script)}`;
-}
+const longChildScript = [
+	'require("node:fs").writeFileSync(process.env.LOBSTER_EXEC_PID_FILE, String(process.pid));',
+	"setTimeout(() => {}, 30000);",
+].join("");
+const longChildCommand = () => `${quote(process.execPath)} -e ${quote(longChildScript)}`;
 
 function processIsRunning(pid: number) {
 	assert.ok(Number.isSafeInteger(pid) && pid > 0, `Invalid child PID: ${pid}`);
@@ -50,11 +49,16 @@ async function waitUntilStopped(pid: number, timeoutMs = 2000) {
 	throw new Error(`Child ${pid} was still running after abort`);
 }
 
-async function runAbortableStage(stage: ReturnType<typeof exec>, signal: AbortSignal, cwd: string) {
+async function runAbortableStage(
+	stage: ReturnType<typeof exec>,
+	signal: AbortSignal,
+	cwd: string,
+	env: NodeJS.ProcessEnv = {},
+) {
 	return stage.run({
 		input: emptyInput(),
 		ctx: {
-			env: { ...process.env, LOBSTER_EXEC_PID_FILE: join(cwd, "pid") },
+			env: { ...process.env, ...env, LOBSTER_EXEC_PID_FILE: join(cwd, "pid") },
 			cwd,
 			signal,
 		},
@@ -86,10 +90,12 @@ test("sdk shell abort signal kills a long-running child", async () => {
 	try {
 		const pidFile = join(dir, "pid");
 		const controller = new AbortController();
+		const fixture = await nodeShellFixture(dir, longChildScript);
 		const pending = runAbortableStage(
-			shell(longChildCommand(), { json: false }),
+			shell(fixture.command, { json: false }),
 			controller.signal,
 			dir,
+			fixture.env,
 		);
 		const pid = await waitForPid(pidFile);
 		assert.equal(processIsRunning(pid), true);
@@ -131,12 +137,13 @@ for (const entry of ["clone", "resume"] as const) {
 		let pending: Promise<any> | undefined;
 		try {
 			const pidFile = join(dir, "pid");
+			const fixture = await nodeShellFixture(dir, longChildScript);
 			const workflow = new Lobster({
-				env: { ...process.env, LOBSTER_EXEC_PID_FILE: pidFile },
+				env: { ...process.env, ...fixture.env, LOBSTER_EXEC_PID_FILE: pidFile },
 				signal: controller.signal,
 			});
 			if (entry === "resume") workflow.pipe(approve());
-			workflow.pipe(exec(longChildCommand(), { shell: true, json: false }));
+			workflow.pipe(exec(fixture.command, { shell: true, json: false }));
 			if (entry === "resume") {
 				const first = await workflow.run();
 				assert.equal(first.status, "needs_approval");
@@ -178,22 +185,76 @@ test("pre-aborted SDK exec never starts a child", async () => {
 	}
 });
 
-test("SDK exec preserves output and failure handling and releases abort listeners", async () => {
-	const controller = new AbortController();
-	const run = (command: string) =>
-		new Lobster({ signal: controller.signal }).pipe(exec(command)).run();
-	const success = await run(`${quote(process.execPath)} -e ${quote('console.log("[1,2]")')}`);
-	assert.deepEqual(success.output, [1, 2]);
-	const failed = await run(
-		`${quote(process.execPath)} -e ${quote('console.error("failed");process.exit(7)')}`,
-	);
-	assert.equal(failed.ok, false);
-	assert.match(failed.error.message, /exited with code 7: failed/);
-	const missing = await run("lobster-nonexistent-executable-for-test");
-	assert.equal(missing.ok, false);
-	assert.match(missing.error.message, /Failed to execute .* ENOENT/);
-	assert.equal(getEventListeners(controller.signal, "abort").length, 0);
-});
+for (const useShell of [false, true]) {
+	test(`SDK ${useShell ? "shell" : "exec"} preserves output, failures, and listener cleanup`, async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-sdk-result-"));
+		const controller = new AbortController();
+		try {
+			const run = async (script: string) => {
+				const fixture = useShell ? await nodeShellFixture(dir, script) : undefined;
+				return new Lobster({
+					env: { ...process.env, ...fixture?.env },
+					signal: controller.signal,
+				})
+					.pipe(
+						exec(fixture?.command ?? `${quote(process.execPath)} -e ${quote(script)}`, {
+							shell: useShell,
+						}),
+					)
+					.run();
+			};
+			const success = await run('console.log("[1,2]")');
+			assert.deepEqual(success.output, [1, 2]);
+			const failed = await run('console.error("failed");process.exit(7)');
+			assert.equal(failed.ok, false);
+			assert.match(failed.error.message, /exited with code 7: failed/);
+			const missing = await new Lobster({
+				env: { ...process.env, LOBSTER_SHELL: "lobster-nonexistent-executable-for-test" },
+				signal: controller.signal,
+			})
+				.pipe(exec("lobster-nonexistent-executable-for-test", { shell: useShell }))
+				.run();
+			assert.equal(missing.ok, false);
+			assert.match(
+				missing.error.message,
+				useShell
+					? /exec shell not found; check LOBSTER_SHELL or ComSpec/
+					: /Failed to execute .* ENOENT/,
+			);
+			assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+}
+
+test(
+	"SDK shell fixtures preserve literal $() in executable and script paths",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const dir = await mkdtemp(join(tmpdir(), "lobster-sdk-shell-path-"));
+		try {
+			const fixtureDir = join(dir, "script $(touch marker)");
+			await mkdir(fixtureDir);
+			const executable = join(dir, "node $(touch marker)");
+			await symlink(process.execPath, executable);
+			const fixture = await nodeShellFixture(
+				fixtureDir,
+				"console.log(JSON.stringify([__filename]));",
+			);
+			const result = await new Lobster({
+				env: { ...process.env, ...fixture.env, LOBSTER_TEST_NODE: executable },
+			})
+				.pipe(shell(fixture.command, { cwd: dir }))
+				.run();
+			assert.equal(result.ok, true);
+			assert.deepEqual(result.output, [await realpath(fixture.env.LOBSTER_TEST_SCRIPT)]);
+			await assert.rejects(access(join(dir, "marker")), { code: "ENOENT" });
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	},
+);
 
 test("exported SDK runPipeline keeps signal optional and forwards supplied signals", async () => {
 	const controller = new AbortController();
