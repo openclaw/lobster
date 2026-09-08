@@ -4,6 +4,11 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+**Highlights:** Workflow loops honor their execution policies, and paid LLM calls cannot hide from budget checks when a later pipeline command fails.
+
+- Honor `timeout_ms`, `retry`, and `on_error` on `for_each` steps, including pipeline children and batch pauses; document whole-loop replay and show policies in dry runs. Thanks @SebTardif (PR [#160](https://github.com/openclaw/lobster/pull/160)).
+- Stop retries and error recovery after a `cost_limit` stop, including paid LLM usage discarded by a failed pipeline, preventing additional over-budget calls. Thanks @SebTardif (PR [#160](https://github.com/openclaw/lobster/pull/160)).
+
 ## 2026.9.7 - 2026-09-07
 
 **Highlights:** Direct `exec --json` commands now preserve their executable, alongside more reliable npm release promotion.
