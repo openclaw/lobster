@@ -2,13 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { writeStateJson } from "../src/state/store.js";
 import { loadPipelineResumeState, type PipelineResumeState } from "../src/pipeline_resume_state.js";
-
-function stateDir() {
-	return { LOBSTER_STATE_DIR: mkdtempSync(path.join(os.tmpdir(), "lobster-pipeline-resume-")) };
-}
 
 function validApprovalState(): PipelineResumeState {
 	return {
@@ -22,9 +18,14 @@ function validApprovalState(): PipelineResumeState {
 }
 
 async function loadStored(value: unknown) {
-	const env = stateDir();
-	await writeStateJson({ env, key: "resume", value });
-	return loadPipelineResumeState(env, "resume");
+	const dir = await mkdtemp(path.join(os.tmpdir(), "lobster-pipeline-resume-"));
+	const env = { LOBSTER_STATE_DIR: dir };
+	try {
+		await writeStateJson({ env, key: "resume", value });
+		return await loadPipelineResumeState(env, "resume");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 }
 
 test("loadPipelineResumeState rejects a pipeline stage without a name", async () => {
