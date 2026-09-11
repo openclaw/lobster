@@ -2,7 +2,7 @@
 
 All notable changes to Lobster will be documented in this file.
 
-## Unreleased
+## 2026.9.11 - 2026-09-11
 
 **Highlights:** SDK shell commands share Lobster's process handling and report missing-shell configuration clearly.
 

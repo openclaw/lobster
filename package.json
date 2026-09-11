@@ -1,6 +1,6 @@
 {
 	"name": "@clawdbot/lobster",
-	"version": "2026.9.8",
+	"version": "2026.9.11",
 	"description": "Workflow runtime for AI agents - deterministic pipelines with approval gates",
 	"keywords": [
 		"ai-agent",
