@@ -4,6 +4,13 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+**Highlights:** SDK shell commands share Lobster's process handling and report missing-shell configuration clearly.
+
+- Route SDK shell execution through the shared shell-command boundary, preserving direct argument handling, cancellation, and output limits while improving missing-shell errors; thanks @vincentkoc (PR [#162](https://github.com/openclaw/lobster/pull/162)).
+- Refresh Node.js types and Oxc tooling, and align development, CI, and release tooling on pnpm 12.4.0 while retaining the two-day dependency release-age policy.
+- Restore Crabbox Linux validation startup by matching the root disk size to the current runner image's 400 GB minimum.
+- Cover malformed saved pipeline states with ten focused rejection tests and clean up their temporary state directories; thanks @KrasimirKralev (PR [#164](https://github.com/openclaw/lobster/pull/164)).
+
 ## 2026.9.8 - 2026-09-07
 
 **Highlights:** Workflow loops honor their execution policies, and paid LLM calls cannot hide from budget checks when a later pipeline command fails.
