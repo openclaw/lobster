@@ -1,18 +1,9 @@
-function getByPath(obj: any, path: string): any {
-	if (path === "." || path === "this") return obj;
-	const parts = path.split(".").filter(Boolean);
-	let cur: any = obj;
-	for (const p of parts) {
-		if (cur == null) return undefined;
-		cur = cur[p];
-	}
-	return cur;
-}
+import { getByPath } from "../../core/value_path.js";
 
 function renderTemplate(tpl: string, ctx: any): string {
 	return tpl.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, expr) => {
 		const key = String(expr ?? "").trim();
-		const val = getByPath(ctx, key);
+		const val = key === "." || key === "this" ? ctx : getByPath(ctx, key);
 		if (val === undefined || val === null) return "";
 		if (typeof val === "string") return val;
 		return JSON.stringify(val);

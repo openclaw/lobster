@@ -1,23 +1,12 @@
-function getByPath(obj: any, path: string): any {
-	if (!path) return undefined;
-	const parts = path.split(".").filter(Boolean);
-	let cur: any = obj;
-	for (const p of parts) {
-		if (cur == null) return undefined;
-		cur = cur[p];
-	}
-	return cur;
-}
+import { getByPath } from "../../core/value_path.js";
 
-function defaultCompare(a: any, b: any): number {
-	// Treat undefined/null as last
+function defaultCompare(a: unknown, b: unknown): number {
 	const aU = a === undefined || a === null;
 	const bU = b === undefined || b === null;
 	if (aU && bU) return 0;
 	if (aU) return 1;
 	if (bU) return -1;
 
-	// number compare if both numbers
 	if (typeof a === "number" && typeof b === "number") return a - b;
 
 	// Deterministic lexical compare independent of process locale.
@@ -59,20 +48,17 @@ export const sortCommand = {
 		const key = typeof args.key === "string" ? args.key : undefined;
 		const desc = Boolean(args.desc);
 
-		const items: any[] = [];
-		let idx = 0;
+		// Decorate so undefined items still reach the comparator in descending order.
+		const items: { item: unknown }[] = [];
 		for await (const item of input) {
-			items.push({ item, idx });
-			idx++;
+			items.push({ item });
 		}
 
 		items.sort((a, b) => {
 			const av = key ? getByPath(a.item, key) : a.item;
 			const bv = key ? getByPath(b.item, key) : b.item;
 			const c = defaultCompare(av, bv);
-			if (c !== 0) return desc ? -c : c;
-			// stable tie-break
-			return a.idx - b.idx;
+			return desc ? -c : c;
 		});
 
 		return {

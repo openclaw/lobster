@@ -1,13 +1,4 @@
-function getByPath(obj: any, path: string): any {
-	if (!path) return obj;
-	const parts = path.split(".").filter(Boolean);
-	let cur: any = obj;
-	for (const p of parts) {
-		if (cur == null) return undefined;
-		cur = cur[p];
-	}
-	return cur;
-}
+import { getByPath } from "../../core/value_path.js";
 
 export const dedupeCommand = {
 	name: "dedupe",
