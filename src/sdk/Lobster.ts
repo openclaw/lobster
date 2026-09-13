@@ -1,6 +1,7 @@
+import { stateEnv } from "./state_env.js";
 import { randomUUID } from "node:crypto";
 import { runPipelineInternal } from "./runtime.js";
-import { encodeToken, decodeToken } from "./token.js";
+import { encodeToken, decodeToken } from "../token.js";
 import { compileCached } from "../validation.js";
 import { validateCommandInputState, type CommandInputState } from "../input_request.js";
 import { deleteStateJson, readStateJsonWithLock, writeStateJson } from "../state/store.js";
@@ -26,36 +27,18 @@ type SdkCommandInputResumeState = {
 	commandInput: CommandInputState;
 };
 
-/**
- * @typedef {Object} LobsterResult
- * @property {boolean} ok - Whether the workflow completed successfully
- * @property {'ok' | 'needs_approval' | 'needs_input' | 'cancelled' | 'error'} status - Workflow status
- * @property {any[]} output - Output items from the workflow
- * @property {Object|null} requiresApproval - Approval request if halted
- * @property {string} [requiresApproval.prompt] - Approval prompt
- * @property {any[]} [requiresApproval.items] - Items pending approval
- * @property {string} [requiresApproval.resumeToken] - Token to resume workflow
- * @property {Object|null} requiresInput - Input request if halted
- * @property {string} [requiresInput.prompt] - Input prompt
- * @property {Object} [requiresInput.responseSchema] - JSON Schema for response
- * @property {any} [requiresInput.subject] - Subject shown to the human
- * @property {string} [requiresInput.resumeToken] - Token to resume workflow
- * @property {Object} [error] - Error details if failed
- */
-
-/**
- * @typedef {Object} LobsterOptions
- * @property {Object} [env] - Environment variables
- * @property {string} [stateDir] - State directory override
- * @property {AbortSignal} [signal] - Abort signal forwarded to pipeline stages
- */
+export type LobsterOptions = {
+	env?: NodeJS.ProcessEnv;
+	stateDir?: string;
+	signal?: AbortSignal;
+};
 
 export class Lobster {
 	#stages = [];
-	#options: any = {} as any;
+	#options: LobsterOptions;
 	#meta = null;
 
-	constructor(options: any = {}) {
+	constructor(options: LobsterOptions = {}) {
 		this.#options = {
 			env: options.env ?? process.env,
 			stateDir: options.stateDir,
@@ -81,6 +64,16 @@ export class Lobster {
 	}
 
 	async run(initialInput = []) {
+		return this.#runStages(this.#stages, initialInput);
+	}
+
+	async #runStages(
+		stages,
+		initialInput,
+		requestInputResume = undefined,
+		stageOffset = 0,
+		fallbackIndex = -1,
+	) {
 		const ctx = {
 			env: this.#options.env,
 			stateDir: this.#options.stateDir,
@@ -90,9 +83,10 @@ export class Lobster {
 
 		try {
 			const result = await runPipelineInternal({
-				stages: this.#stages,
+				stages,
 				ctx,
 				input: initialInput,
+				requestInputResume,
 			});
 
 			if (
@@ -104,8 +98,8 @@ export class Lobster {
 				const resumeToken = encodeToken({
 					protocolVersion: 1,
 					v: 1,
-					stageIndex: result.haltedAt?.index ?? -1,
-					resumeAtIndex: (result.haltedAt?.index ?? -1) + 1,
+					stageIndex: stageOffset + (result.haltedAt?.index ?? fallbackIndex),
+					resumeAtIndex: stageOffset + (result.haltedAt?.index ?? fallbackIndex) + 1,
 					items: approval.items,
 					prompt: approval.prompt,
 				});
@@ -128,8 +122,8 @@ export class Lobster {
 				const resumeMode = input.commandInput ? "same_stage" : "next_stage";
 				const resumeAtIndex =
 					resumeMode === "same_stage"
-						? (result.haltedAt?.index ?? -1)
-						: (result.haltedAt?.index ?? -1) + 1;
+						? stageOffset + (result.haltedAt?.index ?? fallbackIndex)
+						: stageOffset + (result.haltedAt?.index ?? fallbackIndex) + 1;
 				const stateKey =
 					resumeMode === "same_stage"
 						? await saveSdkCommandInputResumeState(this.#options, {
@@ -143,7 +137,7 @@ export class Lobster {
 				const resumeToken = encodeToken({
 					protocolVersion: 1,
 					v: 1,
-					stageIndex: result.haltedAt?.index ?? -1,
+					stageIndex: stageOffset + (result.haltedAt?.index ?? fallbackIndex),
 					resumeAtIndex,
 					resumeMode,
 					...(resumeMode === "same_stage"
@@ -214,7 +208,7 @@ export class Lobster {
 
 		if (cancel === true) {
 			if (payload.resumeMode === "same_stage") {
-				await deleteStateJson({ env: sdkStateEnv(this.#options), key: payload.stateKey! });
+				await deleteStateJson({ env: stateEnv(this.#options), key: payload.stateKey! });
 			}
 			return {
 				ok: true,
@@ -278,7 +272,7 @@ export class Lobster {
 					state: sdkCommandInputState!.commandInput,
 					response,
 					onConsumed: async () => {
-						await deleteStateJson({ env: sdkStateEnv(this.#options), key: payload.stateKey! });
+						await deleteStateJson({ env: stateEnv(this.#options), key: payload.stateKey! });
 					},
 				};
 			} else {
@@ -287,110 +281,7 @@ export class Lobster {
 		}
 
 		const remainingStages = this.#stages.slice(resumeIndex);
-		const ctx = {
-			env: this.#options.env,
-			stateDir: this.#options.stateDir,
-			mode: "sdk",
-			signal: this.#options.signal,
-		};
-
-		try {
-			const result = await runPipelineInternal({
-				stages: remainingStages,
-				ctx,
-				input: resumeItems,
-				requestInputResume,
-			});
-
-			if (
-				result.halted &&
-				result.items.length === 1 &&
-				result.items[0]?.type === "approval_request"
-			) {
-				const approval = result.items[0];
-				const resumeToken = encodeToken({
-					protocolVersion: 1,
-					v: 1,
-					stageIndex: resumeIndex + (result.haltedAt?.index ?? 0),
-					resumeAtIndex: resumeIndex + (result.haltedAt?.index ?? 0) + 1,
-					items: approval.items,
-					prompt: approval.prompt,
-				});
-
-				return {
-					ok: true,
-					status: "needs_approval",
-					output: [],
-					requiresApproval: {
-						prompt: approval.prompt,
-						items: approval.items,
-						resumeToken,
-					},
-					requiresInput: null,
-				};
-			}
-
-			if (result.halted && result.items.length === 1 && result.items[0]?.type === "input_request") {
-				const input = result.items[0];
-				const inputStageIndex = resumeIndex + (result.haltedAt?.index ?? 0);
-				const resumeMode = input.commandInput ? "same_stage" : "next_stage";
-				const stateKey =
-					resumeMode === "same_stage"
-						? await saveSdkCommandInputResumeState(this.#options, {
-								resumeAtIndex: inputStageIndex,
-								items: input.items ?? [],
-								inputSchema: input.responseSchema,
-								...(input.subject !== undefined ? { inputSubject: input.subject } : null),
-								commandInput: input.commandInput,
-							})
-						: undefined;
-				const resumeToken = encodeToken({
-					protocolVersion: 1,
-					v: 1,
-					stageIndex: inputStageIndex,
-					resumeAtIndex: resumeMode === "same_stage" ? inputStageIndex : inputStageIndex + 1,
-					resumeMode,
-					...(resumeMode === "same_stage"
-						? { stateKey }
-						: { items: [], inputSchema: input.responseSchema }),
-					inputSubject: input.subject,
-				});
-
-				return {
-					ok: true,
-					status: "needs_input",
-					output: [],
-					requiresApproval: null,
-					requiresInput: {
-						prompt: input.prompt,
-						responseSchema: input.responseSchema,
-						defaults: input.defaults,
-						subject: input.subject,
-						resumeToken,
-					},
-				};
-			}
-
-			return {
-				ok: true,
-				status: "ok",
-				output: result.items,
-				requiresApproval: null,
-				requiresInput: null,
-			};
-		} catch (err) {
-			return {
-				ok: false,
-				status: "error",
-				output: [],
-				requiresApproval: null,
-				requiresInput: null,
-				error: {
-					type: "runtime_error",
-					message: err?.message ?? String(err),
-				},
-			};
-		}
+		return this.#runStages(remainingStages, resumeItems, requestInputResume, resumeIndex, 0);
 	}
 
 	clone() {
@@ -437,24 +328,21 @@ function decodeSdkResumePayload(token: string): SdkResumePayload {
 	return data as unknown as SdkResumePayload;
 }
 
-function sdkStateEnv(options: any) {
-	return options.stateDir
-		? { ...(options.env ?? process.env), LOBSTER_STATE_DIR: options.stateDir }
-		: (options.env ?? process.env);
-}
-
-async function saveSdkCommandInputResumeState(options: any, state: SdkCommandInputResumeState) {
+async function saveSdkCommandInputResumeState(
+	options: LobsterOptions,
+	state: SdkCommandInputResumeState,
+) {
 	const stateKey = `sdk_resume_${randomUUID()}`;
-	await writeStateJson({ env: sdkStateEnv(options), key: stateKey, value: state });
+	await writeStateJson({ env: stateEnv(options), key: stateKey, value: state });
 	return stateKey;
 }
 
 async function loadSdkCommandInputResumeState(
-	options: any,
+	options: LobsterOptions,
 	stateKey: string,
 ): Promise<SdkCommandInputResumeState> {
 	const stored = await readStateJsonWithLock({
-		env: sdkStateEnv(options),
+		env: stateEnv(options),
 		key: stateKey,
 		signal: options?.signal,
 	});

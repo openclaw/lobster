@@ -1,16 +1,6 @@
+import { getByPath } from "../../core/value_path.js";
 import fs from "node:fs/promises";
 import { applyFilters } from "../../core/filters.js";
-
-function getByPath(obj: any, path: string): any {
-	if (path === "." || path === "this") return obj;
-	const parts = path.split(".").filter(Boolean);
-	let cur: any = obj;
-	for (const p of parts) {
-		if (cur == null) return undefined;
-		cur = cur[p];
-	}
-	return cur;
-}
 
 function splitFilterChain(expr: string): string[] {
 	const parts: string[] = [];
@@ -53,7 +43,7 @@ function renderTemplate(tpl: string, ctx: any): string {
 		const rawExpr = String(expr ?? "").trim();
 		const parts = splitFilterChain(rawExpr);
 		const key = parts[0];
-		let val: unknown = getByPath(ctx, key);
+		let val: unknown = key === "." || key === "this" ? ctx : getByPath(ctx, key);
 		if (parts.length > 1) {
 			val = applyFilters(val, parts.slice(1));
 		}

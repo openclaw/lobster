@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Test the supported Node.js 22 and 24 runtimes in CI, align Node types with the minimum supported major, make TypeScript 7 the explicit compiler, update pnpm to 12.4.1, and pin hydration/release actions while retaining the two-day dependency release-age policy.
+
 ## 2026.9.11 - 2026-09-11
 
 **Highlights:** SDK shell commands share Lobster's process handling and report missing-shell configuration clearly.

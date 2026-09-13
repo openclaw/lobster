@@ -669,6 +669,7 @@ test("llm.invoke does not replay a cache hit when ctx.signal aborts while input 
 		// The step timeout fires while the upstream step is still producing input,
 		// which is after the entry check and before the cache lookup.
 		const controller = new AbortController();
+		// oxlint-disable-next-line require-yield -- Exercise cancellation before the first item.
 		const abortingInput = (async function* () {
 			await new Promise((resolve) => setTimeout(resolve, 5));
 			controller.abort();
@@ -736,6 +737,7 @@ test("llm.invoke does not replay run state when ctx.signal aborts while input is
 		assert.equal(requests, 1);
 
 		const controller = new AbortController();
+		// oxlint-disable-next-line require-yield -- Exercise cancellation before the first item.
 		const abortingInput = (async function* () {
 			await new Promise((resolve) => setTimeout(resolve, 5));
 			controller.abort();

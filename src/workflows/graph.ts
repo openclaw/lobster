@@ -1,4 +1,5 @@
-import type { WorkflowFile, WorkflowStep } from "./file.js";
+import { resolveArgsTemplate } from "./expressions.js";
+import type { WorkflowFile, WorkflowStep } from "./types.js";
 
 export type WorkflowGraphFormat = "mermaid" | "dot" | "ascii";
 
@@ -20,13 +21,6 @@ type RenderGraphParams = {
 	format: WorkflowGraphFormat;
 	args?: Record<string, unknown>;
 };
-
-function resolveArgsTemplate(input: string, args: Record<string, unknown>) {
-	return input.replace(/\$\{([A-Za-z0-9_-]+)\}/g, (match, key) => {
-		if (Object.hasOwn(args, key)) return String(args[key]);
-		return match;
-	});
-}
 
 function isApprovalStep(step: WorkflowStep) {
 	if (step.approval === true) return true;

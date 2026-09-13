@@ -2,138 +2,19 @@
 
 ![Lobster banner](docs/assets/readme-banner.jpg)
 
-An OpenClaw-native workflow shell: typed (JSON-first) pipelines, jobs, and approval gates.
+An OpenClaw-native workflow shell: typed (JSON-first) pipelines and approval gates.
 
+## Example
 
-## Example of Lobster at work
-OpenClaw (or any other AI agent) can use `lobster` as a workflow engine and avoid re-planning every step — saving tokens while improving determinism and resumability.
+A named workflow fetches a pull request with `gh`, compares it with the saved snapshot, and returns a notification only when it changes:
 
-### Watching a PR that hasn't had changes
+```bash
+node bin/lobster.js run --mode tool "workflows.run --name github.pr.monitor.notify --args-json '{\"repo\":\"openclaw/lobster\",\"pr\":167}'"
 ```
-node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo\":\"openclaw/openclaw\",\"pr\":1152}'"
-[
-  {
-    "kind": "github.pr.monitor",
-    "repo": "openclaw/openclaw",
-    "prNumber": 1152,
-    "key": "github.pr:openclaw/openclaw#1152",
-    "changed": false,
-    "summary": {
-      "changedFields": [],
-      "changes": {}
-    },
-    "prSnapshot": {
-      "author": {
-        "id": "MDQ6VXNlcjE0MzY4NTM=",
-        "is_bot": false,
-        "login": "vignesh07",
-        "name": "Vignesh"
-      },
-      "baseRefName": "main",
-      "headRefName": "feat/lobster-plugin",
-      "isDraft": false,
-      "mergeable": "MERGEABLE",
-      "number": 1152,
-      "reviewDecision": "",
-      "state": "OPEN",
-      "title": "feat: Add optional lobster plugin tool (typed workflows, approvals/resume)",
-      "updatedAt": "2026-01-18T20:16:56Z",
-      "url": "https://github.com/openclaw/openclaw/pull/1152"
-    }
-  }
-]
-```
-### And a PR that has a state change (in this case an approved PR)
 
-```
- node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo\":\"openclaw/openclaw\",\"pr\":1200}'"
-[
-  {
-    "kind": "github.pr.monitor",
-    "repo": "openclaw/openclaw",
-    "prNumber": 1200,
-    "key": "github.pr:openclaw/openclaw#1200",
-    "changed": true,
-    "summary": {
-      "changedFields": [
-        "number",
-        "title",
-        "url",
-        "state",
-        "isDraft",
-        "mergeable",
-        "reviewDecision",
-        "updatedAt",
-        "baseRefName",
-        "headRefName"
-      ],
-      "changes": {
-        "number": {
-          "from": null,
-          "to": 1200
-        },
-        "title": {
-          "from": null,
-          "to": "feat(tui): add syntax highlighting for code blocks"
-        },
-        "url": {
-          "from": null,
-          "to": "https://github.com/openclaw/openclaw/pull/1200"
-        },
-        "state": {
-          "from": null,
-          "to": "MERGED"
-        },
-        "isDraft": {
-          "from": null,
-          "to": false
-        },
-        "mergeable": {
-          "from": null,
-          "to": "UNKNOWN"
-        },
-        "reviewDecision": {
-          "from": null,
-          "to": ""
-        },
-        "updatedAt": {
-          "from": null,
-          "to": "2026-01-19T05:06:09Z"
-        },
-        "baseRefName": {
-          "from": null,
-          "to": "main"
-        },
-        "headRefName": {
-          "from": null,
-          "to": "feat/tui-syntax-highlighting"
-        }
-      }
-    },
-    "prSnapshot": {
-      "author": {
-        "id": "MDQ6VXNlcjE0MzY4NTM=",
-        "is_bot": false,
-        "login": "vignesh07",
-        "name": "Vignesh"
-      },
-      "baseRefName": "main",
-      "headRefName": "feat/tui-syntax-highlighting",
-      "isDraft": false,
-      "mergeable": "UNKNOWN",
-      "number": 1200,
-      "reviewDecision": "",
-      "state": "MERGED",
-      "title": "feat(tui): add syntax highlighting for code blocks",
-      "updatedAt": "2026-01-19T05:06:09Z",
-      "url": "https://github.com/openclaw/openclaw/pull/1200"
-    }
-  }
-]
-```
+For repeatable automation, put shell commands, native pipeline steps, and explicit approval/input gates in a workflow file. OpenClaw presents the gate to the user and resumes with their decision.
 
 ## Goals
-
 
 - Typed pipelines (objects/arrays), not text pipes.
 - Local-first execution.
@@ -142,9 +23,10 @@ node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo
 
 ## Quick start
 
-From this folder:
+Requires Node.js 22 or newer and the pnpm version pinned in `package.json`. From this folder:
 
-- `pnpm install`
+- `pnpm install --frozen-lockfile`
+- `pnpm build`
 - `pnpm test`
 - `pnpm lint`
 - `node ./bin/lobster.js --help`
@@ -154,7 +36,7 @@ From this folder:
 ### Notes
 
 - `pnpm test` runs `tsc` and then executes tests against `dist/`.
-- `bin/lobster.js` prefers the compiled entrypoint in `dist/` when present.
+- `bin/lobster.js` runs the compiled entrypoint in `dist/`; build after changing source files.
 ## Process output limits
 
 Captured process stdout and stderr remain unlimited by default. Set
@@ -187,7 +69,6 @@ keep pipes open after overflow. Calls without an AbortSignal relay terminal
 interrupts to that group and retain the host's existing signal handlers or
 conventional interrupt exit status.
 
-
 ## Commands
 
 - `exec`: run OS commands
@@ -196,10 +77,6 @@ conventional interrupt exit status.
 - `where`, `pick`, `head`: data shaping
 - `json`, `table`: renderers
 - `approve`: approval gate (TTY prompt or `--emit` for OpenClaw integration)
-
-## Next steps
-
-- OpenClaw integration: ship as an optional OpenClaw plugin tool.
 
 ## SDK cancellation
 
@@ -462,3 +339,9 @@ The limit counts bytes read from the response stream, including decompressed
 content. A declared Content-Length over the limit is also rejected immediately.
 Tool dispatch remains non-retryable after an overflow, as with other
 post-dispatch errors; `llm.invoke` retains its existing retry policy.
+
+## Development
+
+The source is one TypeScript package. `src/core` contains the embeddable tool API, cost tracking, and LLM accounting; `src/sdk` provides pipeline composition; `src/commands` holds the command registry and standard library. Workflow loading, expressions, dry-run rendering, and execution live under `src/workflows`. `src/state` owns atomic file persistence, locks, and resume capabilities. GitHub SDK recipes and built-in workflows share transport and snapshot helpers.
+
+Run `pnpm test`, `pnpm typecheck`, and `pnpm lint` before submitting changes. Tests compile into `dist/test` and use Node's test runner; platform-specific process tests run only where their OS primitives exist. Dependencies observe the two-day release-age policy in `pnpm-workspace.yaml`.

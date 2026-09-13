@@ -2279,6 +2279,7 @@ test("a permanently stalled native lazy generator does not block cancellation", 
 		name: "test.native-lazy-output",
 		async run() {
 			return {
+				// oxlint-disable-next-line require-yield -- A native generator stalled before its first item.
 				output: (async function* () {
 					try {
 						readStarted();
