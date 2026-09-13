@@ -2,7 +2,7 @@
  * GitHub Recipes
  *
  * @example
- * import { prMonitor, prMonitorNotify } from 'lobster/recipes/github';
+ * import { prMonitor, prMonitorNotify } from '@clawdbot/lobster/recipes/github';
  *
  * const result = await prMonitor({ repo: 'owner/repo', pr: 123 }).run();
  */

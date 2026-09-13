@@ -11,7 +11,7 @@ function runCli(args: string[], env?: Record<string, string | undefined>) {
 	const bin = path.join(process.cwd(), "bin", "lobster.js");
 	return spawnSync(process.execPath, [bin, ...args], {
 		encoding: "utf8",
-		env: { ...process.env, ...(env ?? {}) },
+		env: { ...process.env, ...env },
 	});
 }
 

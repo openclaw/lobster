@@ -2,7 +2,7 @@
  * Exec primitive - Execute shell commands and return JSON output
  *
  * @example
- * import { Lobster, exec } from 'lobster-sdk';
+ * import { Lobster, exec } from '@clawdbot/lobster';
  *
  * new Lobster()
  *   .pipe(exec('gh pr view 123 --repo owner/repo --json title,url'))

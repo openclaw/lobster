@@ -2,8 +2,8 @@
  * GitHub PR View Stage - Fetch PR details via gh CLI
  *
  * @example
- * import { Lobster } from 'lobster-sdk';
- * import { ghPrView } from 'lobster/recipes/github';
+ * import { Lobster } from '@clawdbot/lobster';
+ * import { ghPrView } from '@clawdbot/lobster/recipes/github';
  *
  * new Lobster()
  *   .pipe(ghPrView({ repo: 'owner/repo', pr: 123 }))

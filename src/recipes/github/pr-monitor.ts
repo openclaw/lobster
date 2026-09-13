@@ -2,7 +2,7 @@
  * GitHub PR Monitor Recipe - Track PR changes over time
  *
  * @example
- * import { prMonitor, prMonitorNotify } from 'lobster/recipes/github';
+ * import { prMonitor, prMonitorNotify } from '@clawdbot/lobster/recipes/github';
  *
  * // Full PR state with diff
  * const result = await prMonitor({ repo: 'owner/repo', pr: 123 }).run();

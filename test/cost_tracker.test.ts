@@ -1168,11 +1168,6 @@ test("workflow cost tracking bills both live calls a retried step's replays stan
 	}
 });
 
-// A gate pauses a run rather than resetting what it spent. The resume is a different run — a
-// different process, even — so the call made before the gate is only in the paused run's
-// record; if a later step repeats the prompt, it replays and correctly bills nothing. Without
-// carrying that record forward, the provider call before the gate would appear in no total at
-// all, and a `cost_limit` could be walked past one gate at a time.
 // A gate pauses a run, it does not reset what the run has spent. The resume is a separate run
 // with its own accounting, so a call made before the gate lives only in the paused run's
 // record: if a later step repeats the prompt it replays, correctly bills nothing, and the
