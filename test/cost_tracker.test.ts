@@ -157,20 +157,25 @@ async function runWorkflow(
 		stderrOutput += String(d);
 	});
 
-	const result = await runWorkflowFile({
-		filePath,
-		ctx: {
-			stdin: process.stdin,
-			stdout: process.stdout,
-			stderr,
-			env: { ...process.env, LOBSTER_STATE_DIR: stateDir, ...envOverride },
-			mode: "tool",
-			registry: createDefaultRegistry(),
-			llmAdapters,
-		},
-	});
+	try {
+		const result = await runWorkflowFile({
+			filePath,
+			ctx: {
+				stdin: process.stdin,
+				stdout: process.stdout,
+				stderr,
+				env: { ...process.env, LOBSTER_STATE_DIR: stateDir, ...envOverride },
+				mode: "tool",
+				registry: createDefaultRegistry(),
+				llmAdapters,
+			},
+		});
 
-	return { result, stderrOutput };
+		return { result, stderrOutput };
+	} finally {
+		stderr.destroy();
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	}
 }
 
 test("workflow result includes _meta.cost when usage is present", async () => {
@@ -2408,4 +2413,39 @@ for (const loop of [false, true]) {
 		);
 		assert.equal(calls, 1, "a downstream failure must not hide paid usage from the retry budget");
 	});
+}
+
+for (const rendered of [false, true]) {
+	for (const passthrough of ["head --n 1", "pick usage"]) {
+		test(`uninterrupted workflow does not rebill ${rendered ? "rendered" : "live"} output through ${passthrough}`, async () => {
+			const provider = await startFakeProvider();
+			const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-step-reference-"));
+			try {
+				const { result } = await runWorkflow(
+					{
+						cost_limit: { max_usd: 0.01, action: "stop" },
+						steps: [
+							{
+								id: "live",
+								pipeline: `llm.invoke --model gpt-4o --prompt Summarize${rendered ? " | json" : ""}`,
+							},
+							{ id: "copy", pipeline: passthrough, stdin: "$live.json" },
+							{ id: "again", pipeline: "head --n 1", stdin: "$copy.json" },
+						],
+					},
+					{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+				);
+				assert.equal(provider.requests(), 1);
+				assert.equal(result._meta?.cost?.totalInputTokens, 1000);
+				assert.equal(result._meta?.cost?.totalOutputTokens, 500);
+				assert.deepEqual(
+					result._meta?.cost?.byStep.map((entry) => entry.stepId),
+					["live"],
+				);
+			} finally {
+				await provider.close();
+				await fsp.rm(cacheDir, { recursive: true, force: true });
+			}
+		});
+	}
 }

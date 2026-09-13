@@ -2,6 +2,8 @@ import { billableTokens } from "./cost_tracker.js";
 
 // Only in-process objects carry this symbol. JSON fields cannot grant a replay exemption.
 const LLM_PROVENANCE = Symbol("lobster.llm.provenance");
+// Object spreads share this private identity; WeakSet tracking also works for frozen items.
+const replayedCalls = new WeakSet<object>();
 
 export type LlmProvenance = { cacheKey: string; replayed: boolean };
 
@@ -36,7 +38,13 @@ export function llmProvenanceOf(value: unknown): LlmProvenance | null {
 	if (!provenance || typeof provenance !== "object") return null;
 	const { cacheKey, replayed } = provenance as LlmProvenance;
 	if (typeof cacheKey !== "string" || typeof replayed !== "boolean") return null;
-	return { cacheKey, replayed };
+	return { cacheKey, replayed: replayed || replayedCalls.has(provenance) };
+}
+
+/** A billed live result becomes a replay wherever that same call identity is re-emitted. */
+export function markLlmProvenanceReplayed(value: unknown) {
+	if (!llmProvenanceOf(value)) return;
+	replayedCalls.add((value as Record<symbol, object>)[LLM_PROVENANCE]);
 }
 
 /** Carry provenance only across a JSON round trip whose source is still held in-process. */

@@ -39,11 +39,14 @@ import {
 	readStateJsonWithLock,
 	restoreConsumedResumeState,
 	writeStateJson,
+	stableStringify,
 } from "../state/store.js";
 import { readLineFromStream } from "../read_line.js";
 import { compileCached } from "../validation.js";
 import {
 	createLlmSpendLedger,
+	carryLlmProvenance,
+	markLlmProvenanceReplayed,
 	llmProvenanceOf,
 	restoreLlmProvenance,
 } from "../core/llm_accounting.js";
@@ -1994,6 +1997,8 @@ function trackStepCost(
 			// charge restored from resume state written before it carried a cost falls back.
 			if (settled?.usage) {
 				costTracker.recordUsage(stepId, settled.model ?? null, settled.usage);
+				markLlmProvenanceReplayed(record);
+				markLlmProvenanceReplayed(usage);
 				continue;
 			}
 		} else {
@@ -2013,6 +2018,8 @@ function trackStepCost(
 			continue;
 		}
 		costTracker.recordUsage(stepId, model, usage as Record<string, unknown>);
+		markLlmProvenanceReplayed(record);
+		markLlmProvenanceReplayed(usage);
 	}
 
 	if (!deferredCharges) settleDeferredCosts(costTracker, deferred, llmSpendLedger);
@@ -2422,6 +2429,15 @@ async function runPipelineStep({
 	};
 	// Only when a renderer consumed the pipeline: otherwise `json` already is those items.
 	if (!result.items.length && result.renderedItems.length) {
+		// Only restore marks from the renderer's own matching objects, never from public JSON fields.
+		const source = Array.isArray(json)
+			? result.renderedItems
+			: result.renderedItems.length === 1
+				? result.renderedItems[0]
+				: undefined;
+		if (source !== undefined && stableStringify(source) === stableStringify(json)) {
+			carryLlmProvenance(source, json);
+		}
 		attachPipelineSourceItems(stepResult, result.renderedItems);
 	}
 	return stepResult;
