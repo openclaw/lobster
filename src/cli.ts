@@ -28,6 +28,11 @@ async function runCliWithSignal(
 ) {
 	const registry = createDefaultRegistry();
 
+	if (argv[0] === "graph") {
+		await handleGraph({ argv: argv.slice(1) });
+		return;
+	}
+
 	if (argv.length === 0 || argv.includes("-h") || argv.includes("--help")) {
 		process.stdout.write(helpText());
 		return;
@@ -56,11 +61,6 @@ async function runCliWithSignal(
 
 	if (argv[0] === "doctor") {
 		await handleDoctor({ argv: argv.slice(1), registry, signal, forceTerminationSignal });
-		return;
-	}
-
-	if (argv[0] === "graph") {
-		await handleGraph({ argv: argv.slice(1) });
 		return;
 	}
 
@@ -193,27 +193,26 @@ async function handleRun({
 	const parsed = parseRunArgs(argv);
 	const { mode, argsJson } = parsed;
 	const normalizedMode = normalizeMode(mode);
-	const { rest, filePath, dryRun } = await resolveRunTarget(parsed);
-
-	const workflowFile = filePath
-		? await resolveWorkflowFile(filePath)
-		: await detectWorkflowFile(rest);
+	let target: Awaited<ReturnType<typeof prepareRunTarget>>;
+	try {
+		target = await prepareRunTarget(parsed);
+	} catch (err) {
+		reportRunError(normalizedMode, "parse_error", err);
+		return;
+	}
+	const { rest, workflowFile, dryRun } = target;
 	if (workflowFile) {
 		let parsedArgs = {};
 		if (argsJson) {
 			try {
 				parsedArgs = JSON.parse(argsJson);
 			} catch {
-				if (mode === "tool") {
-					writeToolEnvelope({
-						ok: false,
-						error: { type: "parse_error", message: "run --args-json must be valid JSON" },
-					});
-					process.exitCode = 2;
-					return;
-				}
-				process.stderr.write("run --args-json must be valid JSON\n");
-				process.exitCode = 2;
+				reportRunError(
+					normalizedMode,
+					"parse_error",
+					new Error("run --args-json must be valid JSON"),
+					"",
+				);
 				return;
 			}
 		}
@@ -291,16 +290,7 @@ async function handleRun({
 			}
 			return;
 		} catch (err) {
-			if (normalizedMode === "tool") {
-				writeToolEnvelope({
-					ok: false,
-					error: { type: "runtime_error", message: err?.message ?? String(err) },
-				});
-				process.exitCode = 1;
-				return;
-			}
-			process.stderr.write(`Error: ${err?.message ?? String(err)}\n`);
-			process.exitCode = 1;
+			reportRunError(normalizedMode, "runtime_error", err);
 			return;
 		}
 	}
@@ -311,16 +301,7 @@ async function handleRun({
 	try {
 		pipeline = parsePipeline(pipelineString);
 	} catch (err) {
-		if (mode === "tool") {
-			writeToolEnvelope({
-				ok: false,
-				error: { type: "parse_error", message: err?.message ?? String(err) },
-			});
-			process.exitCode = 2;
-			return;
-		}
-		process.stderr.write(`Parse error: ${err?.message ?? String(err)}\n`);
-		process.exitCode = 2;
+		reportRunError(normalizedMode, "parse_error", err);
 		return;
 	}
 
@@ -367,17 +348,28 @@ async function handleRun({
 			process.stdout.write("\n");
 		}
 	} catch (err) {
-		if (normalizedMode === "tool") {
-			writeToolEnvelope({
-				ok: false,
-				error: { type: "runtime_error", message: err?.message ?? String(err) },
-			});
-			process.exitCode = 1;
-			return;
-		}
-		process.stderr.write(`Error: ${err?.message ?? String(err)}\n`);
-		process.exitCode = 1;
+		reportRunError(normalizedMode, "runtime_error", err);
 	}
+}
+
+function reportRunError(
+	mode: "human" | "tool",
+	type: "parse_error" | "runtime_error",
+	error: unknown,
+	prefix = type === "parse_error" ? "Parse error: " : "Error: ",
+) {
+	const message = (error as { message?: string })?.message ?? String(error);
+	if (mode === "tool") writeToolEnvelope({ ok: false, error: { type, message } });
+	else process.stderr.write(`${prefix}${message}\n`);
+	process.exitCode = type === "parse_error" ? 2 : 1;
+}
+
+async function prepareRunTarget(parsed: ReturnType<typeof parseRunArgs>) {
+	const { rest, filePath, dryRun } = await resolveRunTarget(parsed);
+	const workflowFile = filePath
+		? await resolveWorkflowFile(filePath)
+		: await detectWorkflowFile(rest);
+	return { rest, workflowFile, dryRun };
 }
 
 function isPipelineInputRequest(items) {

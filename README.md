@@ -37,6 +37,8 @@ Requires Node.js 22 or newer and the pnpm version pinned in `package.json`. From
 
 - `pnpm test` runs `tsc` and then executes tests against `dist/`.
 - `bin/lobster.js` runs the compiled entrypoint in `dist/`; build after changing source files.
+Invalid explicit workflow file paths are reported as input errors (exit code 2). In `--mode tool`, these failures use the same JSON error envelope as other parsing errors.
+
 ## Process output limits
 
 Captured process stdout and stderr remain unlimited by default. Set
@@ -181,6 +183,7 @@ Commands are re-run on resume, so they must be idempotent until `requestInput` r
 Use `lobster graph` to inspect workflow structure before execution.
 
 ```bash
+lobster graph --help
 lobster graph --file path/to/workflow.lobster
 lobster graph --file path/to/workflow.lobster --format mermaid
 lobster graph --file path/to/workflow.lobster --format dot
