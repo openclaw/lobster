@@ -1,8 +1,9 @@
+import { stateEnv } from "../state_env.js";
 /**
  * Diff primitive - Compare current value against last stored value
  *
  * @example
- * import { Lobster, diffLast } from 'lobster-sdk';
+ * import { Lobster, diffLast } from '@clawdbot/lobster';
  *
  * new Lobster()
  *   .pipe(fetchPRStatus())
@@ -15,12 +16,6 @@
  */
 
 import { diffAndStore } from "../../state/store.js";
-
-function stateEnv(ctx) {
-	return ctx?.stateDir
-		? { ...(ctx?.env ?? process.env), LOBSTER_STATE_DIR: ctx.stateDir }
-		: (ctx?.env ?? process.env);
-}
 
 /**
  * Create a diff.last stage
@@ -43,7 +38,6 @@ export function diffLast(key, options: any = {}) {
 		key,
 
 		async run({ input, ctx }) {
-			// Collect all input items
 			const items = [];
 			for await (const item of input) {
 				items.push(item);
@@ -58,7 +52,6 @@ export function diffLast(key, options: any = {}) {
 				signal: ctx?.signal,
 			});
 
-			// Build result
 			const result = {
 				kind: "diff.last",
 				key,

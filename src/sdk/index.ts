@@ -2,7 +2,7 @@
  * Lobster SDK - Workflow runtime for AI agents
  *
  * @example
- * import { Lobster, approve, exec } from 'lobster-sdk';
+ * import { Lobster, approve, exec } from '@clawdbot/lobster';
  *
  * const workflow = new Lobster()
  *   .pipe(exec('gh pr view 123 --repo owner/repo --json title,url'))

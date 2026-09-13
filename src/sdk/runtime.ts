@@ -8,20 +8,6 @@
 import { runPipeline as runCorePipeline } from "../runtime.js";
 
 /**
- * @typedef {Object} StageResult
- * @property {AsyncIterable|any[]} [output] - Output items
- * @property {boolean} [halt] - Whether to halt the pipeline
- * @property {boolean} [rendered] - Whether output was rendered
- */
-
-/**
- * @typedef {Object} PipelineResult
- * @property {any[]} items - Collected output items
- * @property {boolean} halted - Whether pipeline halted
- * @property {Object|null} haltedAt - Stage where halt occurred
- */
-
-/**
  * Collect async iterable to array
  * @param {AsyncIterable} iterable
  * @returns {Promise<any[]>}

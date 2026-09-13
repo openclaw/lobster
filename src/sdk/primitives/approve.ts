@@ -2,7 +2,7 @@
  * Approve primitive - Creates a hard halt point requiring human approval
  *
  * @example
- * import { Lobster, approve } from 'lobster-sdk';
+ * import { Lobster, approve } from '@clawdbot/lobster';
  *
  * new Lobster()
  *   .pipe(fetchEmails())
@@ -27,7 +27,6 @@ export function approve(options: any = {}) {
 		prompt,
 
 		async run({ input, ctx: _ctx }) {
-			// Collect all items
 			const items = [];
 			for await (const item of input) {
 				items.push(item);

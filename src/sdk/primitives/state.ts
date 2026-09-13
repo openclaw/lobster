@@ -1,8 +1,9 @@
+import { stateEnv } from "../state_env.js";
 /**
  * State primitives - Persistent state management
  *
  * @example
- * import { Lobster, stateGet, stateSet } from 'lobster-sdk';
+ * import { Lobster, stateGet, stateSet } from '@clawdbot/lobster';
  *
  * // Read state
  * new Lobster()
@@ -16,12 +17,6 @@
  */
 
 import { readStateJsonWithLock, writeStateJson } from "../../state/store.js";
-
-function stateEnv(ctx) {
-	return ctx?.stateDir
-		? { ...(ctx?.env ?? process.env), LOBSTER_STATE_DIR: ctx.stateDir }
-		: (ctx?.env ?? process.env);
-}
 
 /**
  * Create a state.get stage
@@ -67,7 +62,6 @@ export function stateSet(key) {
 		key,
 
 		async run({ input, ctx }) {
-			// Collect all input items
 			const items = [];
 			for await (const item of input) {
 				items.push(item);
@@ -77,7 +71,6 @@ export function stateSet(key) {
 
 			await writeStateJson({ env: stateEnv(ctx), key, value, signal: ctx?.signal });
 
-			// Pass through the value
 			return {
 				output: (async function* () {
 					yield value;
@@ -91,7 +84,7 @@ export function stateSet(key) {
  * State namespace - provides get/set methods
  *
  * @example
- * import { state } from 'lobster-sdk';
+ * import { state } from '@clawdbot/lobster';
  *
  * new Lobster()
  *   .pipe(state.get('my-key'))
