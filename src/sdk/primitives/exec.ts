@@ -1,3 +1,4 @@
+import { tokenizeCommand } from "../../command_tokens.js";
 /**
  * Exec primitive - Execute shell commands and return JSON output
  *
@@ -11,56 +12,9 @@
 
 import { runAbortableProcess } from "../../abortable_process.js";
 
-/**
- * Parse a shell command string into command and arguments
- * Simple parsing - for complex cases, use options.shell
- * @param {string} cmdString
- * @returns {{command: string, argv: string[]}}
- */
-function parseCommand(cmdString) {
-	const tokens = [];
-	let current = "";
-	let quote = null;
-
-	for (let i = 0; i < cmdString.length; i++) {
-		const ch = cmdString[i];
-
-		if (quote) {
-			if (ch === "\\" && cmdString[i + 1]) {
-				current += cmdString[i + 1];
-				i++;
-				continue;
-			}
-			if (ch === quote) {
-				quote = null;
-				continue;
-			}
-			current += ch;
-			continue;
-		}
-
-		if (ch === '"' || ch === "'") {
-			quote = ch;
-			continue;
-		}
-
-		if (ch === " " || ch === "\t") {
-			if (current.length > 0) {
-				tokens.push(current);
-				current = "";
-			}
-			continue;
-		}
-
-		current += ch;
-	}
-
-	if (current.length > 0) {
-		tokens.push(current);
-	}
-
-	const [command, ...argv] = tokens;
-	return { command, argv };
+function parseCommand(command: string) {
+	const [executable, ...argv] = tokenizeCommand(command, "sdk");
+	return { command: executable, argv };
 }
 
 /**

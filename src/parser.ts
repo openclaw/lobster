@@ -1,6 +1,4 @@
-function isWhitespace(ch) {
-	return ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
-}
+import { tokenizeCommand } from "./command_tokens.js";
 
 function splitPipes(input) {
 	const parts = [];
@@ -46,78 +44,6 @@ function splitPipes(input) {
 	return parts;
 }
 
-function tokenizeCommand(input) {
-	const tokens = [];
-	let current = "";
-	let quote = null;
-
-	const push = () => {
-		if (current.length > 0) tokens.push(current);
-		current = "";
-	};
-
-	for (let i = 0; i < input.length; i++) {
-		const ch = input[i];
-
-		if (quote) {
-			if (quote === "'") {
-				if (ch === "\\" && input[i + 1] === quote) {
-					current += quote;
-					i++;
-					continue;
-				}
-				if (ch === quote) {
-					quote = null;
-					continue;
-				}
-				current += ch;
-				continue;
-			}
-
-			// Double-quoted mode: preserve unknown escapes (\n, \t, etc) while
-			// unescaping only shell-like quote/backslash escapes.
-			if (ch === "\\") {
-				const next = input[i + 1];
-				if (next === '"' || next === "\\" || next === "$" || next === "`") {
-					current += next;
-					i++;
-					continue;
-				}
-				if (next === "\n") {
-					i++;
-					continue;
-				}
-				current += ch;
-				continue;
-			}
-
-			if (ch === quote) {
-				quote = null;
-				continue;
-			}
-
-			current += ch;
-			continue;
-		}
-
-		if (ch === '"' || ch === "'") {
-			quote = ch;
-			continue;
-		}
-
-		if (isWhitespace(ch)) {
-			push();
-			continue;
-		}
-
-		current += ch;
-	}
-
-	if (quote) throw new Error("Unclosed quote");
-	push();
-	return tokens;
-}
-
 function parseArgs(tokens, booleanFlags: readonly string[] = []) {
 	const args = { _: [] };
 
@@ -135,7 +61,7 @@ function parseArgs(tokens, booleanFlags: readonly string[] = []) {
 
 			const key = tok.slice(2);
 			const next = tokens[i + 1];
-			if (booleanFlags.includes(key) || !next || next.startsWith("--")) {
+			if (booleanFlags.includes(key) || next === undefined || next.startsWith("--")) {
 				args[key] = true;
 				continue;
 			}
