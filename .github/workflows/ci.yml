@@ -26,9 +26,13 @@ jobs:
         uses: rhysd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
 
   check:
-    name: Node 24 check
+    name: Node ${{ matrix.node }} check
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,7 +45,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -51,8 +55,8 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Typecheck
-        run: pnpm typecheck
+      - name: Built CLI smoke
+        run: node bin/lobster.js doctor
 
       - name: Lint and check formatting
         run: pnpm lint
