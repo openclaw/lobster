@@ -1,7 +1,7 @@
 import { promises as fsp } from "node:fs";
 
 import { defaultStateDir, keyToPath, withFileLock, writeStateJson } from "../../state/store.js";
-import { carryLlmProvenance } from "./llm_invoke.js";
+import { carryLlmProvenance } from "../../core/llm_accounting.js";
 
 // What this process last wrote to each state file. A value read straight back is the same value
 // rebuilt from its own JSON, and the marks a command attached in-process are not in that JSON:

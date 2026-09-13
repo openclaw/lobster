@@ -12,8 +12,8 @@ import {
 	createLlmSpendLedger,
 	llmProvenanceOf,
 	restoreLlmProvenance,
-} from "../src/commands/stdlib/llm_invoke.js";
-import type { LlmOutstandingCharge } from "../src/commands/stdlib/llm_invoke.js";
+} from "../src/core/llm_accounting.js";
+import type { LlmOutstandingCharge } from "../src/core/llm_accounting.js";
 import { runWorkflowFile } from "../src/workflows/file.js";
 import { decodeToken } from "../src/token.js";
 

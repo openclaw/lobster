@@ -1,5 +1,5 @@
 import { createJsonRenderer } from "./renderers/json.js";
-import type { LlmSpendLedger } from "./commands/stdlib/llm_invoke.js";
+import type { LlmSpendLedger } from "./core/llm_accounting.js";
 import {
 	InputRequestSuspension,
 	RequestInputResumeError,
