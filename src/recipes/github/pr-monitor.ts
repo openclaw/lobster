@@ -1,3 +1,4 @@
+import { buildPrChangeSummary, formatPrChangeMessage } from "./snapshot.js";
 /**
  * GitHub PR Monitor Recipe - Track PR changes over time
  *
@@ -14,70 +15,6 @@
 import { Lobster } from "../../sdk/index.js";
 import { diffLast } from "../../sdk/primitives/diff.js";
 import { ghPrView } from "./stages/pr-view.js";
-
-/**
- * Pick a subset of PR fields for comparison
- * @param {Object} snapshot
- * @returns {Object|null}
- */
-function pickSubset(snapshot) {
-	if (!snapshot || typeof snapshot !== "object") return null;
-	return {
-		number: snapshot.number,
-		title: snapshot.title,
-		url: snapshot.url,
-		state: snapshot.state,
-		isDraft: snapshot.isDraft,
-		mergeable: snapshot.mergeable,
-		reviewDecision: snapshot.reviewDecision,
-		updatedAt: snapshot.updatedAt,
-		baseRefName: snapshot.baseRefName,
-		headRefName: snapshot.headRefName,
-	};
-}
-
-/**
- * Build a summary of what changed between two snapshots
- * @param {Object|null} before
- * @param {Object} after
- * @returns {{ changedFields: string[], changes: Object }}
- */
-function buildChangeSummary(before, after) {
-	const a = pickSubset(after);
-	const b = pickSubset(before);
-
-	if (!a) return { changedFields: [], changes: {} };
-	if (!b) {
-		return {
-			changedFields: Object.keys(a),
-			changes: Object.fromEntries(Object.keys(a).map((k) => [k, { from: null, to: a[k] }])),
-		};
-	}
-
-	const changes = {};
-	for (const key of Object.keys(a)) {
-		if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) {
-			changes[key] = { from: b[key], to: a[key] };
-		}
-	}
-
-	return {
-		changedFields: Object.keys(changes),
-		changes,
-	};
-}
-
-/**
- * Format a human-readable change message
- * @param {Object} options
- * @returns {string}
- */
-function formatChangeMessage({ repo, pr, changedFields, prInfo }) {
-	const fields = changedFields.length ? ` (${changedFields.join(", ")})` : "";
-	const title = prInfo?.title ? `: ${prInfo.title}` : "";
-	const url = prInfo?.url ? ` ${prInfo.url}` : "";
-	return `PR updated: ${repo}#${pr}${title}${fields}.${url}`.replace(/\s+/g, " ").trim();
-}
 
 /**
  * Create a PR monitor workflow
@@ -121,7 +58,7 @@ export function prMonitor(options) {
 				];
 			}
 
-			const summary = buildChangeSummary(before, current);
+			const summary = buildPrChangeSummary(before, current);
 
 			if (summaryOnly) {
 				return [
@@ -215,9 +152,9 @@ export function prMonitorNotify(options) {
 
 			const current = diffResult.after;
 			const before = diffResult.before;
-			const summary = buildChangeSummary(before, current);
+			const summary = buildPrChangeSummary(before, current);
 
-			const message = formatChangeMessage({
+			const message = formatPrChangeMessage({
 				repo,
 				pr: Number(pr),
 				changedFields: summary.changedFields,

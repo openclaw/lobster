@@ -9,9 +9,6 @@ const runners = {
 	"github.pr.monitor.notify": runGithubPrMonitorNotifyWorkflow,
 };
 
-// Recipe runners - adapt SDK recipes to workflow runner interface
-const recipeRunners = {};
-
 export const workflowsRunCommand = {
 	name: "workflows.run",
 	meta: {
@@ -39,22 +36,6 @@ export const workflowsRunCommand = {
 		const name = args.name ?? args._[0];
 		if (!name) throw new Error("workflows.run requires --name");
 
-		// Check for recipe-based workflow first
-		const recipeRunner = recipeRunners[name];
-		if (recipeRunner) {
-			let workflowArgs = {};
-			if (args["args-json"]) {
-				try {
-					workflowArgs = JSON.parse(String(args["args-json"]));
-				} catch {
-					throw new Error("workflows.run --args-json must be valid JSON");
-				}
-			}
-			const result = await recipeRunner({ args: workflowArgs, ctx });
-			return { output: asStream([result]) };
-		}
-
-		// Fall back to legacy workflow registry
 		const meta = workflowRegistry[name];
 		if (!meta) throw new Error(`Unknown workflow: ${name}`);
 

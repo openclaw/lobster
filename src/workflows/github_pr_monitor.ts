@@ -1,68 +1,7 @@
-import { runAbortableProcess } from "../abortable_process.js";
-
-async function runProcess(command, argv, { env, cwd, signal, forceTerminationSignal }) {
-	const { stdout, stderr, code } = await runAbortableProcess({
-		command,
-		argv,
-		env,
-		cwd,
-		signal,
-		forceTerminationSignal,
-		notFoundMessage: "gh not found on PATH (install GitHub CLI)",
-	});
-	if (code === 0) return { stdout, stderr };
-	throw new Error(`gh failed (${code}): ${stderr.trim() || stdout.trim()}`);
-}
-
 import { diffAndStore } from "../state/store.js";
-
-function pickSubset(snapshot) {
-	if (!snapshot || typeof snapshot !== "object") return null;
-	return {
-		number: snapshot.number,
-		title: snapshot.title,
-		url: snapshot.url,
-		state: snapshot.state,
-		isDraft: snapshot.isDraft,
-		mergeable: snapshot.mergeable,
-		reviewDecision: snapshot.reviewDecision,
-		updatedAt: snapshot.updatedAt,
-		baseRefName: snapshot.baseRefName,
-		headRefName: snapshot.headRefName,
-	};
-}
-
-export function buildPrChangeSummary(before, after) {
-	const a = pickSubset(after);
-	const b = pickSubset(before);
-
-	if (!a) return { changedFields: [], changes: {} };
-	if (!b) {
-		return {
-			changedFields: Object.keys(a),
-			changes: Object.fromEntries(Object.keys(a).map((k) => [k, { from: null, to: a[k] }])),
-		};
-	}
-
-	const changes = {};
-	for (const key of Object.keys(a)) {
-		if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) {
-			changes[key] = { from: b[key], to: a[key] };
-		}
-	}
-
-	return {
-		changedFields: Object.keys(changes),
-		changes,
-	};
-}
-
-function formatPrChangeMessage({ repo, pr, changedFields, prInfo }) {
-	const fields = changedFields.length ? ` (${changedFields.join(", ")})` : "";
-	const title = prInfo?.title ? `: ${prInfo.title}` : "";
-	const url = prInfo?.url ? ` ${prInfo.url}` : "";
-	return `PR updated: ${repo}#${pr}${title}${fields}.${url}`.replace(/\s+/g, " ").trim();
-}
+import { runGithubPr, parseGithubPr } from "../recipes/github/read_pr.js";
+import { buildPrChangeSummary, formatPrChangeMessage } from "../recipes/github/snapshot.js";
+export { buildPrChangeSummary } from "../recipes/github/snapshot.js";
 
 export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 	ctx.signal?.throwIfAborted();
@@ -74,30 +13,16 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 	const changesOnly = Boolean(args.changesOnly);
 	const summaryOnly = Boolean(args.summaryOnly);
 
-	const argv = [
-		"pr",
-		"view",
-		String(pr),
-		"--repo",
-		String(repo),
-		"--json",
-		"number,title,url,state,isDraft,mergeable,reviewDecision,author,baseRefName,headRefName,updatedAt",
-	];
-
-	const { stdout } = (await runProcess("gh", argv, {
+	const stdout = await runGithubPr({
+		repo,
+		pr,
 		env: ctx.env,
 		cwd: process.cwd(),
 		signal: ctx.signal,
 		forceTerminationSignal: ctx.forceTerminationSignal,
-	})) as any;
+	});
 	ctx.signal?.throwIfAborted();
-
-	let current;
-	try {
-		current = JSON.parse(stdout.trim());
-	} catch {
-		throw new Error("gh returned non-JSON output");
-	}
+	const current = parseGithubPr(stdout);
 
 	const { changed, before } = await diffAndStore({
 		env: ctx.env,
