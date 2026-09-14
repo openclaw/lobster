@@ -2,6 +2,8 @@
 
 All notable changes to Lobster will be documented in this file.
 
+## Unreleased
+
 ## 2026.9.13 - 2026-09-13
 
 **Highlights:** Cost limits no longer stop workflows falsely when later steps reuse LLM results, and CLI pipelines preserve empty and quoted arguments.
