@@ -78,6 +78,8 @@ conventional interrupt exit status.
 - `exec --stdin raw|json|jsonl`: feed pipeline input into subprocess stdin
 - Explicit quoted empty arguments are retained by both pipeline `exec` and SDK `exec`. Invocation shims preserve argument punctuation without shell expansion.
 - `where`, `pick`, `head`: data shaping
+- `head --n N` stops reading upstream as soon as N items have been yielded; `--n 0` does not read upstream input.
+- `pick` and `map` preserve field names such as `__proto__` as ordinary own data fields.
 - `json`, `table`: renderers
 - `approve`: approval gate (TTY prompt or `--emit` for OpenClaw integration)
 

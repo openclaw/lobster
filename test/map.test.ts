@@ -43,3 +43,24 @@ test("map converts non-object items to {value: item} when adding fields", async 
 	const out = await run("map kind=num", [5]);
 	assert.deepEqual(out, [{ value: 5, kind: "num" }]);
 });
+
+test("map assignments preserve __proto__ as an ordinary own field", async () => {
+	const out = await run("map __proto__=label constructor=kind", [{ id: 1 }]);
+	assert.deepEqual(out, [JSON.parse('{"id":1,"__proto__":"label","constructor":"kind"}')]);
+	assert.equal(Object.getPrototypeOf(out[0]), Object.prototype);
+	assert.equal(Object.hasOwn(out[0], "__proto__"), true);
+});
+
+test("map preserves assignment to existing writable non-configurable fields", async () => {
+	const item = Object.defineProperty({}, "id", {
+		value: "old",
+		writable: true,
+		enumerable: true,
+	});
+	assert.deepEqual(await run("map id=new", [item]), [{ id: "new" }]);
+	assert.equal(Object.getOwnPropertyDescriptor(item, "id")?.configurable, false);
+});
+
+test("map length assignments still wrap array inputs", async () => {
+	assert.deepEqual(await run("map length=1", [[1, 2]]), [{ value: [1, 2], length: "1" }]);
+});

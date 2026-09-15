@@ -21,10 +21,11 @@ export const headCommand = {
 
 		return {
 			output: (async function* () {
+				if (n === 0) return;
 				let i = 0;
 				for await (const item of input) {
-					if (i++ >= n) break;
 					yield item;
+					if (++i >= n) break;
 				}
 			})(),
 		};

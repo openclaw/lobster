@@ -4,6 +4,9 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Stop `head` at its requested item limit without reading an extra upstream item, avoiding unwanted work, errors, or hangs after the requested output is complete.
+- Preserve `__proto__` fields in `pick` projections and `map` assignments without changing output object prototypes or silently dropping data.
+
 ## 2026.9.13 - 2026-09-13
 
 **Highlights:** Cost limits no longer stop workflows falsely when later steps reuse LLM results, and CLI pipelines preserve empty and quoted arguments.

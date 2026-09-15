@@ -33,9 +33,7 @@ export const pickCommand = {
 						yield item;
 						continue;
 					}
-					const out = {};
-					for (const f of fields) out[f] = item[f];
-					yield out;
+					yield Object.fromEntries(fields.map((field) => [field, item[field]]));
 				}
 			})(),
 		};

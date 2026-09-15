@@ -84,7 +84,18 @@ export const mapCommand = {
 							cur = { value: cur };
 						}
 						for (const { key, value } of assignments) {
-							cur[key] = renderTemplate(String(value), item);
+							const rendered = renderTemplate(String(value), item);
+							if (key === "__proto__" && !Object.hasOwn(cur, key)) {
+								// Bypass the inherited legacy prototype setter for this JSON field.
+								Object.defineProperty(cur, key, {
+									value: rendered,
+									enumerable: true,
+									writable: true,
+									configurable: true,
+								});
+							} else {
+								cur[key] = rendered;
+							}
 						}
 					}
 
