@@ -1,4 +1,5 @@
 import { dryRunWorkflow } from "./dry_run.js";
+import { configuredOpenClawOrigin } from "../openclaw_credential_origin.js";
 import {
 	createRecord,
 	mergeEnv,
@@ -78,6 +79,7 @@ export type {
 } from "./types.js";
 
 type RunContext = {
+	openclawCredentialOrigin?: string | null;
 	stdin: NodeJS.ReadableStream;
 	stdout: NodeJS.WritableStream;
 	stderr: NodeJS.WritableStream;
@@ -253,6 +255,13 @@ export async function runWorkflowFile({
 	response?: unknown;
 	cancel?: boolean;
 }): Promise<WorkflowRunResult> {
+	ctx = {
+		...ctx,
+		openclawCredentialOrigin:
+			ctx.openclawCredentialOrigin === undefined
+				? configuredOpenClawOrigin(ctx.env)
+				: ctx.openclawCredentialOrigin,
+	};
 	const consumedResumeStateKey =
 		resume?.stateKey && typeof resume.stateKey === "string"
 			? await resolveWorkflowResumeStateKey(ctx.env, resume.stateKey, ctx.signal)
@@ -2353,6 +2362,7 @@ async function runPipelineStep({
 	const pipelineStartIndex = resume ? resume.pipelineInput.resumeAtIndex : 0;
 	const remainingPipeline = pipeline.slice(pipelineStartIndex);
 	const result = await runPipeline({
+		openclawCredentialOrigin: ctx.openclawCredentialOrigin,
 		pipeline: remainingPipeline,
 		registry: ctx.registry,
 		stdin: ctx.stdin,

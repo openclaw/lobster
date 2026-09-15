@@ -1,4 +1,5 @@
 import { createJsonRenderer } from "./renderers/json.js";
+import { configuredOpenClawOrigin } from "./openclaw_credential_origin.js";
 import type { LlmSpendLedger } from "./core/llm_accounting.js";
 import {
 	InputRequestSuspension,
@@ -29,6 +30,7 @@ export async function runPipeline({
 	requestInputEnabled = true,
 	onExecutionStart = undefined,
 	onNonRetryableSideEffect = undefined,
+	openclawCredentialOrigin = configuredOpenClawOrigin(env),
 }: {
 	pipeline: any[];
 	registry: any;
@@ -49,6 +51,7 @@ export async function runPipeline({
 	requestInputEnabled?: boolean;
 	onExecutionStart?: (() => void | Promise<void>) | undefined;
 	onNonRetryableSideEffect?: (() => void) | undefined;
+	openclawCredentialOrigin?: string | null;
 }) {
 	if (dryRun) {
 		return dryRunPipeline({ pipeline, registry, stderr });
@@ -72,6 +75,7 @@ export async function runPipeline({
 	};
 
 	const baseCtx = {
+		openclawCredentialOrigin,
 		stdin,
 		stdout,
 		stderr,
