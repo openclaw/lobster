@@ -44,6 +44,8 @@ function createInvokeCommand(commandName: string) {
 				`  - Backward compatible: CLAWD_URL is also supported.\n` +
 				`  - Optional Bearer token via OPENCLAW_TOKEN env var (or pass --token).\n` +
 				`  - Backward compatible: CLAWD_TOKEN is also supported.\n` +
+				`  - Native stages can inherit a remote token only for the original host-configured URL origin.\n` +
+				`  - Workflow env overrides do not establish remote trust; inherited-token requests reject redirects.\n` +
 				`  - Optional attribution via --session-key <sessionKey>.\n\n` +
 				`Notes:\n` +
 				`  - This is a thin transport bridge. Lobster should not own OAuth/secrets.\n`
@@ -82,9 +84,10 @@ function createInvokeCommand(commandName: string) {
 			if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
 				throw new Error(`${commandName} requires an http(s) --url`);
 			}
-			if (token && !explicitToken && !isLocalOpenClawOrigin(endpoint)) {
+			const configuredOriginMatches = endpoint.origin === ctx.openclawCredentialOrigin;
+			if (token && !explicitToken && !isLocalOpenClawOrigin(endpoint) && !configuredOriginMatches) {
 				throw new Error(
-					`${commandName} refuses to send OPENCLAW_TOKEN/CLAWD_TOKEN to non-local --url; pass --token explicitly for remote endpoints`,
+					`${commandName} refuses to send OPENCLAW_TOKEN/CLAWD_TOKEN to non-local --url outside the host-configured origin; configure a matching OPENCLAW_URL/CLAWD_URL in the host environment or supply an explicit token`,
 				);
 			}
 			const sessionKey = args.sessionKey ?? args["session-key"] ?? null;
@@ -94,6 +97,8 @@ function createInvokeCommand(commandName: string) {
 			const invokeOnce = async (argsValue: unknown) => {
 				ctx.onNonRetryableSideEffect?.();
 				const res = await fetch(endpoint, {
+					// Never redirect an automatically selected host credential.
+					...(token && !explicitToken ? { redirect: "error" as const } : {}),
 					method: "POST",
 					signal: ctx.signal,
 					headers: {

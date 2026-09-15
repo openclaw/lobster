@@ -282,6 +282,27 @@ Prereqs:
 - `OPENCLAW_URL` points at a running OpenClaw gateway
 - optionally `OPENCLAW_TOKEN` if auth is enabled
 
+To call a remote Gateway, set `OPENCLAW_URL` and `OPENCLAW_TOKEN` in the
+environment before starting Lobster, rather than only inside the workflow.
+The older names `CLAWD_URL` and `CLAWD_TOKEN` also work.
+
+Native pipeline steps can use that token to call the configured Gateway, but
+cannot send it to another remote server by changing workflow settings or `--url`.
+The scheme (`http` or `https`), hostname and port must match the configured URL;
+local loopback addresses such as `localhost` are also allowed. Requests using an
+environment token do not follow redirects, even locally: configure the final
+Gateway URL directly.
+
+When you resume a paused workflow, Lobster uses the current URL and token.
+You can rotate the token without editing the saved workflow. Changing the URL
+also changes where calls go unless the workflow specifies its own `--url`.
+Keep tokens out of workflow text and arguments, which may be saved in approval
+checkpoints.
+
+These checks do not sandbox shell commands or JavaScript: both can read their
+environment. A shell command that starts another Lobster process supplies that
+process's configuration.
+
 ```bash
 export OPENCLAW_URL=http://127.0.0.1:18789
 # export OPENCLAW_TOKEN=...
