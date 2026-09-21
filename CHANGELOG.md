@@ -4,6 +4,7 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Keep compiled tests out of npm packages prepared after validation, reducing download and install size while preserving runtime source maps.
 - Stop `head` at its requested item limit without reading an extra upstream item, avoiding unwanted work, errors, or hangs after the requested output is complete.
 - Preserve `__proto__` fields in `pick` projections and `map` assignments without changing output object prototypes or silently dropping data.
 
