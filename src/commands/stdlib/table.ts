@@ -25,12 +25,10 @@ export const tableCommand = {
 		}
 
 		const sample = items.slice(0, 20);
-		const objectItems = sample.filter((x) => x && typeof x === "object" && !Array.isArray(x));
-
-		if (objectItems.length === sample.length) {
+		if (sample.every((x) => x && typeof x === "object" && !Array.isArray(x))) {
 			const cols = [];
 			const seen = new Set();
-			for (const obj of objectItems) {
+			for (const obj of sample) {
 				for (const k of Object.keys(obj)) {
 					if (!seen.has(k)) {
 						seen.add(k);
@@ -43,7 +41,9 @@ export const tableCommand = {
 				(row) => row.map((cell) => cell.replace(/\n/g, " ")),
 			);
 
-			const widths = cols.map((_, i) => Math.max(...rows.map((r) => r[i].length), 3));
+			const widths = cols.map((_, i) =>
+				rows.reduce((width, row) => Math.max(width, row[i].length), 3),
+			);
 
 			const renderRow = (row) => row.map((cell, i) => cell.padEnd(widths[i])).join("  ");
 			ctx.stdout.write(renderRow(rows[0]) + "\n");
@@ -53,7 +53,6 @@ export const tableCommand = {
 			return { output: emptyStream(), rendered: true };
 		}
 
-		// Fallback: render each item on a line.
 		for (const item of items) ctx.stdout.write(stringifyCell(item) + "\n");
 		return { output: emptyStream(), rendered: true };
 	},

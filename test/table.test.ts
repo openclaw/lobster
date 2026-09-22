@@ -34,3 +34,23 @@ test("table falls back to one stringified item per line for non-object input", a
 	const { out } = await render([1, "two", { a: 1 }, [3, 4], null]);
 	assert.equal(out, '1\ntwo\n{"a":1}\n[3,4]\n\n');
 });
+
+test("table renders large inputs without exceeding the argument limit", async () => {
+	const count = 150_000;
+	const rows = Array.from({ length: count }, (_, i) => ({ id: i }));
+	let lines = 0;
+	let last = "";
+	await tableCommand.run({
+		input: rows,
+		ctx: {
+			stdout: {
+				write(chunk) {
+					lines += 1;
+					last = chunk;
+				},
+			},
+		},
+	});
+	assert.equal(lines, count + 2);
+	assert.equal(last, "149999\n");
+});
