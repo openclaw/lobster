@@ -46,13 +46,8 @@ test("llm.invoke auto-detects OpenClaw provider and normalizes output", async ()
 				JSON.stringify({
 					ok: true,
 					result: {
-						ok: true,
-						result: {
-							runId: "invoke_1",
-							model: parsed.args?.model,
-							prompt: parsed.args?.prompt,
-							output: { data: { summary: "hello" } },
-						},
+						content: [{ type: "text", text: '{"summary":"hello"}' }],
+						details: { json: { summary: "hello" }, model: parsed.args?.model },
 					},
 				}),
 			);
@@ -81,7 +76,7 @@ test("llm.invoke auto-detects OpenClaw provider and normalizes output", async ()
 		assert.equal(items.length, 1);
 		assert.equal(items[0].kind, "llm.invoke");
 		assert.equal(items[0].source, "openclaw");
-		assert.equal(items[0].runId, "invoke_1");
+		assert.equal(items[0].runId, null);
 		assert.equal(items[0].output.data.summary, "hello");
 		assert.equal(bodyLog.length, 1);
 		assert.equal(bodyLog[0].tool, "llm-task");

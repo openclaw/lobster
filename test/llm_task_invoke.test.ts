@@ -39,24 +39,7 @@ test("llm_task.invoke posts to /tools/invoke (clawd) and normalizes result", asy
 			const parsed = JSON.parse(buf || "{}");
 			bodyLog.push(parsed);
 			res.writeHead(200, { "content-type": "application/json" });
-			res.end(
-				JSON.stringify({
-					ok: true,
-					result: {
-						ok: true,
-						result: {
-							runId: "task_1",
-							model: parsed.args?.model,
-							prompt: parsed.args?.prompt,
-							output: {
-								text: "done",
-								data: { summary: "hello world" },
-							},
-							usage: { inputTokens: 12, outputTokens: 2, totalTokens: 14 },
-						},
-					},
-				}),
-			);
+			res.end(JSON.stringify(gatewayResult({ summary: "hello world" }, parsed.args?.model)));
 		});
 	});
 
@@ -83,7 +66,7 @@ test("llm_task.invoke posts to /tools/invoke (clawd) and normalizes result", asy
 		assert.equal(items.length, 1);
 		const payload = items[0];
 		assert.equal(payload.kind, "llm_task.invoke");
-		assert.equal(payload.runId, "task_1");
+		assert.equal(payload.runId, null);
 		assert.equal(payload.output.data.summary, "hello world");
 		assert.equal(payload.model, "claude-3-sonnet");
 		assert.equal(payload.source, "clawd");
@@ -95,8 +78,7 @@ test("llm_task.invoke posts to /tools/invoke (clawd) and normalizes result", asy
 		assert.equal(bodyLog[0].action, "invoke");
 		assert.equal(bodyLog[0].args.prompt, "Summarize");
 		assert.equal(bodyLog[0].args.model, "claude-3-sonnet");
-		assert.equal(bodyLog[0].args.artifacts.length, 1);
-		assert.equal(bodyLog[0].args.artifactHashes.length, 1);
+		assert.equal(bodyLog[0].args.input.length, 1);
 	} finally {
 		await rm(cacheDir, { recursive: true, force: true });
 		await closeServer(server);
@@ -118,16 +100,7 @@ test("llm_task.invoke retries when schema validation fails", async () => {
 		}
 		calls += 1;
 		const valid = calls >= 2;
-		const payload = {
-			ok: true,
-			result: {
-				ok: true,
-				result: {
-					runId: `attempt_${calls}`,
-					output: valid ? { data: { decision: "send" } } : { data: { foo: "bar" } },
-				},
-			},
-		};
+		const payload = gatewayResult(valid ? { decision: "send" } : { foo: "bar" });
 		res.writeHead(200, { "content-type": "application/json" });
 		res.end(JSON.stringify(payload));
 	});
@@ -154,7 +127,7 @@ test("llm_task.invoke retries when schema validation fails", async () => {
 
 		const items = await collect(result.output!);
 		assert.equal(items.length, 1);
-		assert.equal(items[0].runId, "attempt_2");
+		assert.equal(items[0].attemptCount, 2);
 		assert.equal(items[0].output.data.decision, "send");
 		assert.equal(calls, 2);
 	} finally {
@@ -178,15 +151,7 @@ test("llm_task.invoke makes a single model call when --max-validation-retries is
 		}
 		calls += 1;
 		res.writeHead(200, { "content-type": "application/json" });
-		res.end(
-			JSON.stringify({
-				ok: true,
-				result: {
-					ok: true,
-					result: { runId: `attempt_${calls}`, output: { data: { foo: "bar" } } },
-				},
-			}),
-		);
+		res.end(JSON.stringify(gatewayResult({ foo: "bar" })));
 	});
 
 	await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -237,18 +202,7 @@ test("llm_task.invoke retries validation exactly once by default", async () => {
 		req.on("end", () => {
 			bodyLog.push(JSON.parse(buf || "{}"));
 			res.writeHead(200, { "content-type": "application/json" });
-			res.end(
-				JSON.stringify({
-					ok: true,
-					result: {
-						ok: true,
-						result: {
-							runId: `attempt_${bodyLog.length}`,
-							output: { data: { foo: "bar" } },
-						},
-					},
-				}),
-			);
+			res.end(JSON.stringify(gatewayResult({ foo: "bar" })));
 		});
 	});
 
@@ -281,8 +235,8 @@ test("llm_task.invoke retries validation exactly once by default", async () => {
 
 		assert.equal(bodyLog.length, 2);
 		assert.equal(bodyLog[0].args.retryContext, undefined);
-		assert.equal(bodyLog[1].args.retryContext.attempt, 2);
-		assert.ok(bodyLog[1].args.retryContext.validationErrors.length >= 1);
+		assert.match(bodyLog[1].args.prompt, /"attempt":2/);
+		assert.match(bodyLog[1].args.prompt, /validationErrors.*decision/);
 	} finally {
 		await rm(cacheDir, { recursive: true, force: true });
 		await closeServer(server);
@@ -307,12 +261,7 @@ test("llm_task.invoke persists to run state so resume skips remote call", async 
 		req.on("end", () => {
 			void buf;
 			res.writeHead(200, { "content-type": "application/json" });
-			res.end(
-				JSON.stringify({
-					ok: true,
-					result: { ok: true, result: { runId: "state_run", output: { data: { ok: true } } } },
-				}),
-			);
+			res.end(JSON.stringify(gatewayResult({ ok: true })));
 		});
 	});
 	await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -376,12 +325,7 @@ test("llm_task.invoke reuses file cache when URL unavailable", async () => {
 		req.on("end", () => {
 			void buf;
 			res.writeHead(200, { "content-type": "application/json" });
-			res.end(
-				JSON.stringify({
-					ok: true,
-					result: { ok: true, result: { runId: "cache_run", output: { text: "cached" } } },
-				}),
-			);
+			res.end(JSON.stringify(gatewayResult("cached")));
 		});
 	});
 	await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -439,15 +383,7 @@ test("llm_task.invoke treats corrupt file cache as a miss and rewrites it atomic
 		}
 		calls += 1;
 		res.writeHead(200, { "content-type": "application/json" });
-		res.end(
-			JSON.stringify({
-				ok: true,
-				result: {
-					ok: true,
-					result: { runId: `cache_repair_${calls}`, output: { text: `fresh ${calls}` } },
-				},
-			}),
-		);
+		res.end(JSON.stringify(gatewayResult("fresh " + calls)));
 	});
 	await new Promise<void>((resolve) => server.listen(0, resolve));
 	const addr = server.address();
@@ -462,7 +398,7 @@ test("llm_task.invoke treats corrupt file cache as a miss and rewrites it atomic
 			ctx: baseCtx(ctxEnv, registry),
 		} as any);
 		const firstItems = await collect(first.output!);
-		assert.equal(firstItems[0].runId, "cache_repair_1");
+		assert.equal(firstItems[0].output.data, "fresh 1");
 		assert.equal(calls, 1);
 
 		const namespaceDir = path.join(cacheDir, "llm_task.invoke");
@@ -478,13 +414,13 @@ test("llm_task.invoke treats corrupt file cache as a miss and rewrites it atomic
 			ctx: baseCtx(ctxEnv, registry),
 		} as any);
 		const secondItems = await collect(second.output!);
-		assert.equal(secondItems[0].runId, "cache_repair_2");
+		assert.equal(secondItems[0].output.data, "fresh 2");
 		assert.equal(secondItems[0].source, "clawd");
 		assert.equal(secondItems[0].cached, false);
 		assert.equal(calls, 2);
 
 		const repaired = JSON.parse(await readFile(cachePath, "utf8"));
-		assert.equal(repaired.items[0].runId, "cache_repair_2");
+		assert.equal(repaired.items[0].output.data, "fresh 2");
 
 		await writeFile(
 			cachePath,
@@ -497,7 +433,7 @@ test("llm_task.invoke treats corrupt file cache as a miss and rewrites it atomic
 			ctx: baseCtx(ctxEnv, registry),
 		} as any);
 		const thirdItems = await collect(third.output!);
-		assert.equal(thirdItems[0].runId, "cache_repair_3");
+		assert.equal(thirdItems[0].output.data, "fresh 3");
 		assert.equal(calls, 3);
 	} finally {
 		await rm(cacheDir, { recursive: true, force: true });
@@ -529,18 +465,7 @@ test("llm_task.invoke uses CLAWD_URL (/tools/invoke) without requiring --url/--m
 
 			// This is the OpenClaw tool router envelope.
 			res.writeHead(200, { "content-type": "application/json" });
-			res.end(
-				JSON.stringify({
-					ok: true,
-					result: {
-						ok: true,
-						result: {
-							runId: "task_clawd_1",
-							output: { data: { hello: "world" } },
-						},
-					},
-				}),
-			);
+			res.end(JSON.stringify(gatewayResult({ hello: "world" })));
 		});
 	});
 
@@ -567,19 +492,29 @@ test("llm_task.invoke uses CLAWD_URL (/tools/invoke) without requiring --url/--m
 		assert.equal(items.length, 1);
 		assert.equal(items[0].source, "clawd");
 		assert.equal(items[0].cached, false);
-		assert.equal(items[0].runId, "task_clawd_1");
+		assert.equal(items[0].runId, null);
 		assert.equal(items[0].output.data.hello, "world");
 
 		assert.equal(bodyLog.length, 1);
 		assert.equal(bodyLog[0].tool, "llm-task");
 		assert.equal(bodyLog[0].action, "invoke");
 		assert.equal(bodyLog[0].args.prompt, "Summarize");
-		assert.ok(Array.isArray(bodyLog[0].args.artifactHashes));
+		assert.ok(Array.isArray(bodyLog[0].args.input));
 	} finally {
 		await rm(cacheDir, { recursive: true, force: true });
 		await closeServer(server);
 	}
 });
+
+function gatewayResult(json: unknown, model?: string) {
+	return {
+		ok: true,
+		result: {
+			content: [{ type: "text", text: JSON.stringify(json) }],
+			details: { json, ...(model ? { model } : {}) },
+		},
+	};
+}
 
 function baseCtx(envOverrides: Record<string, string>, registry?) {
 	return {

@@ -205,7 +205,10 @@ for (const provider of ["openclaw.invoke", "clawd.invoke", "openclaw", "http", "
 			let hits = 0;
 			const payload = JSON.stringify({
 				ok: true,
-				result: { output: { data: { value: "x".repeat(OVER_LIMIT_BYTES) } } },
+				result:
+					provider === "openclaw"
+						? { details: { json: { value: "x".repeat(OVER_LIMIT_BYTES) } } }
+						: { output: { data: { value: "x".repeat(OVER_LIMIT_BYTES) } } },
 			});
 			const server = http.createServer((req, res) => {
 				hits++;

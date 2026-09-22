@@ -139,30 +139,20 @@ test("email.triage --llm uses llm_task.invoke to draft replies (and can emit dra
 			bodyLog.push(parsed);
 
 			res.writeHead(200, { "content-type": "application/json" });
-			// OpenClaw tool router envelope -> llm-task tool envelope
 			res.end(
-				JSON.stringify({
-					ok: true,
-					result: {
-						ok: true,
-						result: {
-							runId: "triage_1",
-							output: {
-								data: {
-									decisions: [
-										{
-											id: "m1",
-											category: "needs_reply",
-											rationale: "Unclear question",
-											reply: { body: "Sure — what’s the deadline?" },
-										},
-										{ id: "m2", category: "needs_action", rationale: "NDA" },
-									],
-								},
+				JSON.stringify(
+					gatewayResult({
+						decisions: [
+							{
+								id: "m1",
+								category: "needs_reply",
+								rationale: "Unclear question",
+								reply: { body: "Sure — what’s the deadline?" },
 							},
-						},
-					},
-				}),
+							{ id: "m2", category: "needs_action", rationale: "NDA" },
+						],
+					}),
+				),
 			);
 		});
 	});
@@ -267,26 +257,17 @@ test("email.triage --llm honors OPENCLAW_URL (not just CLAWD_URL)", async () => 
 		callCount++;
 		res.writeHead(200, { "content-type": "application/json" });
 		res.end(
-			JSON.stringify({
-				ok: true,
-				result: {
-					ok: true,
-					result: {
-						runId: "triage_openclaw_url",
-						output: {
-							data: {
-								decisions: [
-									{
-										id: "m1",
-										category: "needs_reply",
-										reply: { body: "Absolutely — I can help." },
-									},
-								],
-							},
+			JSON.stringify(
+				gatewayResult({
+					decisions: [
+						{
+							id: "m1",
+							category: "needs_reply",
+							reply: { body: "Absolutely — I can help." },
 						},
-					},
-				},
-			}),
+					],
+				}),
+			),
 		);
 	});
 
@@ -324,3 +305,10 @@ test("email.triage --llm honors OPENCLAW_URL (not just CLAWD_URL)", async () => 
 		await closeServer(server);
 	}
 });
+
+function gatewayResult(json: unknown) {
+	return {
+		ok: true,
+		result: { content: [{ type: "text", text: JSON.stringify(json) }], details: { json } },
+	};
+}

@@ -6,6 +6,7 @@ All notable changes to Lobster will be documented in this file.
 
 - Render large tables without overflowing the JavaScript argument limit while calculating column widths.
 - Cover empty, object-table, and mixed-value terminal rendering; thanks @KrasimirKralev (PR [#184](https://github.com/openclaw/lobster/pull/184)).
+- Translate OpenClaw `llm-task` requests and tool results correctly in `llm.invoke` and `llm_task.invoke`, preserving local schema validation and retries; thanks @bggsolar (Issue [#185](https://github.com/openclaw/lobster/issues/185)).
 - Keep compiled tests out of npm packages prepared after validation, reducing download and install size while preserving runtime source maps.
 - Stop `head` at its requested item limit without reading an extra upstream item, avoiding unwanted work, errors, or hangs after the requested output is complete.
 - Preserve `__proto__` fields in `pick` projections and `map` assignments without changing output object prototypes or silently dropping data.

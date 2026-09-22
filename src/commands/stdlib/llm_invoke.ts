@@ -791,6 +791,16 @@ async function invokeOpenClawAdapter({
 	signal?: AbortSignal;
 	maxResponseBytes?: number;
 }) {
+	// Keep validation local: gateway schema errors discard the JSON needed for retries.
+	const prompt = [
+		payload.prompt,
+		...(payload.outputSchema
+			? ["Return JSON matching this JSON Schema: " + JSON.stringify(payload.outputSchema)]
+			: []),
+		...(payload.retryContext
+			? ["Correct the previous validation failure: " + JSON.stringify(payload.retryContext)]
+			: []),
+	].join("\n\n");
 	const res = await fetch(endpoint, {
 		method: "POST",
 		signal,
@@ -801,7 +811,13 @@ async function invokeOpenClawAdapter({
 		body: JSON.stringify({
 			tool: "llm-task",
 			action: "invoke",
-			args: payload,
+			args: {
+				prompt,
+				input: payload.artifacts,
+				model: payload.model,
+				temperature: payload.temperature,
+				maxTokens: payload.maxOutputTokens,
+			},
 		}),
 	});
 
@@ -817,19 +833,29 @@ async function invokeOpenClawAdapter({
 		throw new Error("Response was not JSON");
 	}
 
-	if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "ok" in parsed) {
-		if (parsed.ok !== true) {
-			const msg = parsed?.error?.message ?? "Unknown error";
-			throw new Error(`openclaw adapter error: ${msg}`);
-		}
-		const inner = parsed.result;
-		if (inner && typeof inner === "object" && !Array.isArray(inner) && "ok" in inner) {
-			return inner as LlmResponseEnvelope;
-		}
-		return { ok: true, result: inner } as LlmResponseEnvelope;
+	if (parsed?.ok !== true) {
+		throw new Error(
+			"openclaw adapter error: " + (parsed?.error?.message ?? "Invalid gateway response"),
+		);
 	}
-
-	return { ok: true, result: parsed } as LlmResponseEnvelope;
+	const result = parsed.result;
+	const details = result?.details;
+	if (
+		result?.isError ||
+		!details ||
+		typeof details !== "object" ||
+		!Object.hasOwn(details, "json")
+	) {
+		throw new Error("openclaw adapter received invalid llm-task result");
+	}
+	return {
+		ok: true,
+		result: {
+			prompt: payload.prompt,
+			...(typeof details.model === "string" ? { model: details.model } : {}),
+			output: { format: "json", text: JSON.stringify(details.json), data: details.json },
+		},
+	} satisfies LlmResponseEnvelope;
 }
 
 async function invokeHttpAdapter({

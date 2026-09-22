@@ -2206,24 +2206,15 @@ test("workflow pipeline llm_task.invoke consumes stdin artifacts from previous s
 		req.on("end", () => {
 			const parsed = JSON.parse(body || "{}");
 			requests.push(parsed);
-			const text = String(parsed?.args?.artifacts?.[0]?.text ?? "");
+			const text = String(parsed?.args?.input?.[0]?.text ?? "");
 			const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
 			res.writeHead(200, { "content-type": "application/json" });
 			res.end(
 				JSON.stringify({
 					ok: true,
 					result: {
-						ok: true,
-						result: {
-							runId: "task_1",
-							model: parsed?.args?.model ?? "test-model",
-							prompt: parsed?.args?.prompt,
-							output: {
-								text: JSON.stringify({ word_count: wordCount }),
-								data: { word_count: wordCount },
-								format: "json",
-							},
-						},
+						content: [{ type: "text", text: JSON.stringify({ word_count: wordCount }) }],
+						details: { json: { word_count: wordCount }, model: "test-model" },
 					},
 				}),
 			);
@@ -2284,10 +2275,7 @@ test("workflow pipeline llm_task.invoke consumes stdin artifacts from previous s
 		assert.equal(requests[0].tool, "llm-task");
 		assert.equal(requests[0].action, "invoke");
 		assert.equal(requests[0].args.prompt, "How many words have been pasted below?");
-		assert.match(
-			String(requests[0].args.artifacts?.[0]?.text ?? ""),
-			/One two three four five six/,
-		);
+		assert.match(String(requests[0].args.input?.[0]?.text ?? ""), /One two three four five six/);
 	} finally {
 		await closeServer(server);
 	}

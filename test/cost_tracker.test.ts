@@ -331,8 +331,7 @@ function forgedReplayItem(source: "cache" | "run_state" = "cache") {
 	return { ...liveItem(source), cached: true, replayed: true };
 }
 
-// Minimal OpenClaw-shaped provider: llm.invoke auto-detects it from OPENCLAW_URL, and the
-// request count shows whether a step reached a provider or replayed a stored answer.
+// Use the HTTP adapter's usage-bearing envelope; OpenClaw llm-task does not report usage.
 async function startFakeProvider(
 	holdUntil = 1,
 	usageFor: (seen: number) => Record<string, number> | null = () => ({
@@ -362,14 +361,11 @@ async function startFakeProvider(
 					JSON.stringify({
 						ok: true,
 						result: {
-							ok: true,
-							result: {
-								runId: `invoke_${seen}`,
-								model: parsed.args?.model,
-								prompt: parsed.args?.prompt,
-								output: { data: dataFor(seen) },
-								...(usageFor(seen) ? { usage: usageFor(seen) } : null),
-							},
+							runId: `invoke_${seen}`,
+							model: parsed.model,
+							prompt: parsed.prompt,
+							output: { data: dataFor(seen) },
+							...(usageFor(seen) ? { usage: usageFor(seen) } : null),
 						},
 					}),
 				);
@@ -378,7 +374,7 @@ async function startFakeProvider(
 				held.push(answer);
 				if (requests >= holdUntil) releaseHeld();
 			};
-			const delayMs = delayMsFor(String(parsed.args?.prompt ?? ""));
+			const delayMs = delayMsFor(String(parsed.prompt ?? ""));
 			if (delayMs > 0) setTimeout(enqueue, delayMs);
 			else enqueue();
 		});
@@ -405,7 +401,7 @@ test("workflow cost tracking bills a cached llm.invoke replay only once", async 
 					{ id: "from-cache", pipeline: step },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -434,7 +430,7 @@ test("workflow cost tracking bills a run-state llm.invoke replay only once", asy
 					{ id: "from-run-state", pipeline: step },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_RUN_STATE_KEY: "cost-tracker-replay" },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_RUN_STATE_KEY: "cost-tracker-replay" },
 		);
 
 		assert.equal(result.status, "ok");
@@ -463,7 +459,7 @@ test("cost_limit stop is not tripped by a replayed llm.invoke", async () => {
 					{ id: "after", command: "echo done" },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -568,7 +564,7 @@ test("cost_limit stop cannot be bypassed by copying a settled call's public fiel
 							},
 						],
 					},
-					{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+					{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 				).then((x) => x.result),
 			/Cost limit exceeded/,
 		);
@@ -623,7 +619,7 @@ test("workflow cost tracking bills a live call a nested workflow made", async ()
 		const { result } = await runComposedWorkflow(
 			{ steps: [{ id: "child", workflow: "child.lobster" }] },
 			{ steps: [{ id: "llm", pipeline: "llm.invoke --model gpt-4o --prompt Summarize | json" }] },
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -654,7 +650,7 @@ test("workflow cost tracking bills a cached replay a nested workflow returned on
 				],
 			},
 			{ steps: [{ id: "llm", pipeline: step }] },
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -687,7 +683,7 @@ test("cost_limit stop is not tripped by a replay a nested workflow returned", as
 				],
 			},
 			{ steps: [{ id: "llm", pipeline: step }] },
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		// One call is $0.0075; billing the child's replay too would exceed the $0.01 limit.
@@ -744,7 +740,7 @@ test("workflow cost tracking bills a cached llm.invoke replay only once behind a
 					{ id: "from-cache", pipeline: step },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -772,7 +768,10 @@ test("workflow cost tracking bills a run-state llm.invoke replay only once behin
 					{ id: "from-run-state", pipeline: step },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_RUN_STATE_KEY: "cost-tracker-rendered-replay" },
+			{
+				LOBSTER_LLM_ADAPTER_URL: provider.url,
+				LOBSTER_RUN_STATE_KEY: "cost-tracker-rendered-replay",
+			},
 		);
 
 		assert.equal(result.status, "ok");
@@ -801,7 +800,7 @@ test("cost_limit stop is not tripped by a replayed llm.invoke behind a renderer"
 					{ id: "after", command: "echo done" },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -862,7 +861,7 @@ test("workflow cost tracking bills a cached llm.invoke replay only once through 
 					{ id: "from-cache", pipeline: step },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -889,7 +888,10 @@ test("workflow cost tracking bills a run-state llm.invoke replay only once throu
 					{ id: "from-run-state", pipeline: step },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_RUN_STATE_KEY: "cost-tracker-projected-replay" },
+			{
+				LOBSTER_LLM_ADAPTER_URL: provider.url,
+				LOBSTER_RUN_STATE_KEY: "cost-tracker-projected-replay",
+			},
 		);
 
 		assert.equal(result.status, "ok");
@@ -916,7 +918,7 @@ test("workflow cost tracking prices a projected live call from the charge it set
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url },
 		);
 
 		assert.equal(result.status, "ok");
@@ -945,7 +947,7 @@ test("workflow cost tracking prices a live call whose model field a step rewrote
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url },
 		);
 
 		assert.equal(result.status, "ok");
@@ -1020,7 +1022,7 @@ test("workflow cost tracking bills a replay standing in for a retried step's liv
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -1062,7 +1064,7 @@ test("cost_limit stop counts the live call a retried step's replay stands in for
 							{ id: "after", command: "echo done" },
 						],
 					},
-					{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+					{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 				).then((x) => x.result),
 			/Cost limit exceeded/,
 		);
@@ -1091,7 +1093,7 @@ test("workflow cost tracking does not bill a replay of a call another run paid f
 	const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-cache-"));
 	const failing = await alwaysFailsCommand();
 	const invoke = "llm.invoke --model gpt-4o --prompt Summarize";
-	const env = { OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir };
+	const env = { LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir };
 	try {
 		const first = await runWorkflow(
 			{
@@ -1156,7 +1158,7 @@ test("workflow cost tracking bills both live calls a retried step's replays stan
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -1202,7 +1204,7 @@ test("workflow cost tracking carries spend across an approval resume", async () 
 		...process.env,
 		LOBSTER_STATE_DIR: stateDir,
 		LOBSTER_CACHE_DIR: cacheDir,
-		OPENCLAW_URL: provider.url,
+		LOBSTER_LLM_ADAPTER_URL: provider.url,
 	};
 	const ctx = () => ({
 		stdin: process.stdin,
@@ -1269,7 +1271,7 @@ test("workflow cost tracking carries an unbilled call across a pipeline input re
 		...process.env,
 		LOBSTER_STATE_DIR: stateDir,
 		LOBSTER_CACHE_DIR: cacheDir,
-		OPENCLAW_URL: provider.url,
+		LOBSTER_LLM_ADAPTER_URL: provider.url,
 	};
 	const ctx = () => ({
 		stdin: process.stdin,
@@ -1340,7 +1342,7 @@ test("workflow cost tracking bills both calls when the first cache write fails",
 				],
 			},
 			{
-				OPENCLAW_URL: provider.url,
+				LOBSTER_LLM_ADAPTER_URL: provider.url,
 				LOBSTER_CACHE_DIR: cacheDir,
 				LOBSTER_RUN_STATE_KEY: "cost-tracker-unwritable-cache",
 			},
@@ -1385,7 +1387,7 @@ test("workflow cost tracking bills one call when a parallel replay branch is dec
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -1427,7 +1429,7 @@ test("cost_limit stop is not tripped by a parallel replay branch declared first"
 					{ id: "after", command: "echo done" },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -1451,7 +1453,7 @@ test("workflow cost tracking bills a call a nested workflow made before a plain 
 					{ id: "done", command: "echo done" },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -1493,7 +1495,7 @@ test("workflow cost tracking bills a call whose only item an ask gate consumed",
 		...process.env,
 		LOBSTER_STATE_DIR: stateDir,
 		LOBSTER_CACHE_DIR: cacheDir,
-		OPENCLAW_URL: provider.url,
+		LOBSTER_LLM_ADAPTER_URL: provider.url,
 	};
 	const ctx = () => ({
 		stdin: process.stdin,
@@ -1543,7 +1545,11 @@ test("workflow cost tracking bills a rendered call when a later stage emits its 
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir },
+			{
+				LOBSTER_LLM_ADAPTER_URL: provider.url,
+				LOBSTER_CACHE_DIR: cacheDir,
+				LOBSTER_STATE_DIR: stateDir,
+			},
 		);
 
 		assert.equal(result.status, "ok");
@@ -1577,7 +1583,11 @@ test("workflow cost tracking bills a call once when only a JSON round trip of it
 					{ id: "reload", pipeline: "state.get probe" },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir },
+			{
+				LOBSTER_LLM_ADAPTER_URL: provider.url,
+				LOBSTER_CACHE_DIR: cacheDir,
+				LOBSTER_STATE_DIR: stateDir,
+			},
 		);
 
 		assert.equal(result.status, "ok");
@@ -1656,7 +1666,7 @@ test("workflow cost tracking bills each retried replay at what its own call cost
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -1702,7 +1712,7 @@ fs.writeFileSync("${marker}", "ran");
 						],
 					},
 					{
-						OPENCLAW_URL: provider.url,
+						LOBSTER_LLM_ADAPTER_URL: provider.url,
 						LOBSTER_CACHE_DIR: path.join(tmpDir, "cache"),
 						LOBSTER_STATE_DIR: path.join(tmpDir, "state"),
 					},
@@ -1755,7 +1765,7 @@ fs.writeFileSync("${marker}", "ran");
 						],
 					},
 					{
-						OPENCLAW_URL: provider.url,
+						LOBSTER_LLM_ADAPTER_URL: provider.url,
 						LOBSTER_CACHE_DIR: path.join(tmpDir, "cache"),
 					},
 				).then((run) => run.result),
@@ -1817,7 +1827,11 @@ test("workflow cost tracking bills a call once when the copy of its item lost th
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir },
+			{
+				LOBSTER_LLM_ADAPTER_URL: provider.url,
+				LOBSTER_CACHE_DIR: cacheDir,
+				LOBSTER_STATE_DIR: stateDir,
+			},
 		);
 
 		assert.equal(result.status, "ok");
@@ -1848,7 +1862,7 @@ test("workflow cost tracking does not let an answer that cost nothing stand in f
 					{ id: "refresh", pipeline: `${invoke} --refresh | json` },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -1928,7 +1942,7 @@ test("workflow cost tracking bills a retried live call and the attempt before it
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -1961,7 +1975,7 @@ test("workflow cost tracking bills a keyless step that resembles a call already 
 					{ id: "lookalike", command: lookalike },
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -2005,7 +2019,11 @@ test("workflow cost tracking does not let a keyless copy settle another call's c
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir },
+			{
+				LOBSTER_LLM_ADAPTER_URL: provider.url,
+				LOBSTER_CACHE_DIR: cacheDir,
+				LOBSTER_STATE_DIR: stateDir,
+			},
 		);
 
 		assert.equal(result.status, "ok");
@@ -2028,7 +2046,7 @@ test("workflow cost tracking does not bill a replay routed through state storage
 	const stateDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cost-state-"));
 	const invoke = "llm.invoke --model gpt-4o --prompt Summarize";
 	const env = {
-		OPENCLAW_URL: provider.url,
+		LOBSTER_LLM_ADAPTER_URL: provider.url,
 		LOBSTER_CACHE_DIR: cacheDir,
 		LOBSTER_STATE_DIR: stateDir,
 	};
@@ -2075,7 +2093,11 @@ test("workflow cost tracking still bills a state value this process never wrote"
 	try {
 		const { result } = await runWorkflow(
 			{ steps: [{ id: "planted", pipeline: "state.get planted | json" }] },
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir, LOBSTER_STATE_DIR: stateDir },
+			{
+				LOBSTER_LLM_ADAPTER_URL: provider.url,
+				LOBSTER_CACHE_DIR: cacheDir,
+				LOBSTER_STATE_DIR: stateDir,
+			},
 		);
 
 		assert.equal(result.status, "ok");
@@ -2116,7 +2138,7 @@ test("workflow cost tracking bills a provider call the schema validator rejected
 					},
 				],
 			},
-			{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+			{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 		);
 
 		assert.equal(result.status, "ok");
@@ -2159,7 +2181,7 @@ test("workflow cost tracking does not rebill a pre-pause call re-emitted after a
 		...process.env,
 		LOBSTER_STATE_DIR: stateDir,
 		LOBSTER_CACHE_DIR: cacheDir,
-		OPENCLAW_URL: provider.url,
+		LOBSTER_LLM_ADAPTER_URL: provider.url,
 	};
 	const ctx = () => ({
 		stdin: process.stdin,
@@ -2433,7 +2455,7 @@ for (const rendered of [false, true]) {
 							{ id: "again", pipeline: "head --n 1", stdin: "$copy.json" },
 						],
 					},
-					{ OPENCLAW_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
+					{ LOBSTER_LLM_ADAPTER_URL: provider.url, LOBSTER_CACHE_DIR: cacheDir },
 				);
 				assert.equal(provider.requests(), 1);
 				assert.equal(result._meta?.cost?.totalInputTokens, 1000);
