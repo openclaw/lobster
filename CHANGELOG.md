@@ -2,6 +2,8 @@
 
 All notable changes to Lobster will be documented in this file.
 
+## Unreleased
+
 ## 2026.9.14 - 2026-09-21
 
 **Highlights:** OpenClaw LLM pipelines use the gateway's current tool protocol, and large tables render without crashing.
