@@ -36,7 +36,7 @@ concurrency:
 
 env:
   NODE_VERSION: "24.x"
-  PNPM_VERSION: "12.4.1"
+  PNPM_VERSION: "12.5.1"
 
 jobs:
   preflight_lobster_npm:

@@ -38,7 +38,6 @@ sync:
     - coverage
     - dist
     - node_modules
-    - bin
 env:
   allow:
     - CI
