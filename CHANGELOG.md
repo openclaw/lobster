@@ -4,6 +4,7 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Refresh Oxc formatting and lint tooling, and align development, CI hydration, and release tooling on pnpm 12.7.0 while retaining the two-day dependency release-age policy.
 - Share approval-ID resolution between tool and CLI resume paths, preserving token formats and error envelopes; thanks @KrasimirKralev (PR [#192](https://github.com/openclaw/lobster/pull/192)).
 
 ## 2026.9.14 - 2026-09-21

@@ -63,12 +63,12 @@
 	},
 	"devDependencies": {
 		"@types/node": "^22.20.4",
-		"oxfmt": "^0.68.0",
-		"oxlint": "^1.83.0",
+		"oxfmt": "^0.70.0",
+		"oxlint": "^1.85.0",
 		"typescript": "^7.0.2"
 	},
 	"engines": {
 		"node": ">=22"
 	},
-	"packageManager": "pnpm@12.5.1"
+	"packageManager": "pnpm@12.7.0"
 }
