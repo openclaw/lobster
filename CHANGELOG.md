@@ -4,6 +4,10 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+## 2026.9.16 - 2026-10-01
+
+**Highlights:** Tool pipelines and resumes return one valid JSON envelope, even when they use JSON or table renderers.
+
 - Keep `json` and `table` output inside the single tool JSON envelope, preserving typed items through CLI/core pipeline runs and resumes without changing human rendering or workflow-step captures.
 
 ## 2026.9.15 - 2026-10-01
