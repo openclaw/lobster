@@ -4,9 +4,13 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+## 2026.9.15 - 2026-10-01
+
+**Highlights:** Approval resumes share consistent ID resolution, with refreshed development and release tooling.
+
+- Share approval-ID resolution between tool and CLI resume paths, preserving token formats and error envelopes; thanks @KrasimirKralev (PR [#192](https://github.com/openclaw/lobster/pull/192)).
 - Update Oxfmt to 0.71.0, Oxlint to 1.86.0, and pnpm to 12.8.1 across development, CI hydration, and release tooling; retain the two-day dependency release-age policy and Node.js 22 runtime floor.
 - Refresh Oxc formatting and lint tooling, and align development, CI hydration, and release tooling on pnpm 12.7.0 while retaining the two-day dependency release-age policy.
-- Share approval-ID resolution between tool and CLI resume paths, preserving token formats and error envelopes; thanks @KrasimirKralev (PR [#192](https://github.com/openclaw/lobster/pull/192)).
 
 ## 2026.9.14 - 2026-09-21
 
