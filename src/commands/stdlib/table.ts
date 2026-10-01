@@ -16,6 +16,7 @@ export const tableCommand = {
 		return `table — render items as a simple table\n\nUsage:\n  ... | table\n\nNotes:\n  - If items are objects, columns are union of keys (first 20 items).\n`;
 	},
 	async run({ input, ctx }) {
+		if (ctx.renderOutput === false) return { output: input };
 		const items = [];
 		for await (const item of input) items.push(item);
 

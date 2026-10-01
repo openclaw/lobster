@@ -315,6 +315,7 @@ async function handleRun({
 			stderr: process.stderr,
 			env: process.env,
 			mode: normalizedMode,
+			renderOutput: normalizedMode !== "tool",
 			dryRun,
 			signal,
 			forceTerminationSignal,

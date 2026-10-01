@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Keep `json` and `table` output inside the single tool JSON envelope, preserving typed items through CLI/core pipeline runs and resumes without changing human rendering or workflow-step captures.
+
 ## 2026.9.15 - 2026-10-01
 
 **Highlights:** Approval resumes share consistent ID resolution, with refreshed development and release tooling.

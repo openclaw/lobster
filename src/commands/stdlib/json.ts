@@ -9,6 +9,7 @@ export const jsonCommand = {
 		return `json — render pipeline output as JSON\n\nUsage:\n  ... | json\n`;
 	},
 	async run({ input, ctx }) {
+		if (ctx.renderOutput === false) return { output: input };
 		const items = [];
 		for await (const item of input) items.push(item);
 		ctx.render.json(items);

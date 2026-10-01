@@ -83,6 +83,8 @@ conventional interrupt exit status.
 - `json`, `table`: renderers
 - `approve`: approval gate (TTY prompt or `--emit` for OpenClaw integration)
 
+In top-level `--mode tool` pipelines (including resumes and the core tool API), `json` and `table` preserve typed items in the single JSON envelope instead of writing terminal output. Human-mode rendering and rendered output captured within workflow-file steps remain unchanged.
+
 ## SDK cancellation
 
 Pass an `AbortSignal` to `new Lobster({ signal })` to cancel SDK `exec()` stages,

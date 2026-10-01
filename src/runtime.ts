@@ -17,6 +17,7 @@ export async function runPipeline({
 	stderr,
 	env,
 	mode = "human",
+	renderOutput = true,
 	input,
 	cwd = undefined,
 	llmAdapters = undefined,
@@ -37,6 +38,7 @@ export async function runPipeline({
 	stderr: any;
 	env: any;
 	mode?: string;
+	renderOutput?: boolean;
 	input?: any;
 	cwd?: string | undefined;
 	llmAdapters?: Record<string, any> | undefined;
@@ -78,6 +80,7 @@ export async function runPipeline({
 		env,
 		registry,
 		mode,
+		renderOutput,
 		cwd,
 		llmAdapters,
 		// The ledger of live LLM calls this run has not billed yet, so a replay of one of them
