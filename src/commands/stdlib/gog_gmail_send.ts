@@ -76,6 +76,7 @@ export const gogGmailSendCommand = {
 			];
 
 			const argv = isScript ? [gogBinRaw, ...argvBase] : argvBase;
+			ctx.assertInvocationCurrent?.();
 			ctx.onNonRetryableSideEffect?.();
 			const res = await runAbortableProcess({
 				command: gogBin,
@@ -83,6 +84,7 @@ export const gogGmailSendCommand = {
 				env: { ...process.env, ...ctx.env },
 				cwd: process.cwd(),
 				signal: ctx.signal,
+				assertInvocationCurrent: ctx.assertInvocationCurrent,
 				forceTerminationSignal: ctx.forceTerminationSignal,
 				notFoundMessage: "gog not found on PATH (install: https://github.com/steipete/gogcli)",
 			});

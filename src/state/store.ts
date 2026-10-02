@@ -515,11 +515,13 @@ export async function restoreConsumedResumeState({
 	key,
 	expectedState,
 	claimId,
+	approvalId,
 }: {
 	env: Record<string, string | undefined>;
 	key: string;
 	expectedState: unknown;
 	claimId: string;
+	approvalId?: string;
 }) {
 	return withStateKeyLock({
 		env,
@@ -530,6 +532,9 @@ export async function restoreConsumedResumeState({
 				return false;
 			}
 			await writeStateJsonUnlocked({ env, key, value: expectedState });
+			if (approvalId) {
+				await restoreApprovalIndex({ env, stateKey: key, approvalId }).catch(() => {});
+			}
 			return true;
 		},
 	});
@@ -547,11 +552,13 @@ export async function deleteResumeStateWithRollback({
 	key,
 	expectedState,
 	signal = undefined,
+	assertInvocationCurrent = undefined,
 }: {
 	env: Record<string, string | undefined>;
 	key: string;
 	expectedState: unknown;
 	signal?: AbortSignal;
+	assertInvocationCurrent?: () => void;
 }): Promise<boolean> {
 	return withStateKeyLock({
 		env,
@@ -559,13 +566,13 @@ export async function deleteResumeStateWithRollback({
 		signal,
 		task: async () => {
 			signal?.throwIfAborted();
+			assertInvocationCurrent?.();
 			const currentState = await readStateJson({ env, key });
 			if (stableStringify(currentState) !== stableStringify(expectedState)) return false;
 
 			const claimId = randomBytes(16).toString("hex");
 			let claimPublished = false;
 			let claimMayBePublished = false;
-			let deleted = false;
 			try {
 				let result;
 				try {
@@ -578,6 +585,7 @@ export async function deleteResumeStateWithRollback({
 							claimId,
 						},
 						signal,
+						atomicWriteOptions: { assertInvocationCurrent },
 					});
 				} catch (err) {
 					claimMayBePublished = atomicWriteWasPublished(err);
@@ -586,15 +594,19 @@ export async function deleteResumeStateWithRollback({
 				claimPublished = true;
 				if (result?.signalAbortedAfterCommit) signal?.throwIfAborted();
 				signal?.throwIfAborted();
+				assertInvocationCurrent?.();
 				await deleteStateJsonUnlocked({ env, key });
-				deleted = true;
 				signal?.throwIfAborted();
+				assertInvocationCurrent?.();
 				return true;
 			} catch (err) {
-				if ((signal?.aborted && claimPublished) || claimMayBePublished) {
+				if (
+					((signal?.aborted || assertInvocationCurrent) && claimPublished) ||
+					claimMayBePublished
+				) {
 					const latest = await readStateJson({ env, key });
 					if (
-						(deleted && latest === null) ||
+						(claimPublished && latest === null) ||
 						(isConsumedResumeState(latest) && latest.claimId === claimId)
 					) {
 						await writeStateJsonUnlocked({ env, key, value: expectedState });
@@ -803,6 +815,57 @@ export async function findStateKeyByApprovalId({
 		if (err?.code === "ENOENT") return null;
 		if (isJsonSyntaxError(err)) return null;
 		throw err;
+	}
+}
+
+/** Locate the short ID for a resume state before retiring its index. */
+export async function findApprovalIdByStateKey({
+	env,
+	stateKey,
+}: {
+	env: Record<string, string | undefined>;
+	stateKey: string;
+}): Promise<string | null> {
+	const stateDir = defaultStateDir(env);
+	let files: string[];
+	try {
+		files = await fsp.readdir(stateDir);
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return null;
+		throw err;
+	}
+	for (const file of files) {
+		const match = /^approval_([a-f0-9]+)\.json$/.exec(file);
+		if (!match) continue;
+		try {
+			const data = JSON.parse(await fsp.readFile(path.join(stateDir, file), "utf8"));
+			if (data?.stateKey === stateKey) return match[1];
+		} catch {
+			// An unrelated broken index cannot retire this state's capability.
+		}
+	}
+	return null;
+}
+
+/** Restore only a missing mapping; another allocation must never be overwritten. */
+async function restoreApprovalIndex({
+	env,
+	stateKey,
+	approvalId,
+}: {
+	env: Record<string, string | undefined>;
+	stateKey: string;
+	approvalId: string;
+}): Promise<boolean> {
+	const mappedStateKey = await findStateKeyByApprovalId({ env, approvalId });
+	if (mappedStateKey === stateKey) return true;
+	if (mappedStateKey !== null) return false;
+	try {
+		await writeApprovalIndex({ env, stateKey, approvalId });
+		return true;
+	} catch (err: any) {
+		if (err?.code !== "EEXIST") throw err;
+		return (await findStateKeyByApprovalId({ env, approvalId })) === stateKey;
 	}
 }
 

@@ -94,7 +94,13 @@ export const stateSetCommand = {
 		const value = items.length === 1 ? items[0] : items;
 
 		const text = JSON.stringify(value, null, 2) + "\n";
-		await writeStateJson({ env: ctx.env, key, value, signal: ctx.signal });
+		await writeStateJson({
+			env: ctx.env,
+			key,
+			value,
+			signal: ctx.signal,
+			atomicWriteOptions: { assertInvocationCurrent: ctx.assertInvocationCurrent },
+		});
 		const filePath = keyToPath(defaultStateDir(ctx.env), key);
 		rememberWrite(filePath, text, value);
 
