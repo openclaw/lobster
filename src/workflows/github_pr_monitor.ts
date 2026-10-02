@@ -19,6 +19,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 		env: ctx.env,
 		cwd: process.cwd(),
 		signal: ctx.signal,
+		assertInvocationCurrent: ctx.assertInvocationCurrent,
 		forceTerminationSignal: ctx.forceTerminationSignal,
 	});
 	ctx.signal?.throwIfAborted();
@@ -29,6 +30,7 @@ export async function runGithubPrMonitorWorkflow({ args, ctx }) {
 		key,
 		value: current,
 		signal: ctx.signal,
+		atomicWriteOptions: { assertInvocationCurrent: ctx.assertInvocationCurrent },
 	});
 
 	if (changesOnly && !changed) {

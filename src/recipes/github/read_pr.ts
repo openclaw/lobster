@@ -21,6 +21,7 @@ export async function runGithubPr({
 	env,
 	cwd,
 	signal,
+	assertInvocationCurrent,
 	forceTerminationSignal,
 }: {
 	repo: string;
@@ -29,6 +30,7 @@ export async function runGithubPr({
 	env: NodeJS.ProcessEnv;
 	cwd: string;
 	signal?: AbortSignal;
+	assertInvocationCurrent?: () => void;
 	forceTerminationSignal?: AbortSignal;
 }) {
 	const { stdout, stderr, code } = await runAbortableProcess({
@@ -45,6 +47,7 @@ export async function runGithubPr({
 		env,
 		cwd,
 		signal,
+		assertInvocationCurrent,
 		forceTerminationSignal,
 		notFoundMessage: "gh not found on PATH (install GitHub CLI)",
 	});

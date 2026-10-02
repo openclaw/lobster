@@ -214,6 +214,7 @@ type Adapter = {
 		args: any;
 		payload: Record<string, any>;
 		signal?: AbortSignal;
+		assertInvocationCurrent?: () => void;
 	}) => Promise<LlmResponseEnvelope>;
 };
 
@@ -224,6 +225,7 @@ type DirectAdapter =
 			payload: Record<string, any>;
 			ctx: any;
 			signal?: AbortSignal;
+			assertInvocationCurrent?: () => void;
 	  }) => Promise<LlmResponseEnvelope>)
 	| {
 			source?: string;
@@ -233,6 +235,7 @@ type DirectAdapter =
 				payload: Record<string, any>;
 				ctx: any;
 				signal?: AbortSignal;
+				assertInvocationCurrent?: () => void;
 			}) => Promise<LlmResponseEnvelope>;
 	  };
 
@@ -501,8 +504,15 @@ async function runLlmInvoke({
 		let responseEnvelope: LlmResponseEnvelope;
 		try {
 			ctx.signal?.throwIfAborted();
+			ctx.assertInvocationCurrent?.();
 			responseEnvelope = await abortable(
-				adapter.invoke({ env, args, payload, signal: ctx.signal }),
+				adapter.invoke({
+					env,
+					args,
+					payload,
+					signal: ctx.signal,
+					assertInvocationCurrent: ctx.assertInvocationCurrent,
+				}),
 				signal,
 			);
 			ctx.signal?.throwIfAborted();
@@ -551,9 +561,18 @@ async function runLlmInvoke({
 				items: normalized,
 				stateType: config.stateType,
 				signal: ctx.signal,
+				assertInvocationCurrent: ctx.assertInvocationCurrent,
 				afterStore: disableCache
 					? undefined
-					: () => writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace, ctx.signal),
+					: () =>
+							writeCacheEntry(
+								env,
+								cacheKey,
+								normalized,
+								config.cacheNamespace,
+								ctx.signal,
+								ctx.assertInvocationCurrent,
+							),
 			});
 			return { output: streamOf(normalized) };
 		}
@@ -568,9 +587,18 @@ async function runLlmInvoke({
 				items: normalized,
 				stateType: config.stateType,
 				signal: ctx.signal,
+				assertInvocationCurrent: ctx.assertInvocationCurrent,
 				afterStore: disableCache
 					? undefined
-					: () => writeCacheEntry(env, cacheKey, normalized, config.cacheNamespace, ctx.signal),
+					: () =>
+							writeCacheEntry(
+								env,
+								cacheKey,
+								normalized,
+								config.cacheNamespace,
+								ctx.signal,
+								ctx.assertInvocationCurrent,
+							),
 			});
 			return { output: streamOf(normalized) };
 		}
@@ -695,8 +723,8 @@ function resolveAdapter({
 		return {
 			provider,
 			source: typeof direct === "function" ? provider : (direct.source ?? provider),
-			async invoke({ payload, signal }) {
-				return invoke({ env, args, payload, ctx, signal });
+			async invoke({ payload, signal, assertInvocationCurrent }) {
+				return invoke({ env, args, payload, ctx, signal, assertInvocationCurrent });
 			},
 		};
 	}
@@ -712,8 +740,15 @@ function resolveAdapter({
 		return {
 			provider,
 			source: config.sourceForProvider?.(provider) ?? "openclaw",
-			async invoke({ payload, signal }) {
-				return invokeOpenClawAdapter({ endpoint, token, payload, signal, maxResponseBytes });
+			async invoke({ payload, signal, assertInvocationCurrent }) {
+				return invokeOpenClawAdapter({
+					endpoint,
+					token,
+					payload,
+					signal,
+					maxResponseBytes,
+					assertInvocationCurrent,
+				});
 			},
 		};
 	}
@@ -727,13 +762,14 @@ function resolveAdapter({
 		return {
 			provider,
 			source: config.sourceForProvider?.(provider) ?? "pi",
-			async invoke({ payload, signal }) {
+			async invoke({ payload, signal, assertInvocationCurrent }) {
 				return invokeHttpAdapter({
 					endpoint: buildAdapterEndpoint(adapterUrl),
 					maxResponseBytes,
 					token,
 					payload,
 					signal,
+					assertInvocationCurrent,
 				});
 			},
 		};
@@ -747,13 +783,14 @@ function resolveAdapter({
 	return {
 		provider,
 		source: config.sourceForProvider?.(provider) ?? "http",
-		async invoke({ payload, signal }) {
+		async invoke({ payload, signal, assertInvocationCurrent }) {
 			return invokeHttpAdapter({
 				endpoint: buildAdapterEndpoint(adapterUrl),
 				maxResponseBytes,
 				token,
 				payload,
 				signal,
+				assertInvocationCurrent,
 			});
 		},
 	};
@@ -784,12 +821,14 @@ async function invokeOpenClawAdapter({
 	payload,
 	signal,
 	maxResponseBytes,
+	assertInvocationCurrent,
 }: {
 	endpoint: URL;
 	token: string;
 	payload: any;
 	signal?: AbortSignal;
 	maxResponseBytes?: number;
+	assertInvocationCurrent?: () => void;
 }) {
 	// Keep validation local: gateway schema errors discard the JSON needed for retries.
 	const prompt = [
@@ -801,6 +840,7 @@ async function invokeOpenClawAdapter({
 			? ["Correct the previous validation failure: " + JSON.stringify(payload.retryContext)]
 			: []),
 	].join("\n\n");
+	assertInvocationCurrent?.();
 	const res = await fetch(endpoint, {
 		method: "POST",
 		signal,
@@ -864,13 +904,16 @@ async function invokeHttpAdapter({
 	payload,
 	signal,
 	maxResponseBytes,
+	assertInvocationCurrent,
 }: {
 	endpoint: URL;
 	token: string;
 	payload: any;
 	signal?: AbortSignal;
 	maxResponseBytes?: number;
+	assertInvocationCurrent?: () => void;
 }) {
+	assertInvocationCurrent?.();
 	const res = await fetch(endpoint, {
 		method: "POST",
 		signal,
@@ -1088,6 +1131,7 @@ async function persistOutputs({
 	items,
 	stateType,
 	signal,
+	assertInvocationCurrent,
 	afterStore,
 }: {
 	env: any;
@@ -1096,6 +1140,7 @@ async function persistOutputs({
 	items: NormalizedInvocationItem[];
 	stateType: string;
 	signal?: AbortSignal;
+	assertInvocationCurrent?: () => void;
 	afterStore?: () => Promise<void>;
 }) {
 	if (!stateKey) {
@@ -1114,6 +1159,7 @@ async function persistOutputs({
 		key: stateKey,
 		value: record,
 		signal,
+		atomicWriteOptions: { assertInvocationCurrent },
 		afterStore: afterStore ? () => afterStore() : undefined,
 	});
 }
@@ -1177,6 +1223,7 @@ async function writeCacheEntry(
 	items: NormalizedInvocationItem[],
 	cacheNamespace: string,
 	signal?: AbortSignal,
+	assertInvocationCurrent?: () => void,
 ) {
 	const dir = path.join(getCacheDir(env), cacheNamespace);
 	signal?.throwIfAborted();
@@ -1204,7 +1251,10 @@ async function writeCacheEntry(
 			let cacheWasPublished = false;
 			try {
 				signal?.throwIfAborted();
-				const result = await writeFileAtomic(filePath, content, { signal });
+				const result = await writeFileAtomic(filePath, content, {
+					signal,
+					assertInvocationCurrent,
+				});
 				cacheWasPublished = true;
 				if (result?.signalAbortedAfterCommit || signal?.aborted) {
 					await restorePreviousContent();

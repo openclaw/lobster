@@ -30,6 +30,8 @@ export async function runPipeline({
 	requestInputEnabled = true,
 	onExecutionStart = undefined,
 	onNonRetryableSideEffect = undefined,
+	assertInvocationCurrent = undefined,
+	onUnsafeCommandDispatch = undefined,
 }: {
 	pipeline: any[];
 	registry: any;
@@ -51,6 +53,8 @@ export async function runPipeline({
 	requestInputEnabled?: boolean;
 	onExecutionStart?: (() => void | Promise<void>) | undefined;
 	onNonRetryableSideEffect?: (() => void) | undefined;
+	assertInvocationCurrent?: (() => void) | undefined;
+	onUnsafeCommandDispatch?: (() => void) | undefined;
 }) {
 	if (dryRun) {
 		return dryRunPipeline({ pipeline, registry, stderr });
@@ -89,6 +93,7 @@ export async function runPipeline({
 		signal,
 		forceTerminationSignal,
 		onNonRetryableSideEffect,
+		assertInvocationCurrent,
 	};
 
 	for (let idx = 0; idx < pipeline.length; idx++) {
@@ -137,13 +142,21 @@ export async function runPipeline({
 						isOutputStarted: () => pipelineOutputStarted || commandOutputStarted,
 						resume: stageResume,
 						onResumedInput:
-							command.meta?.resumeSafeAfterInput === true ? undefined : markExecutionStarted,
+							command.meta?.resumeSafeAfterInput === true
+								? undefined
+								: async () => {
+										await markExecutionStarted();
+										assertInvocationCurrent?.();
+										onUnsafeCommandDispatch?.();
+									},
 					})
 				: createUnsupportedRequestInput(),
 		};
 
 		let result;
 		try {
+			assertInvocationCurrent?.();
+			if (command.meta?.resumeSafeBeforeInput !== true) onUnsafeCommandDispatch?.();
 			result = await command.run({ input: inputTracker.iterable, args: stage.args, ctx: stageCtx });
 		} catch (err) {
 			await finishStage({ assertResume: false, suppressCloseErrors: true });
