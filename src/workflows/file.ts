@@ -35,6 +35,7 @@ import {
 	deleteResumeStateWithRollback,
 	deleteStateJson,
 	deleteUnconsumedResumeState,
+	findApprovalIdByStateKey,
 	isConsumedResumeState,
 	readStateJsonWithLock,
 	restoreConsumedResumeState,
@@ -86,6 +87,7 @@ type RunContext = {
 	cwd?: string;
 	signal?: AbortSignal;
 	forceTerminationSignal?: AbortSignal;
+	assertInvocationCurrent?: () => void;
 	registry?: {
 		get: (name: string) => any;
 	};
@@ -95,6 +97,7 @@ type RunContext = {
 	_llmSpendLedger?: LlmSpendLedger;
 	_onResumeStateResolved?: (stateKey: string) => void;
 	_onExecutionStarted?: () => void | Promise<void>;
+	_onUnsafeDispatch?: () => void;
 	_onExecutionInterrupted?: () => void;
 	_onNonRetryableSideEffect?: () => void;
 };
@@ -261,8 +264,9 @@ export async function runWorkflowFile({
 	const resumeState = resume?.stateKey
 		? await loadWorkflowResumeState(ctx.env, consumedResumeStateKey ?? resume.stateKey, ctx.signal)
 		: (resume ?? null);
-	let resumedExecutionStarted = false;
+	let resumedUnsafeDispatchStarted = false;
 	let resumeStateConsumed = false;
+	let resumeStateClaimId: string | undefined;
 	let executionBoundaryStarted = false;
 	const executionSignalListeners: Array<{ signal: AbortSignal; onAbort: () => void }> = [];
 	let executionStart: Promise<void> | undefined;
@@ -281,18 +285,19 @@ export async function runWorkflowFile({
 				if (!consumption.consumed) {
 					throw new Error("Workflow resume state not found");
 				}
+				resumeStateClaimId = consumption.claimId;
 				if (consumption.signalAbortedAfterCommit) {
-					await restoreConsumedResumeState({
+					const restored = await restoreConsumedResumeState({
 						env: ctx.env,
 						key: consumedResumeStateKey,
 						expectedState: resumeState,
 						claimId: consumption.claimId,
 					});
+					if (restored) resumeStateClaimId = undefined;
 					signal?.throwIfAborted();
 				}
 				signal?.throwIfAborted();
 				resumeStateConsumed = true;
-				resumedExecutionStarted = true;
 			}
 			await ctx._onExecutionStarted?.();
 			executionBoundaryStarted = true;
@@ -316,6 +321,10 @@ export async function runWorkflowFile({
 			if (!resumeStateConsumed && !executionBoundaryStarted) executionStart = undefined;
 			throw err;
 		}
+	};
+	const markUnsafeDispatchStarted = () => {
+		if (resumeStateConsumed) resumedUnsafeDispatchStarted = true;
+		ctx._onUnsafeDispatch?.();
 	};
 	if (resumeState?.approvalStepId && resumeState?.inputStepId) {
 		throw new Error("Invalid workflow resume state");
@@ -554,19 +563,19 @@ export async function runWorkflowFile({
 								createdAt: new Date().toISOString(),
 							},
 							ctx.signal,
+							ctx.assertInvocationCurrent,
 						);
+						ctx.assertInvocationCurrent?.();
 
-						const replaced = await replaceWorkflowResumeState({
+						await publishWorkflowResumeStateReplacement({
 							env: ctx.env,
 							previousStateKey: consumedResumeStateKey,
 							expectedPreviousState: resumeState,
 							previousStateConsumed: resumeStateConsumed,
 							replacementStateKey: stateKey,
 							signal: ctx.signal,
+							assertInvocationCurrent: ctx.assertInvocationCurrent,
 						});
-						if (!replaced) {
-							throw new Error("Workflow resume state not found");
-						}
 
 						const resumeToken = encodeToken({
 							protocolVersion: 1,
@@ -711,6 +720,8 @@ export async function runWorkflowFile({
 										cwd: subCwd,
 										signal: stepSignal,
 										forceTerminationSignal: ctx.forceTerminationSignal,
+										assertInvocationCurrent: ctx.assertInvocationCurrent,
+										onEffectDispatch: markUnsafeDispatchStarted,
 										killSignal: () =>
 											stepTimeoutController?.signal.aborted
 												? ("SIGKILL" as NodeJS.Signals)
@@ -737,6 +748,7 @@ export async function runWorkflowFile({
 											...ctx,
 											signal: stepSignal,
 											_onNonRetryableSideEffect: markNonRetryableSideEffect,
+											_onUnsafeDispatch: markUnsafeDispatchStarted,
 										},
 										llmSpendLedger,
 										env: subEnv,
@@ -837,6 +849,8 @@ export async function runWorkflowFile({
 									cwd: branchCwd,
 									signal: branchSignal,
 									forceTerminationSignal: ctx.forceTerminationSignal,
+									assertInvocationCurrent: ctx.assertInvocationCurrent,
+									onEffectDispatch: markUnsafeDispatchStarted,
 									killSignal: timeoutKillSignal,
 								});
 								return {
@@ -861,6 +875,7 @@ export async function runWorkflowFile({
 										...ctx,
 										signal: branchSignal,
 										_onNonRetryableSideEffect: markNonRetryableSideEffect,
+										_onUnsafeDispatch: markUnsafeDispatchStarted,
 									},
 									llmSpendLedger: ledgerFor(branch.id),
 									env: branchEnv,
@@ -985,6 +1000,7 @@ export async function runWorkflowFile({
 									ctx._onExecutionInterrupted?.();
 								},
 								_onNonRetryableSideEffect: markNonRetryableSideEffect,
+								_onUnsafeDispatch: markUnsafeDispatchStarted,
 							},
 						});
 						if (subResult.status === "needs_approval" || subResult.status === "needs_input") {
@@ -1026,6 +1042,8 @@ export async function runWorkflowFile({
 							cwd,
 							signal: stepSignal,
 							forceTerminationSignal: ctx.forceTerminationSignal,
+							assertInvocationCurrent: ctx.assertInvocationCurrent,
+							onEffectDispatch: markUnsafeDispatchStarted,
 							killSignal: () =>
 								stepTimeoutController?.signal.aborted ? ("SIGKILL" as NodeJS.Signals) : undefined,
 						});
@@ -1046,6 +1064,7 @@ export async function runWorkflowFile({
 								...ctx,
 								signal: stepSignal,
 								_onNonRetryableSideEffect: markNonRetryableSideEffect,
+								_onUnsafeDispatch: markUnsafeDispatchStarted,
 							},
 							llmSpendLedger,
 							env,
@@ -1085,6 +1104,7 @@ export async function runWorkflowFile({
 						? await withRetry(executeStepAttempt, retryConfig, {
 								signal: ctx.signal,
 								shouldRetry: (error) => {
+									ctx.assertInvocationCurrent?.();
 									if (
 										error instanceof WorkflowPipelineInputSuspension ||
 										error instanceof RequestInputResumeError ||
@@ -1116,6 +1136,7 @@ export async function runWorkflowFile({
 				result = attemptResult.result;
 				parallelBranchResults = attemptResult.parallelBranchResults;
 			} catch (err: any) {
+				ctx.assertInvocationCurrent?.();
 				if (err instanceof WorkflowPipelineInputSuspension) {
 					const inputRequest = buildNeedsInputRequest({
 						stepId: err.stepId,
@@ -1153,19 +1174,19 @@ export async function runWorkflowFile({
 								createdAt: new Date().toISOString(),
 							},
 							ctx.signal,
+							ctx.assertInvocationCurrent,
 						);
+						ctx.assertInvocationCurrent?.();
 
-						const replaced = await replaceWorkflowResumeState({
+						await publishWorkflowResumeStateReplacement({
 							env: ctx.env,
 							previousStateKey: consumedResumeStateKey,
 							expectedPreviousState: resumeState,
 							previousStateConsumed: resumeStateConsumed,
 							replacementStateKey: stateKey,
 							signal: ctx.signal,
+							assertInvocationCurrent: ctx.assertInvocationCurrent,
 						});
-						if (!replaced) {
-							throw new Error("Workflow resume state not found");
-						}
 
 						const resumeToken = encodeToken({
 							protocolVersion: 1,
@@ -1290,21 +1311,26 @@ export async function runWorkflowFile({
 								createdAt: new Date().toISOString(),
 							},
 							ctx.signal,
+							ctx.assertInvocationCurrent,
 						);
+						ctx.assertInvocationCurrent?.();
 
-						const approvalId = await createApprovalIndex({ env: ctx.env, stateKey });
+						const approvalId = await createApprovalIndex({
+							env: ctx.env,
+							stateKey,
+							options: { assertInvocationCurrent: ctx.assertInvocationCurrent },
+						});
 						ctx.signal?.throwIfAborted();
-						const replaced = await replaceWorkflowResumeState({
+						ctx.assertInvocationCurrent?.();
+						await publishWorkflowResumeStateReplacement({
 							env: ctx.env,
 							previousStateKey: consumedResumeStateKey,
 							expectedPreviousState: resumeState,
 							previousStateConsumed: resumeStateConsumed,
 							replacementStateKey: stateKey,
 							signal: ctx.signal,
+							assertInvocationCurrent: ctx.assertInvocationCurrent,
 						});
-						if (!replaced) {
-							throw new Error("Workflow resume state not found");
-						}
 
 						const resumeToken = encodeToken({
 							protocolVersion: 1,
@@ -1357,6 +1383,13 @@ export async function runWorkflowFile({
 
 		const output = lastStepId ? toOutputItems(results[lastStepId]) : [];
 		if (consumedResumeStateKey) {
+			if (!resumeStateConsumed) {
+				await cleanupSupersededWorkflowResumeStates(
+					ctx.env,
+					resumeState?.supersededResumeStateKeys,
+				);
+				ctx.assertInvocationCurrent?.();
+			}
 			if (resumeStateConsumed) {
 				ctx.signal?.throwIfAborted();
 				await deleteStateJson({
@@ -1371,12 +1404,18 @@ export async function runWorkflowFile({
 					key: consumedResumeStateKey,
 					expectedState: resumeState,
 					signal: ctx.signal,
+					assertInvocationCurrent: ctx.assertInvocationCurrent,
 				});
 				if (!deleted) {
 					throw new Error("Workflow resume state not found");
 				}
 			}
-			await cleanupSupersededWorkflowResumeStates(ctx.env, resumeState?.supersededResumeStateKeys);
+			if (resumeStateConsumed) {
+				await cleanupSupersededWorkflowResumeStates(
+					ctx.env,
+					resumeState?.supersededResumeStateKeys,
+				);
+			}
 		} else {
 			ctx.signal?.throwIfAborted();
 		}
@@ -1390,7 +1429,20 @@ export async function runWorkflowFile({
 		}
 		return runResult;
 	} catch (err) {
-		if (resumedExecutionStarted && consumedResumeStateKey) {
+		if (
+			!resumedUnsafeDispatchStarted &&
+			consumedResumeStateKey &&
+			resumeState &&
+			resumeStateClaimId
+		) {
+			await restoreConsumedResumeState({
+				env: ctx.env,
+				key: consumedResumeStateKey,
+				expectedState: resumeState,
+				claimId: resumeStateClaimId,
+			}).catch(() => {});
+		}
+		if (resumedUnsafeDispatchStarted && consumedResumeStateKey) {
 			try {
 				if (ctx.signal?.aborted) {
 					await deleteStateJsonWithBoundedResumeCleanup({
@@ -1444,15 +1496,72 @@ async function saveWorkflowResumeState(
 	env: Record<string, string | undefined>,
 	state: WorkflowResumeState,
 	signal?: AbortSignal,
+	assertInvocationCurrent?: () => void,
 ) {
 	const stateKey = `workflow_resume_${randomUUID()}`;
 	try {
 		signal?.throwIfAborted();
-		await writeStateJson({ env, key: stateKey, value: state, signal });
+		assertInvocationCurrent?.();
+		await writeStateJson({
+			env,
+			key: stateKey,
+			value: state,
+			signal,
+			atomicWriteOptions: { assertInvocationCurrent },
+		});
 		signal?.throwIfAborted();
+		assertInvocationCurrent?.();
 		return stateKey;
 	} catch (err) {
-		if (signal?.aborted) await discardWorkflowResumeState(env, stateKey);
+		if (signal?.aborted || assertInvocationCurrent) {
+			await discardWorkflowResumeState(env, stateKey);
+		}
+		throw err;
+	}
+}
+
+type WorkflowResumeReplacement = {
+	env: Record<string, string | undefined>;
+	previousStateKey: string | null;
+	expectedPreviousState: WorkflowResumeState | WorkflowResumePayload | null;
+	previousStateConsumed: boolean;
+	replacementStateKey: string;
+	signal?: AbortSignal;
+	assertInvocationCurrent?: () => void;
+};
+
+async function publishWorkflowResumeStateReplacement(params: WorkflowResumeReplacement) {
+	let previousApprovalId: string | null = null;
+	if (params.previousStateKey && !params.previousStateConsumed) {
+		previousApprovalId = await findApprovalIdByStateKey({
+			env: params.env,
+			stateKey: params.previousStateKey,
+		});
+		params.assertInvocationCurrent?.();
+	}
+	let claimId: string | undefined;
+	try {
+		const replacement = await replaceWorkflowResumeState(params);
+		if (!replacement.replaced) throw new Error("Workflow resume state not found");
+		claimId = replacement.claimId;
+		params.assertInvocationCurrent?.();
+		if (params.previousStateKey && params.previousStateKey !== params.replacementStateKey) {
+			await cleanupApprovalIndexByStateKey({
+				env: params.env,
+				stateKey: params.previousStateKey,
+			}).catch(() => {});
+		}
+		params.assertInvocationCurrent?.();
+	} catch (err) {
+		if (claimId && params.previousStateKey && params.expectedPreviousState) {
+			await restoreConsumedResumeState({
+				env: params.env,
+				key: params.previousStateKey,
+				expectedState: params.expectedPreviousState,
+				claimId,
+				approvalId: previousApprovalId ?? undefined,
+			}).catch(() => false);
+		}
 		throw err;
 	}
 }
@@ -1464,26 +1573,19 @@ async function replaceWorkflowResumeState({
 	previousStateConsumed,
 	replacementStateKey,
 	signal,
-}: {
-	env: Record<string, string | undefined>;
-	previousStateKey: string | null;
-	expectedPreviousState: WorkflowResumeState | WorkflowResumePayload | null;
-	previousStateConsumed: boolean;
-	replacementStateKey: string;
-	signal?: AbortSignal;
-}) {
+	assertInvocationCurrent,
+}: WorkflowResumeReplacement) {
 	if (!previousStateKey || previousStateKey === replacementStateKey) {
 		signal?.throwIfAborted();
-		return true;
+		assertInvocationCurrent?.();
+		return { replaced: true as const };
 	}
 	if (previousStateConsumed) {
 		signal?.throwIfAborted();
-		// The successor is already durable. Retire the predecessor's short ID here,
-		// rather than when the preceding unsafe execution is only being claimed.
-		await cleanupApprovalIndexByStateKey({ env, stateKey: previousStateKey }).catch(() => {});
-		return true;
+		assertInvocationCurrent?.();
+		return { replaced: true as const };
 	}
-	if (!expectedPreviousState) return false;
+	if (!expectedPreviousState) return { replaced: false as const };
 
 	let claimId: string | undefined;
 	try {
@@ -1493,16 +1595,16 @@ async function replaceWorkflowResumeState({
 			expectedState: expectedPreviousState,
 			signal,
 		});
-		if (!consumption.consumed) return false;
+		if (!consumption.consumed) return { replaced: false as const };
 		claimId = consumption.claimId;
 		// Keep the consumed marker until terminal cleanup. It is the atomic
 		// predecessor-to-successor handoff and prevents another resume from
 		// creating a competing successor after this call returns.
 		signal?.throwIfAborted();
-		await cleanupApprovalIndexByStateKey({ env, stateKey: previousStateKey }).catch(() => {});
-		return true;
+		assertInvocationCurrent?.();
+		return { replaced: true as const, claimId };
 	} catch (err) {
-		if (claimId && signal?.aborted) {
+		if (claimId) {
 			await restoreConsumedResumeState({
 				env,
 				key: previousStateKey,
@@ -2270,6 +2372,8 @@ async function runShellCommand({
 	cwd,
 	signal,
 	forceTerminationSignal,
+	assertInvocationCurrent,
+	onEffectDispatch,
 	killSignal,
 }: {
 	command: string;
@@ -2278,6 +2382,8 @@ async function runShellCommand({
 	cwd?: string;
 	signal?: AbortSignal;
 	forceTerminationSignal?: AbortSignal;
+	assertInvocationCurrent?: () => void;
+	onEffectDispatch?: () => void;
 	killSignal?: NodeJS.Signals | (() => NodeJS.Signals | undefined);
 }) {
 	signal?.throwIfAborted();
@@ -2288,6 +2394,8 @@ async function runShellCommand({
 		cwd,
 		stdin,
 		signal,
+		assertInvocationCurrent,
+		onEffectDispatch,
 		forceTerminationSignal,
 		killSignal,
 		notFoundMessage: "workflow shell not found; check LOBSTER_SHELL or ComSpec",
@@ -2364,6 +2472,8 @@ async function runPipelineStep({
 		signal: ctx.signal,
 		forceTerminationSignal: ctx.forceTerminationSignal,
 		haltAfterStageOnAbort: true,
+		assertInvocationCurrent: ctx.assertInvocationCurrent,
+		onUnsafeCommandDispatch: ctx._onUnsafeDispatch,
 		llmAdapters: ctx.llmAdapters,
 		// Scoped so a charge nothing bills can still name the step that opened it.
 		llmSpendLedger: llmSpendLedger ? stepScopedLedger(llmSpendLedger, stepId) : undefined,

@@ -30,6 +30,7 @@ export const diffLastCommand = {
 			key,
 			value: after,
 			signal: ctx.signal,
+			atomicWriteOptions: { assertInvocationCurrent: ctx.assertInvocationCurrent },
 		});
 
 		return {

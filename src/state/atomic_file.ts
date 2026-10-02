@@ -6,11 +6,13 @@ export type AtomicWriteOptions = {
 	renameFile?: typeof fsp.rename;
 	syncParentDir?: (filePath: string) => Promise<void>;
 	signal?: AbortSignal;
+	assertInvocationCurrent?: () => void;
 };
 
 export type AtomicExclusiveWriteOptions = {
 	linkFile?: typeof fsp.link;
 	syncParentDir?: (filePath: string) => Promise<void>;
+	assertInvocationCurrent?: () => void;
 };
 
 type PublishedAtomicWriteError = NodeJS.ErrnoException & {
@@ -140,6 +142,7 @@ export async function writeFileAtomic(filePath, data, options: AtomicWriteOption
 		} catch (err) {
 			if (err?.code !== "ENOENT") throw err;
 		}
+		options.assertInvocationCurrent?.();
 		handle = await fsp.open(tmpPath, "wx", mode);
 		await handle.writeFile(data, "utf8");
 		await handle.chmod(mode);
@@ -147,6 +150,7 @@ export async function writeFileAtomic(filePath, data, options: AtomicWriteOption
 		await handle.close();
 		handle = undefined;
 		options.signal?.throwIfAborted();
+		options.assertInvocationCurrent?.();
 		await renameFile(tmpPath, filePath);
 		cleanup = false;
 		// The rename is the irreversible publication point. Keep propagating a
@@ -178,6 +182,7 @@ export async function writeFileAtomicExclusive(
 	);
 	let handle;
 	try {
+		options.assertInvocationCurrent?.();
 		handle = await fsp.open(tmpPath, "wx", 0o600);
 		await handle.writeFile(data, "utf8");
 		await handle.chmod(0o600);
@@ -185,6 +190,7 @@ export async function writeFileAtomicExclusive(
 		await handle.close();
 		handle = undefined;
 		try {
+			options.assertInvocationCurrent?.();
 			await linkFile(tmpPath, filePath);
 		} catch (err) {
 			if (!isLinkUnsupportedError(err)) throw err;
