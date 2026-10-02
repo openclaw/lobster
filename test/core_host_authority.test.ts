@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { promises as fsp } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -484,6 +485,155 @@ test("approved openclaw.invoke rechecks host authority after draining input", as
 		assert.equal(calls, 0);
 	} finally {
 		globalThis.fetch = originalFetch;
+		await fsp.rm(tmp, { recursive: true, force: true });
+	}
+});
+
+test("approved openclaw.invoke enforces host authority at real HTTP I/O", async (t) => {
+	const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-host-authority-http-"));
+	const stateDir = path.join(tmp, "state");
+	const env = { ...process.env, LOBSTER_STATE_DIR: stateDir };
+	const requests: Array<{ method: string | undefined; path: string | undefined; body: unknown }> =
+		[];
+	const server = http.createServer(async (request, response) => {
+		const chunks: Buffer[] = [];
+		for await (const chunk of request) chunks.push(Buffer.from(chunk));
+		requests.push({
+			method: request.method,
+			path: request.url,
+			body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+		});
+		response.writeHead(200, { "content-type": "application/json" });
+		response.end(JSON.stringify({ ok: true, result: { sent: true } }));
+	});
+	let claimGate: ReturnType<typeof pauseStateMarkerRename> | undefined;
+	let dispatchGate: ReturnType<typeof pauseFileUnlink> | undefined;
+	try {
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as { port: number }).port;
+		const invoke = `openclaw.invoke --url http://127.0.0.1:${port} --tool demo --action send`;
+		const pipeline = `approve --prompt "Send?" | ${invoke}`;
+
+		const current = await runToolRequest({ pipeline, ctx: { cwd: tmp, env } });
+		assert.equal(current.status, "needs_approval");
+		assert.ok(current.requiresApproval?.resumeToken);
+		const allowed = await resumeToolRequest({
+			token: current.requiresApproval.resumeToken,
+			approved: true,
+			ctx: { cwd: tmp, env, assertInvocationCurrent: () => {} },
+		});
+		assert.equal(allowed.status, "ok");
+		assert.deepEqual(allowed.output, [{ sent: true }]);
+		assert.deepEqual(requests, [
+			{
+				method: "POST",
+				path: "/tools/invoke",
+				body: { tool: "demo", action: "send", args: {} },
+			},
+		]);
+		const allowedRequests = requests.length;
+
+		const pendingApproval = await runToolRequest({ pipeline, ctx: { cwd: tmp, env } });
+		assert.equal(pendingApproval.status, "needs_approval");
+		const pendingToken = pendingApproval.requiresApproval?.resumeToken;
+		const pendingId = pendingApproval.requiresApproval?.approvalId;
+		assert.ok(pendingToken);
+		assert.ok(pendingId);
+		const statePath = resumeStatePath(stateDir, pendingToken);
+		const checkpointBefore = await fsp.readFile(statePath, "utf8");
+		claimGate = pauseStateMarkerRename(statePath);
+		let claimCurrent = true;
+		const retiredBeforeIO = resumeToolRequest({
+			token: pendingToken,
+			approved: true,
+			ctx: {
+				cwd: tmp,
+				env,
+				assertInvocationCurrent: () => {
+					if (!claimCurrent) throw new Error("host invocation retired");
+				},
+			},
+		});
+		await waitForGate(claimGate.renameStarted);
+		claimCurrent = false;
+		claimGate.release();
+		const rejected = await retiredBeforeIO;
+		assert.equal(rejected.ok, false);
+		assert.match(rejected.error?.message ?? "", /host invocation retired/);
+		assert.equal(requests.length, 1, "retired approval must not reach the HTTP server");
+		const retiredRequests = requests.length;
+		const checkpointRestored = (await fsp.readFile(statePath, "utf8")) === checkpointBefore;
+		assert.equal(checkpointRestored, true);
+		claimGate.restore();
+		claimGate = undefined;
+
+		const recovered = await resumeToolRequest({
+			approvalId: pendingId,
+			approved: true,
+			ctx: { cwd: tmp, env, assertInvocationCurrent: () => {} },
+		});
+		assert.equal(recovered.status, "ok");
+		assert.deepEqual(recovered.output, [{ sent: true }]);
+		assert.equal(requests.length, 2, "safe checkpoint must remain actionable");
+		const recoveredRequests = requests.length;
+
+		const dispatchedApproval = await runToolRequest({
+			pipeline: `${pipeline} | approve --prompt "Next?"`,
+			ctx: { cwd: tmp, env },
+		});
+		assert.equal(dispatchedApproval.status, "needs_approval");
+		const dispatchedToken = dispatchedApproval.requiresApproval?.resumeToken;
+		const dispatchedId = dispatchedApproval.requiresApproval?.approvalId;
+		assert.ok(dispatchedToken);
+		assert.ok(dispatchedId);
+		dispatchGate = pauseFileUnlink(path.join(stateDir, `approval_${dispatchedId}.json`));
+		let dispatchCurrent = true;
+		const retiredAfterIO = resumeToolRequest({
+			token: dispatchedToken,
+			approved: true,
+			ctx: {
+				cwd: tmp,
+				env,
+				assertInvocationCurrent: () => {
+					if (!dispatchCurrent) throw new Error("host invocation retired");
+				},
+			},
+		});
+		await waitForGate(dispatchGate.unlinkStarted);
+		assert.equal(requests.length, 3, "the HTTP effect must precede host retirement");
+		const dispatchedRequests = requests.length;
+		dispatchCurrent = false;
+		dispatchGate.release();
+		const interrupted = await retiredAfterIO;
+		assert.equal(interrupted.ok, false);
+		assert.match(interrupted.error?.message ?? "", /host invocation retired/);
+		const replay = await resumeToolRequest({
+			token: dispatchedToken,
+			approved: true,
+			ctx: { cwd: tmp, env, assertInvocationCurrent: () => {} },
+		});
+		assert.equal(replay.ok, false);
+		assert.equal(requests.length, 3, "dispatched HTTP effect must not replay");
+		t.diagnostic(
+			JSON.stringify({
+				transport: "loopback POST /tools/invoke",
+				current: allowedRequests,
+				retiredBeforeIO: retiredRequests - allowedRequests,
+				safeCheckpointRestored: checkpointRestored,
+				recovered: recoveredRequests - retiredRequests,
+				dispatchedBeforeRetirement: dispatchedRequests - recoveredRequests,
+				replay: requests.length - dispatchedRequests,
+			}),
+		);
+	} finally {
+		claimGate?.release();
+		claimGate?.restore();
+		dispatchGate?.release();
+		dispatchGate?.restore();
+		if (server.listening) {
+			server.closeAllConnections();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
 		await fsp.rm(tmp, { recursive: true, force: true });
 	}
 });
