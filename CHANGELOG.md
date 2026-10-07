@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Fix the shell-safe workflow argument example to read the injected environment variable directly and clarify environment-value substitution; thanks @KrasimirKralev (PR [#198](https://github.com/openclaw/lobster/pull/198)).
+
 ## 2026.9.16 - 2026-10-01
 
 **Highlights:** Tool pipelines and resumes return one valid JSON envelope, even when they use JSON or table renderers.

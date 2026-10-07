@@ -322,11 +322,13 @@ args:
     default: ""
 steps:
   - id: safe
-    env:
-      TEXT: "$LOBSTER_ARG_TEXT"
     command: |
-      jq -n --arg text "$TEXT" '{"result": $text}'
+      jq -n --arg text "$LOBSTER_ARG_TEXT" '{"result": $text}'
 ```
+
+Values in an `env:` block are not shell-expanded, so `TEXT: "$LOBSTER_ARG_TEXT"`
+sets `TEXT` to that literal string. To pass an arg under another name, use
+`TEXT: "${text}"`; env values never go through the shell, so this stays safe.
 
 ## HTTP response limits
 
