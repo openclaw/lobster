@@ -92,6 +92,7 @@ function createInvokeCommand(commandName: string) {
 
 			const maxResponseBytes = httpResponseLimitFromEnv(ctx.env);
 			const invokeOnce = async (argsValue: unknown) => {
+				ctx.assertInvocationCurrent?.();
 				ctx.onNonRetryableSideEffect?.();
 				const res = await fetch(endpoint, {
 					method: "POST",

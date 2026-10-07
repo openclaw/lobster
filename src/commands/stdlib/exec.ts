@@ -57,6 +57,7 @@ export const execCommand = {
 					cwd,
 					stdin: stdinPayload,
 					signal: ctx.signal,
+					assertInvocationCurrent: ctx.assertInvocationCurrent,
 					forceTerminationSignal: ctx.forceTerminationSignal,
 				})
 			: await runProcess(cmd[0], cmd.slice(1), {
@@ -64,6 +65,7 @@ export const execCommand = {
 					cwd,
 					stdin: stdinPayload,
 					signal: ctx.signal,
+					assertInvocationCurrent: ctx.assertInvocationCurrent,
 					forceTerminationSignal: ctx.forceTerminationSignal,
 				});
 
@@ -87,7 +89,11 @@ export const execCommand = {
 	},
 };
 
-async function runProcess(command, argv, { env, cwd, stdin, signal, forceTerminationSignal }) {
+async function runProcess(
+	command,
+	argv,
+	{ env, cwd, stdin, signal, assertInvocationCurrent, forceTerminationSignal },
+) {
 	const { stdout, stderr, code } = await runAbortableProcess({
 		command,
 		argv,
@@ -95,6 +101,7 @@ async function runProcess(command, argv, { env, cwd, stdin, signal, forceTermina
 		cwd,
 		stdin,
 		signal,
+		assertInvocationCurrent,
 		forceTerminationSignal,
 		notFoundMessage: `exec command not found: ${command}`,
 	});
@@ -102,13 +109,17 @@ async function runProcess(command, argv, { env, cwd, stdin, signal, forceTermina
 	throw new Error(`exec failed (${code}): ${stderr.trim() || stdout.trim() || command}`);
 }
 
-function runShellLine(commandLine, { env, cwd, stdin, signal, forceTerminationSignal }) {
+function runShellLine(
+	commandLine,
+	{ env, cwd, stdin, signal, assertInvocationCurrent, forceTerminationSignal },
+) {
 	return runAbortableProcess({
 		shellCommand: commandLine,
 		env,
 		cwd,
 		stdin,
 		signal,
+		assertInvocationCurrent,
 		forceTerminationSignal,
 		notFoundMessage: "exec shell not found; check LOBSTER_SHELL or ComSpec",
 	}).then(({ stdout, stderr, code }) => {

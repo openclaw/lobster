@@ -63,6 +63,8 @@ type RunAbortableOptions = {
 	cwd?: string;
 	stdin?: string | null;
 	signal?: AbortSignal;
+	assertInvocationCurrent?: () => void;
+	onEffectDispatch?: () => void;
 	forceTerminationSignal?: AbortSignal;
 	killSignal?: NodeJS.Signals | (() => NodeJS.Signals | undefined);
 	maxOutputBytes?: number;
@@ -154,15 +156,20 @@ export function runAbortableProcess(options: RunAbortableProcessOptions): Promis
 			detached:
 				process.platform !== "win32" && (signal !== undefined || maxOutputBytes !== undefined),
 		};
+		options.assertInvocationCurrent?.();
 		// Keep direct argv and shell command dataflow at distinct spawn sites.
 		// Merging them makes shell interpretation leak into direct executable callers.
 		const child =
 			"shellCommand" in options
 				? (() => {
 						const shell = resolveInlineShellCommand({ command: options.shellCommand, env });
+						options.onEffectDispatch?.();
 						return spawn(shell.command, shell.argv, spawnOptions);
 					})()
-				: spawn(options.command, options.argv, spawnOptions);
+				: (() => {
+						options.onEffectDispatch?.();
+						return spawn(options.command, options.argv, spawnOptions);
+					})();
 
 		const stdoutDecoder = new StringDecoder("utf8");
 		const stderrDecoder = new StringDecoder("utf8");

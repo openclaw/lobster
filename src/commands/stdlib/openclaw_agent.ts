@@ -9,6 +9,7 @@ type AgentCliRunner = (params: {
 	cwd: string;
 	env: NodeJS.ProcessEnv;
 	signal?: AbortSignal;
+	assertInvocationCurrent?: () => void;
 	forceTerminationSignal?: AbortSignal;
 }) => Promise<unknown>;
 
@@ -89,6 +90,7 @@ export function createOpenClawAgentCommand(
 
 			const env = (ctx?.env ?? process.env) as NodeJS.ProcessEnv;
 			const executable = optionalString(env.LOBSTER_OPENCLAW_BIN) ?? "openclaw";
+			ctx.assertInvocationCurrent?.();
 			ctx.onNonRetryableSideEffect?.();
 			const response = await runCli({
 				executable,
@@ -96,6 +98,7 @@ export function createOpenClawAgentCommand(
 				cwd: ctx?.cwd ?? process.cwd(),
 				env,
 				signal: ctx?.signal,
+				assertInvocationCurrent: ctx?.assertInvocationCurrent,
 				forceTerminationSignal: ctx?.forceTerminationSignal,
 			});
 			return { output: streamOf([response]) };
@@ -109,6 +112,7 @@ export function runOpenClawAgentCli(params: {
 	cwd: string;
 	env: NodeJS.ProcessEnv;
 	signal?: AbortSignal;
+	assertInvocationCurrent?: () => void;
 	forceTerminationSignal?: AbortSignal;
 }): Promise<unknown> {
 	return runAbortableProcess({
@@ -117,6 +121,7 @@ export function runOpenClawAgentCli(params: {
 		cwd: params.cwd,
 		env: params.env,
 		signal: params.signal,
+		assertInvocationCurrent: params.assertInvocationCurrent,
 		forceTerminationSignal: params.forceTerminationSignal,
 		maxOutputBytes: OPENCLAW_AGENT_MAX_OUTPUT_BYTES,
 		outputLimitMessage: `openclaw.agent output exceeded ${OPENCLAW_AGENT_MAX_OUTPUT_BYTES} bytes`,
