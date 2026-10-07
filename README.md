@@ -108,6 +108,22 @@ const result = await pending;
 Custom stages receive the signal as `ctx.signal` and must cooperate with it to
 cancel their own work.
 
+## Host invocation authority
+
+Hosts using the core `runToolRequest()` and `resumeToolRequest()` APIs can pass
+`ctx.assertInvocationCurrent`, a synchronous callback that throws when the host
+has retired an invocation. Lobster rechecks it before built-in process, network,
+and state effects, including after asynchronous resume preparation. Keep passing
+an `AbortSignal` to cancel work that has already started.
+
+A retired resume restores its caller-owned checkpoint when no unsafe dispatch
+has started. Once an unsafe pipeline command has been entered, the approval stays
+consumed even if a later authority check prevents the effect. This conservative
+boundary prevents replaying work that may already have happened. Custom commands
+and injected adapters must check the callback themselves after awaited preparation
+and before their own effects. The SDK does not expose this host-authority contract;
+CLI behavior is unchanged when no callback is supplied.
+
 ## GitHub recipe cancellation
 
 The SDK GitHub recipes accept an `AbortSignal` in both
