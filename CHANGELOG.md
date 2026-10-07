@@ -4,6 +4,7 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Refresh pnpm to 12.9.1 across development, CI hydration, and release tooling, and update Node.js 22 types to 22.20.5 while retaining the two-day dependency release-age policy and Node.js 22 runtime floor.
 - Honor host invocation authority across approved resumes and built-in effect boundaries, restoring safe checkpoints after retirement while preventing replay after unsafe dispatch; thanks @Patrick-Erichsen (PR [#200](https://github.com/openclaw/lobster/pull/200)).
 - Fix the shell-safe workflow argument example to read the injected environment variable directly and clarify environment-value substitution; thanks @KrasimirKralev (PR [#198](https://github.com/openclaw/lobster/pull/198)).
 
