@@ -4,6 +4,7 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Honor host invocation authority across approved resumes and built-in effect boundaries, restoring safe checkpoints after retirement while preventing replay after unsafe dispatch; thanks @Patrick-Erichsen (PR [#200](https://github.com/openclaw/lobster/pull/200)).
 - Fix the shell-safe workflow argument example to read the injected environment variable directly and clarify environment-value substitution; thanks @KrasimirKralev (PR [#198](https://github.com/openclaw/lobster/pull/198)).
 
 ## 2026.9.16 - 2026-10-01
