@@ -4,6 +4,10 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+## 2026.9.17 - 2026-10-13
+
+**Highlights:** Approved workflow resumes retain host authority, and the shell-safe workflow example is corrected.
+
 - Refresh Oxfmt to 0.72.0, Oxlint to 1.87.0, and pnpm to 12.10.1 across development, CI hydration, and release tooling while retaining the two-day dependency release-age policy and Node.js 22 runtime floor.
 - Refresh pnpm to 12.9.1 across development, CI hydration, and release tooling, and update Node.js 22 types to 22.20.5 while retaining the two-day dependency release-age policy and Node.js 22 runtime floor.
 - Honor host invocation authority across approved resumes and built-in effect boundaries, restoring safe checkpoints after retirement while preventing replay after unsafe dispatch; thanks @Patrick-Erichsen (PR [#200](https://github.com/openclaw/lobster/pull/200)).
