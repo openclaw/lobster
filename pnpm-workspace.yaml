@@ -2,6 +2,6 @@ packages:
   - '.'
 
 overrides:
-  fast-uri: 4.2.1
+  fast-uri: 4.2.2
 
 minimumReleaseAge: 2880

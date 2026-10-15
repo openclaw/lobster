@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Refresh Oxfmt to 0.73.0, Oxlint to 1.88.0, pnpm to 12.11.2, and the fast-uri override to 4.2.2 across development, CI hydration, and release tooling while retaining the two-day dependency release-age policy and Node.js 22 runtime floor.
+
 ## 2026.9.17 - 2026-10-13
 
 **Highlights:** Approved workflow resumes retain host authority, and the shell-safe workflow example is corrected.
