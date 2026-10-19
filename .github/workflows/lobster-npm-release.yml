@@ -12,6 +12,11 @@ on:
         required: true
         default: false
         type: boolean
+      dry_run:
+        description: Validate the selected workflow ref without publishing or creating a promotable artifact
+        required: true
+        default: false
+        type: boolean
       preflight_run_id:
         description: Existing successful preflight workflow run id to promote without rebuilding
         required: false
@@ -36,11 +41,11 @@ concurrency:
 
 env:
   NODE_VERSION: "24.x"
-  PNPM_VERSION: "12.11.2"
+  PNPM_VERSION: "12.14.0"
 
 jobs:
   preflight_lobster_npm:
-    if: ${{ inputs.preflight_only && !inputs.promote_beta_to_latest }}
+    if: ${{ inputs.dry_run || (inputs.preflight_only && !inputs.promote_beta_to_latest) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -61,7 +66,7 @@ jobs:
           fi
 
       - name: Forbid preflight artifact promotion on validation-only runs
-        if: ${{ inputs.preflight_run_id != '' }}
+        if: ${{ !inputs.dry_run && inputs.preflight_run_id != '' }}
         run: |
           echo "preflight_run_id is only valid for real publish runs."
           exit 1
@@ -69,7 +74,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: ${{ inputs.dry_run && github.sha || format('refs/tags/{0}', inputs.tag) }}
           fetch-depth: 0
 
       - name: Setup Node environment
@@ -155,7 +160,7 @@ jobs:
 
       - name: Ensure version is not already published
         env:
-          PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
+          PREFLIGHT_ONLY: ${{ inputs.preflight_only || inputs.dry_run }}
         run: |
           set -euo pipefail
           PACKAGE_NAME="$(node -p "require('./package.json').name")"
@@ -210,6 +215,7 @@ jobs:
           echo "dir=$ARTIFACT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Upload prepared npm publish bundle
+        if: ${{ !inputs.dry_run }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lobster-npm-preflight-${{ inputs.tag }}
@@ -217,7 +223,7 @@ jobs:
           if-no-files-found: error
 
   validate_publish_request:
-    if: ${{ !inputs.preflight_only && !inputs.promote_beta_to_latest }}
+    if: ${{ !inputs.preflight_only && !inputs.dry_run && !inputs.promote_beta_to_latest }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -244,7 +250,7 @@ jobs:
 
   publish_lobster_npm:
     needs: [validate_publish_request]
-    if: ${{ !inputs.preflight_only && !inputs.promote_beta_to_latest }}
+    if: ${{ !inputs.preflight_only && !inputs.dry_run && !inputs.promote_beta_to_latest }}
     runs-on: ubuntu-latest
     environment: npm-release
     permissions:
@@ -449,7 +455,7 @@ jobs:
           npm publish "${publish_target}" --access public --tag "${RELEASE_NPM_DIST_TAG}" --provenance
 
   promote_beta_to_latest:
-    if: ${{ inputs.promote_beta_to_latest }}
+    if: ${{ inputs.promote_beta_to_latest && !inputs.dry_run }}
     runs-on: ubuntu-latest
     environment: npm-release
     permissions:

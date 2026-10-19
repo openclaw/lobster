@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Update pnpm to 12.14.0 across development, CI hydration, and release tooling; add a release-workflow dry run that validates the selected ref without publishing or creating a promotable artifact.
+
 - Keep missing and null keys last for descending keyed sorts, so top-N pipelines select populated values; thanks @goutamadwant (PR [#207](https://github.com/openclaw/lobster/pull/207)) and @notlakshitha for the report (Issue [#206](https://github.com/openclaw/lobster/issues/206)).
 
 - Refresh Oxfmt to 0.73.0, Oxlint to 1.88.0, pnpm to 12.11.2, and the fast-uri override to 4.2.2 across development, CI hydration, and release tooling while retaining the two-day dependency release-age policy and Node.js 22 runtime floor.
