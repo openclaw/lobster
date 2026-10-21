@@ -4,18 +4,18 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+## 2026.10.1 - 2026-10-20
+
+**Highlights:** Honor host invocation authority before effects, prevent unsafe resume replay, and report invalid workflow paths consistently.
+
+- Honor host invocation authority across approved resumes and built-in effect boundaries, restoring safe checkpoints after retirement while preventing replay after unsafe dispatch; thanks @Patrick-Erichsen (PR [#200](https://github.com/openclaw/lobster/pull/200)).
 - Report missing, directory, or wrong-extension positional workflow paths such as `lobster run deploy.lobster` as input errors (exit code 2, `parse_error` in tool mode) instead of `Unknown command`, matching `--file` while quoted pipelines and command names still run as pipelines; thanks @KrasimirKralev (PR [#209](https://github.com/openclaw/lobster/pull/209)).
-
-- Update pnpm to 12.14.0 across development, CI hydration, and release tooling; add a release-workflow dry run that validates the selected ref without publishing or creating a promotable artifact.
-
 - Keep missing and null keys last for descending keyed sorts, so top-N pipelines select populated values; thanks @goutamadwant (PR [#207](https://github.com/openclaw/lobster/pull/207)) and @notlakshitha for the report (Issue [#206](https://github.com/openclaw/lobster/issues/206)).
-
+- Fix the shell-safe workflow argument example to read the injected environment variable directly and clarify environment-value substitution; thanks @KrasimirKralev (PR [#198](https://github.com/openclaw/lobster/pull/198)).
+- Update pnpm to 12.14.0 across development, CI hydration, and release tooling; add a release-workflow dry run that validates the selected ref without publishing or creating a promotable artifact.
 - Refresh Oxfmt to 0.73.0, Oxlint to 1.88.0, pnpm to 12.11.2, and the fast-uri override to 4.2.2 across development, CI hydration, and release tooling while retaining the two-day dependency release-age policy and Node.js 22 runtime floor.
-
 - Refresh Oxfmt to 0.72.0, Oxlint to 1.87.0, and pnpm to 12.10.1 across development, CI hydration, and release tooling while retaining the two-day dependency release-age policy and Node.js 22 runtime floor.
 - Refresh pnpm to 12.9.1 across development, CI hydration, and release tooling, and update Node.js 22 types to 22.20.5 while retaining the two-day dependency release-age policy and Node.js 22 runtime floor.
-- Honor host invocation authority across approved resumes and built-in effect boundaries, restoring safe checkpoints after retirement while preventing replay after unsafe dispatch; thanks @Patrick-Erichsen (PR [#200](https://github.com/openclaw/lobster/pull/200)).
-- Fix the shell-safe workflow argument example to read the injected environment variable directly and clarify environment-value substitution; thanks @KrasimirKralev (PR [#198](https://github.com/openclaw/lobster/pull/198)).
 
 ## 2026.9.16 - 2026-10-01
 
