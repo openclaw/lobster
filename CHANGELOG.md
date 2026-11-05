@@ -5,6 +5,7 @@ All notable changes to Lobster will be documented in this file.
 ## Unreleased
 
 - Remove the unused internal `getFilter` helper from the template filters; `applyFilters` keeps reading the filter table directly and template output is unchanged; thanks @KrasimirKralev.
+- Show the graph help for `lobster help graph`, which `lobster --help` lists under Commands, instead of failing with `Unknown command: graph` (exit code 2); thanks @KrasimirKralev.
 
 ## 2026.10.1 - 2026-10-20
 
