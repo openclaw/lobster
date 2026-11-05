@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Refresh Oxfmt to 0.75.0 and Oxlint to 1.90.0 while preserving the two-day dependency cooldown and Node.js 22 runtime floor.
+
 - Show the graph help for `lobster help graph`, which `lobster --help` lists under Commands, instead of failing with `Unknown command: graph` (exit code 2); thanks @KrasimirKralev.
 
 ## 2026.10.1 - 2026-10-20

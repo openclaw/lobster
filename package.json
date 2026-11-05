@@ -63,8 +63,8 @@
 	},
 	"devDependencies": {
 		"@types/node": "^22.20.5",
-		"oxfmt": "^0.73.0",
-		"oxlint": "^1.88.0",
+		"oxfmt": "^0.75.0",
+		"oxlint": "^1.90.0",
 		"typescript": "^7.0.2"
 	},
 	"engines": {
