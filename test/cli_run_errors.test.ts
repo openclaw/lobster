@@ -130,3 +130,12 @@ for (const flag of ["--help", "-h"]) {
 		assert.equal(result.stderr, "");
 	});
 }
+
+test("help graph shows the graph help listed under Commands", () => {
+	const result = spawnSync(process.execPath, ["bin/lobster.js", "help", "graph"], {
+		encoding: "utf8",
+	});
+	assert.equal(result.status, 0);
+	assert.match(result.stdout, /--format\s+Output format: mermaid \(default\), dot, ascii/);
+	assert.equal(result.stderr, "");
+});

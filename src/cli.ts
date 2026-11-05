@@ -44,6 +44,10 @@ async function runCliWithSignal(
 			process.stdout.write(helpText());
 			return;
 		}
+		if (topic === "graph") {
+			process.stdout.write(graphHelpText());
+			return;
+		}
 		const cmd = registry.get(topic);
 		if (!cmd) {
 			process.stderr.write(`Unknown command: ${topic}\n`);
