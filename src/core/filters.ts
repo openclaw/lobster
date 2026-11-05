@@ -45,10 +45,6 @@ FILTERS.set("date", (v, fmt) => {
 		.replace("ss", String(d.getUTCSeconds()).padStart(2, "0"));
 });
 
-export function getFilter(name: string): FilterFn | undefined {
-	return FILTERS.get(name);
-}
-
 export function parseFilterExpression(expr: string): [string, ...string[]] {
 	const trimmed = expr.trim();
 	const parts: string[] = [];
