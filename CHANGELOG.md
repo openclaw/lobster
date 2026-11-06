@@ -4,9 +4,14 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+## 2026.11.1 - 2026-11-05
+
+**Highlights:** Show graph-specific help for `lobster help graph` and patch URI parsing vulnerabilities in `fast-uri`.
+
+- Show the graph help for `lobster help graph`, which `lobster --help` lists under Commands, instead of failing with `Unknown command: graph` (exit code 2); thanks @KrasimirKralev.
+- Update the `fast-uri` override to 4.2.3 to fix URI scheme spoofing, scheme injection, host confusion, and path normalization vulnerabilities.
 - Refresh Oxfmt to 0.75.0 and Oxlint to 1.90.0 while preserving the two-day dependency cooldown and Node.js 22 runtime floor.
 - Remove the unused internal `getFilter` helper from the template filters; `applyFilters` keeps reading the filter table directly and template output is unchanged; thanks @KrasimirKralev.
-- Show the graph help for `lobster help graph`, which `lobster --help` lists under Commands, instead of failing with `Unknown command: graph` (exit code 2); thanks @KrasimirKralev.
 
 ## 2026.10.1 - 2026-10-20
 
