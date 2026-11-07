@@ -5,6 +5,7 @@ import { parseResumeArgs } from "./resume.js";
 import { resumeToolRequest } from "./core/tool_runtime.js";
 import { loadWorkflowFile, resolveWorkflowArgs, runWorkflowFile } from "./workflows/file.js";
 import { renderWorkflowGraph } from "./workflows/graph.js";
+import { parseWorkflowArgsJson } from "./workflows/values.js";
 import type { WorkflowGraphFormat } from "./workflows/graph.js";
 import { finalizePipelineToolRun } from "./pipeline_resume_state.js";
 import { forceTerminateAbortableProcesses } from "./abortable_process.js";
@@ -144,15 +145,9 @@ async function handleGraph({ argv }) {
 	let argsJson: Record<string, unknown> = {};
 	if (parsed.argsJson) {
 		try {
-			const value = JSON.parse(parsed.argsJson);
-			if (!value || typeof value !== "object" || Array.isArray(value)) {
-				process.stderr.write("graph --args-json must be a JSON object\n");
-				process.exitCode = 2;
-				return;
-			}
-			argsJson = value as Record<string, unknown>;
-		} catch {
-			process.stderr.write("graph --args-json must be valid JSON\n");
+			argsJson = parseWorkflowArgsJson(parsed.argsJson, "graph");
+		} catch (err) {
+			process.stderr.write(`${err.message}\n`);
 			process.exitCode = 2;
 			return;
 		}
@@ -209,14 +204,9 @@ async function handleRun({
 		let parsedArgs = {};
 		if (argsJson) {
 			try {
-				parsedArgs = JSON.parse(argsJson);
-			} catch {
-				reportRunError(
-					normalizedMode,
-					"parse_error",
-					new Error("run --args-json must be valid JSON"),
-					"",
-				);
+				parsedArgs = parseWorkflowArgsJson(argsJson, "run");
+			} catch (err) {
+				reportRunError(normalizedMode, "parse_error", err, "");
 				return;
 			}
 		}

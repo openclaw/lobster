@@ -3,6 +3,7 @@ import {
 	runGithubPrMonitorWorkflow,
 	runGithubPrMonitorNotifyWorkflow,
 } from "../../workflows/github_pr_monitor.js";
+import { parseWorkflowArgsJson } from "../../workflows/values.js";
 
 const runners = {
 	"github.pr.monitor": runGithubPrMonitorWorkflow,
@@ -44,11 +45,7 @@ export const workflowsRunCommand = {
 
 		let workflowArgs = {};
 		if (args["args-json"]) {
-			try {
-				workflowArgs = JSON.parse(String(args["args-json"]));
-			} catch {
-				throw new Error("workflows.run --args-json must be valid JSON");
-			}
+			workflowArgs = parseWorkflowArgsJson(String(args["args-json"]), "workflows.run");
 		}
 
 		const result = await runner({ args: workflowArgs, ctx });

@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Reject a non-object `--args-json` on `lobster run` and `workflows.run`, as `lobster graph` already did, instead of running the workflow on its default args or failing with a raw `TypeError`; thanks @KrasimirKralev.
+
 ## 2026.11.1 - 2026-11-05
 
 **Highlights:** Show graph-specific help for `lobster help graph` and patch URI parsing vulnerabilities in `fast-uri`.

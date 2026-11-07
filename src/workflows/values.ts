@@ -13,6 +13,19 @@ export function createRecord<T>(source?: Record<string, T>): Record<string, T> {
 	return record;
 }
 
+export function parseWorkflowArgsJson(raw: string, label: string): Record<string, unknown> {
+	let value: unknown;
+	try {
+		value = JSON.parse(raw);
+	} catch {
+		throw new Error(`${label} --args-json must be valid JSON`);
+	}
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(`${label} --args-json must be a JSON object`);
+	}
+	return value as Record<string, unknown>;
+}
+
 export function mergeEnv(
 	base: Record<string, string | undefined>,
 	workflowEnv: WorkflowFile["env"],
