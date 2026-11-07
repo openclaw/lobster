@@ -150,7 +150,7 @@ lobster run path/to/workflow.lobster
 lobster run --file path/to/workflow.lobster --args-json '{"tag":"family"}'
 ```
 
-`--args-json` must be a JSON object. Anything else (an array, a string, `null`) is an input error (exit code 2, `parse_error` in tool mode) and no step runs.
+`--args-json` must be a JSON object. Anything else (an array, a string, `null`, an empty value) is an input error (exit code 2, `parse_error` in tool mode) and no step runs.
 
 Example file:
 

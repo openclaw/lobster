@@ -44,7 +44,7 @@ export const workflowsRunCommand = {
 		if (!runner) throw new Error(`Workflow runner not implemented: ${name}`);
 
 		let workflowArgs = {};
-		if (args["args-json"]) {
+		if (args["args-json"] !== undefined) {
 			workflowArgs = parseWorkflowArgsJson(String(args["args-json"]), "workflows.run");
 		}
 

@@ -4,7 +4,7 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
-- Reject a non-object `--args-json` on `lobster run` and `workflows.run`, as `lobster graph` already did, instead of running the workflow on its default args or failing with a raw `TypeError`; thanks @KrasimirKralev.
+- Reject a non-object or empty `--args-json` on `lobster run`, `lobster graph`, and `workflows.run` instead of running the workflow on its default args or failing with a raw `TypeError`; thanks @KrasimirKralev.
 
 ## 2026.11.1 - 2026-11-05
 

@@ -143,7 +143,7 @@ async function handleGraph({ argv }) {
 	}
 
 	let argsJson: Record<string, unknown> = {};
-	if (parsed.argsJson) {
+	if (parsed.argsJson !== null) {
 		try {
 			argsJson = parseWorkflowArgsJson(parsed.argsJson, "graph");
 		} catch (err) {
@@ -202,7 +202,7 @@ async function handleRun({
 	const { rest, workflowFile, dryRun } = target;
 	if (workflowFile) {
 		let parsedArgs = {};
-		if (argsJson) {
+		if (argsJson !== null) {
 			try {
 				parsedArgs = parseWorkflowArgsJson(argsJson, "run");
 			} catch (err) {
@@ -421,11 +421,9 @@ function parseRunArgs(argv) {
 		}
 
 		if (tok === "--args-json") {
-			const value = argv[i + 1];
-			if (value) {
-				argsJson = value;
-				i++;
-			}
+			// An empty or missing value is rejected later instead of falling back to defaults.
+			argsJson = argv[i + 1] ?? "";
+			i++;
 			continue;
 		}
 
@@ -484,11 +482,9 @@ function parseGraphArgs(argv: string[]) {
 		}
 
 		if (tok === "--args-json") {
-			const value = argv[i + 1];
-			if (value) {
-				argsJson = value;
-				i++;
-			}
+			// An empty or missing value is rejected later instead of falling back to defaults.
+			argsJson = argv[i + 1] ?? "";
+			i++;
 			continue;
 		}
 

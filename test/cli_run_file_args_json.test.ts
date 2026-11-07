@@ -37,6 +37,7 @@ test("cli: run --file passes --args-json into workflow args", async () => {
 });
 
 const nonObjectArgsJson = ["null", "[1,2]", '["production"]', '"production"', "7", "true"];
+const emptyArgsJsonForms = [["--args-json="], ["--args-json", ""], ["--args-json"]];
 
 test("cli: run --file rejects a non-object --args-json before any step runs", async () => {
 	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cli-"));
@@ -59,6 +60,12 @@ test("cli: run --file rejects a non-object --args-json before any step runs", as
 		});
 	}
 
+	for (const emptyArgs of emptyArgsJsonForms) {
+		const res = runLobster(["run", "--file", filePath, ...emptyArgs]);
+		assert.equal(res.status, 2, `exit for ${emptyArgs.join(" ")}: ${res.stderr}`);
+		assert.equal(res.stderr, "run --args-json must be valid JSON\n");
+	}
+
 	await assert.rejects(fsp.stat(markerPath), { code: "ENOENT" });
 });
 
@@ -76,9 +83,20 @@ test("cli: workflows.run rejects a non-object --args-json", () => {
 			"workflows.run --args-json must be a JSON object",
 		);
 	}
+
+	const empty = runLobster([
+		"run",
+		"--mode",
+		"tool",
+		`workflows.run --name github.pr.monitor --args-json ''`,
+	]);
+	assert.equal(
+		JSON.parse(empty.stdout).error.message,
+		"workflows.run --args-json must be valid JSON",
+	);
 });
 
-test("cli: graph keeps rejecting invalid and non-object --args-json", async () => {
+test("cli: graph rejects invalid, empty and non-object --args-json", async () => {
 	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-cli-"));
 	const filePath = path.join(tmpDir, "workflow.lobster");
 	await fsp.writeFile(filePath, "name: test\nsteps:\n  - id: s\n    run: echo hi\n", "utf8");
@@ -86,6 +104,12 @@ test("cli: graph keeps rejecting invalid and non-object --args-json", async () =
 	const invalid = runLobster(["graph", "--file", filePath, "--args-json", "nope"]);
 	assert.equal(invalid.status, 2);
 	assert.equal(invalid.stderr, "graph --args-json must be valid JSON\n");
+
+	for (const emptyArgs of emptyArgsJsonForms) {
+		const res = runLobster(["graph", "--file", filePath, ...emptyArgs]);
+		assert.equal(res.status, 2, `exit for ${emptyArgs.join(" ")}: ${res.stderr}`);
+		assert.equal(res.stderr, "graph --args-json must be valid JSON\n");
+	}
 
 	for (const argsJson of nonObjectArgsJson) {
 		const res = runLobster(["graph", "--file", filePath, "--args-json", argsJson]);
