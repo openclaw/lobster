@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Show the usage for `lobster help run`, `help resume`, `help doctor`, `help version` and `help help`, the same text `lobster run --help` prints, instead of failing with `Unknown command: run` (exit code 2); thanks @KrasimirKralev.
+
 ## 2026.11.1 - 2026-11-05
 
 **Highlights:** Show graph-specific help for `lobster help graph` and patch URI parsing vulnerabilities in `fast-uri`.

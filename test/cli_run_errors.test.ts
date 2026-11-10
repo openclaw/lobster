@@ -139,3 +139,26 @@ test("help graph shows the graph help listed under Commands", () => {
 	assert.match(result.stdout, /--format\s+Output format: mermaid \(default\), dot, ascii/);
 	assert.equal(result.stderr, "");
 });
+
+for (const topic of ["run", "resume", "doctor", "version", "help"]) {
+	test(`help ${topic} shows the usage that documents it instead of Unknown command`, () => {
+		const result = spawnSync(process.execPath, ["bin/lobster.js", "help", topic], {
+			encoding: "utf8",
+		});
+		const flagHelp = spawnSync(process.execPath, ["bin/lobster.js", topic, "--help"], {
+			encoding: "utf8",
+		});
+		assert.equal(result.status, 0);
+		assert.equal(result.stderr, "");
+		assert.match(result.stdout, new RegExp(`^  lobster ${topic}\\b`, "m"));
+		assert.equal(result.stdout, flagHelp.stdout);
+	});
+}
+
+test("help with an unknown topic still fails", () => {
+	const result = spawnSync(process.execPath, ["bin/lobster.js", "help", "nope"], {
+		encoding: "utf8",
+	});
+	assert.equal(result.status, 2);
+	assert.equal(result.stderr, "Unknown command: nope\n");
+});
