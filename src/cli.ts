@@ -10,6 +10,8 @@ import type { WorkflowGraphFormat } from "./workflows/graph.js";
 import { finalizePipelineToolRun } from "./pipeline_resume_state.js";
 import { forceTerminateAbortableProcesses } from "./abortable_process.js";
 
+const USAGE_TOPICS = new Set(["run", "resume", "doctor", "version", "help"]);
+
 export async function runCli(argv) {
 	const cancellation = createCliCancellation();
 	try {
@@ -47,6 +49,11 @@ async function runCliWithSignal(
 		}
 		if (topic === "graph") {
 			process.stdout.write(graphHelpText());
+			return;
+		}
+		// These built-ins are documented in the top-level usage, which `<topic> --help` prints too.
+		if (USAGE_TOPICS.has(topic)) {
+			process.stdout.write(helpText());
 			return;
 		}
 		const cmd = registry.get(topic);
