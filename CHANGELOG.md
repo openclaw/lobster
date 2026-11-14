@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Reject an unknown or empty `lobster run --mode` value (such as `--mode tools`) with exit code 2 instead of silently running in human mode, where a tool caller got no JSON envelope; thanks @KrasimirKralev.
+
 ## 2026.11.2 - 2026-11-15
 
 **Highlights:** Show usage for built-in help topics and reject malformed workflow arguments cleanly.
