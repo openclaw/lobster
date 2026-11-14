@@ -4,6 +4,8 @@ All notable changes to Lobster will be documented in this file.
 
 ## Unreleased
 
+- Update Oxfmt to 0.78.0, Oxlint to 1.93.0, and pnpm to 12.18.0 across development and release tooling while retaining the two-day dependency cooldown and Node.js 22 runtime floor.
+
 - Show the usage for `lobster help run`, `help resume`, `help doctor`, `help version` and `help help`, the same text `lobster run --help` prints, instead of failing with `Unknown command: run` (exit code 2); thanks @KrasimirKralev.
 - Reject a non-object or empty `--args-json` on `lobster run`, `lobster graph`, and `workflows.run` instead of running the workflow on its default args or failing with a raw `TypeError`; thanks @KrasimirKralev.
 
