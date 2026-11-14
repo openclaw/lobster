@@ -5,6 +5,7 @@ import { parseResumeArgs } from "./resume.js";
 import { resumeToolRequest } from "./core/tool_runtime.js";
 import { loadWorkflowFile, resolveWorkflowArgs, runWorkflowFile } from "./workflows/file.js";
 import { renderWorkflowGraph } from "./workflows/graph.js";
+import { parseWorkflowArgsJson } from "./workflows/values.js";
 import type { WorkflowGraphFormat } from "./workflows/graph.js";
 import { finalizePipelineToolRun } from "./pipeline_resume_state.js";
 import { forceTerminateAbortableProcesses } from "./abortable_process.js";
@@ -149,17 +150,11 @@ async function handleGraph({ argv }) {
 	}
 
 	let argsJson: Record<string, unknown> = {};
-	if (parsed.argsJson) {
+	if (parsed.argsJson !== null) {
 		try {
-			const value = JSON.parse(parsed.argsJson);
-			if (!value || typeof value !== "object" || Array.isArray(value)) {
-				process.stderr.write("graph --args-json must be a JSON object\n");
-				process.exitCode = 2;
-				return;
-			}
-			argsJson = value as Record<string, unknown>;
-		} catch {
-			process.stderr.write("graph --args-json must be valid JSON\n");
+			argsJson = parseWorkflowArgsJson(parsed.argsJson, "graph");
+		} catch (err) {
+			process.stderr.write(`${err.message}\n`);
 			process.exitCode = 2;
 			return;
 		}
@@ -214,16 +209,11 @@ async function handleRun({
 	const { rest, workflowFile, dryRun } = target;
 	if (workflowFile) {
 		let parsedArgs = {};
-		if (argsJson) {
+		if (argsJson !== null) {
 			try {
-				parsedArgs = JSON.parse(argsJson);
-			} catch {
-				reportRunError(
-					normalizedMode,
-					"parse_error",
-					new Error("run --args-json must be valid JSON"),
-					"",
-				);
+				parsedArgs = parseWorkflowArgsJson(argsJson, "run");
+			} catch (err) {
+				reportRunError(normalizedMode, "parse_error", err, "");
 				return;
 			}
 		}
@@ -438,11 +428,9 @@ function parseRunArgs(argv) {
 		}
 
 		if (tok === "--args-json") {
-			const value = argv[i + 1];
-			if (value) {
-				argsJson = value;
-				i++;
-			}
+			// An empty or missing value is rejected later instead of falling back to defaults.
+			argsJson = argv[i + 1] ?? "";
+			i++;
 			continue;
 		}
 
@@ -501,11 +489,9 @@ function parseGraphArgs(argv: string[]) {
 		}
 
 		if (tok === "--args-json") {
-			const value = argv[i + 1];
-			if (value) {
-				argsJson = value;
-				i++;
-			}
+			// An empty or missing value is rejected later instead of falling back to defaults.
+			argsJson = argv[i + 1] ?? "";
+			i++;
 			continue;
 		}
 
