@@ -199,6 +199,14 @@ async function handleRun({
 	const parsed = parseRunArgs(argv);
 	const { mode, argsJson } = parsed;
 	const normalizedMode = normalizeMode(mode);
+	if (!normalizedMode) {
+		reportRunError(
+			"human",
+			"parse_error",
+			new Error(`--mode must be "human" or "tool", got ${JSON.stringify(mode)}`),
+		);
+		return;
+	}
 	let target: Awaited<ReturnType<typeof prepareRunTarget>>;
 	try {
 		target = await prepareRunTarget(parsed);
@@ -400,16 +408,13 @@ function parseRunArgs(argv) {
 		}
 
 		if (tok === "--mode") {
-			const value = argv[i + 1];
-			if (value) {
-				mode = value;
-				i++;
-			}
+			mode = argv[i + 1] ?? "";
+			i++;
 			continue;
 		}
 
 		if (tok.startsWith("--mode=")) {
-			mode = tok.slice("--mode=".length) || "human";
+			mode = tok.slice("--mode=".length);
 			continue;
 		}
 
@@ -528,8 +533,8 @@ async function resolveRunTarget(parsed: {
 	return parsed;
 }
 
-function normalizeMode(mode) {
-	return mode === "tool" ? "tool" : "human";
+function normalizeMode(mode: string): "human" | "tool" | null {
+	return mode === "human" || mode === "tool" ? mode : null;
 }
 
 async function detectWorkflowFile(rest) {
