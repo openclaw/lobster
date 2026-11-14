@@ -38,6 +38,7 @@ Requires Node.js 22 or newer and the pnpm version pinned in `package.json`. From
 - `pnpm test` runs `tsc` and then executes tests against `dist/`.
 - `bin/lobster.js` runs the compiled entrypoint in `dist/`; build after changing source files.
 Invalid workflow file paths are reported as input errors (exit code 2), whether passed with `--file` or as a single positional path (no whitespace; contains a path separator or ends in `.lobster`, `.yaml`, `.yml`, or `.json`). In `--mode tool`, these failures use the same JSON error envelope as other parsing errors.
+`lobster run --mode` accepts `human` (the default) or `tool`; any other value, including an empty one, is rejected as an input error (exit code 2) instead of running with human output.
 
 ## Process output limits
 
