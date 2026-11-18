@@ -30,6 +30,14 @@ test("table renders object rows as a padded union-column table", async () => {
 	);
 });
 
+test("table flattens CRLF and LF without changing column widths", async () => {
+	const { out } = await render([
+		{ id: 1, notes: "a\r\nb" },
+		{ id: 2, notes: "c\nd" },
+	]);
+	assert.equal(out, "id   notes\n---  -----\n1    a b  \n2    c d  \n");
+});
+
 test("table falls back to one stringified item per line for non-object input", async () => {
 	const { out } = await render([1, "two", { a: 1 }, [3, 4], null]);
 	assert.equal(out, '1\ntwo\n{"a":1}\n[3,4]\n\n');
