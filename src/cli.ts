@@ -37,14 +37,14 @@ async function runCliWithSignal(
 	}
 
 	if (argv.length === 0 || argv.includes("-h") || argv.includes("--help")) {
-		process.stdout.write(helpText());
+		process.stdout.write(helpText(registry.list()));
 		return;
 	}
 
 	if (argv[0] === "help") {
 		const topic = argv[1];
 		if (!topic) {
-			process.stdout.write(helpText());
+			process.stdout.write(helpText(registry.list()));
 			return;
 		}
 		if (topic === "graph") {
@@ -53,7 +53,7 @@ async function runCliWithSignal(
 		}
 		// These built-ins are documented in the top-level usage, which `<topic> --help` prints too.
 		if (USAGE_TOPICS.has(topic)) {
-			process.stdout.write(helpText());
+			process.stdout.write(helpText(registry.list()));
 			return;
 		}
 		const cmd = registry.get(topic);
@@ -199,6 +199,14 @@ async function handleRun({
 	const parsed = parseRunArgs(argv);
 	const { mode, argsJson } = parsed;
 	const normalizedMode = normalizeMode(mode);
+	if (!normalizedMode) {
+		reportRunError(
+			"human",
+			"parse_error",
+			new Error(`--mode must be "human" or "tool", got ${JSON.stringify(mode)}`),
+		);
+		return;
+	}
 	let target: Awaited<ReturnType<typeof prepareRunTarget>>;
 	try {
 		target = await prepareRunTarget(parsed);
@@ -400,16 +408,13 @@ function parseRunArgs(argv) {
 		}
 
 		if (tok === "--mode") {
-			const value = argv[i + 1];
-			if (value) {
-				mode = value;
-				i++;
-			}
+			mode = argv[i + 1] ?? "";
+			i++;
 			continue;
 		}
 
 		if (tok.startsWith("--mode=")) {
-			mode = tok.slice("--mode=".length) || "human";
+			mode = tok.slice("--mode=".length);
 			continue;
 		}
 
@@ -528,8 +533,8 @@ async function resolveRunTarget(parsed: {
 	return parsed;
 }
 
-function normalizeMode(mode) {
-	return mode === "tool" ? "tool" : "human";
+function normalizeMode(mode: string): "human" | "tool" | null {
+	return mode === "human" || mode === "tool" ? mode : null;
 }
 
 async function detectWorkflowFile(rest) {
@@ -702,7 +707,7 @@ function writeToolEnvelope(payload) {
 	process.stdout.write("\n");
 }
 
-function helpText() {
+function helpText(commandNames: string[]) {
 	return (
 		`lobster — OpenClaw-native typed shell\n\n` +
 		`Usage:\n` +
@@ -730,8 +735,25 @@ function helpText() {
 		`  lobster 'exec --json "echo [1,2,3]" | json'\n` +
 		`  lobster run --mode tool 'exec --json "echo [1]" | approve --prompt "ok?"'\n\n` +
 		`Commands:\n` +
-		`  exec, head, json, pick, table, where, approve, ask, openclaw.agent, openclaw.invoke, llm.invoke, llm_task.invoke, state.get, state.set, diff.last, commands.list, workflows.list, workflows.run, graph\n`
+		wrapCommandList([...commandNames, "graph"])
 	);
+}
+
+// Built from the registry so new pipeline commands cannot go missing from the help.
+function wrapCommandList(names: string[]) {
+	const lines: string[] = [];
+	let line = "";
+	for (const name of names) {
+		const next = line ? `${line}, ${name}` : name;
+		if (line && next.length > 76) {
+			lines.push(`${line},`);
+			line = name;
+		} else {
+			line = next;
+		}
+	}
+	lines.push(line);
+	return lines.map((l) => `  ${l}\n`).join("");
 }
 
 function graphHelpText() {

@@ -155,10 +155,61 @@ for (const topic of ["run", "resume", "doctor", "version", "help"]) {
 	});
 }
 
+test("help lists every pipeline command that commands.list reports", () => {
+	const help = spawnSync(process.execPath, ["bin/lobster.js", "--help"], { encoding: "utf8" });
+	const list = spawnSync(
+		process.execPath,
+		["bin/lobster.js", "run", "--mode", "tool", "commands.list"],
+		{ encoding: "utf8" },
+	);
+	assert.equal(help.status, 0);
+	assert.equal(list.status, 0, list.stderr);
+	const commandsSection = help.stdout.split("\nCommands:\n")[1] ?? "";
+	const listed = new Set(commandsSection.split(/[\s,]+/).filter(Boolean));
+	const names = JSON.parse(list.stdout).output.map((item) => item.name);
+	assert.ok(names.length > 0);
+	assert.deepEqual(
+		names.filter((name) => !listed.has(name)),
+		[],
+	);
+	assert.ok(listed.has("graph"));
+});
+
 test("help with an unknown topic still fails", () => {
 	const result = spawnSync(process.execPath, ["bin/lobster.js", "help", "nope"], {
 		encoding: "utf8",
 	});
 	assert.equal(result.status, 2);
 	assert.equal(result.stderr, "Unknown command: nope\n");
+});
+
+for (const [modeArgs, value] of [
+	[["--mode", "tools"], "tools"],
+	[["--mode=TOOL"], "TOOL"],
+	[["--mode="], ""],
+	[["--mode"], ""],
+] as const) {
+	test(`run rejects ${modeArgs.join(" ")} instead of falling back to human output`, () => {
+		const result = spawnSync(
+			process.execPath,
+			["bin/lobster.js", "run", 'exec --json "echo [1]"', ...modeArgs],
+			{ encoding: "utf8" },
+		);
+		assert.equal(result.status, 2);
+		assert.equal(result.stdout, "");
+		assert.equal(
+			result.stderr,
+			`Parse error: --mode must be "human" or "tool", got ${JSON.stringify(value)}\n`,
+		);
+	});
+}
+
+test("run --mode human keeps the human output", () => {
+	const result = spawnSync(
+		process.execPath,
+		["bin/lobster.js", "run", "--mode", "human", 'exec --json "echo [1]"'],
+		{ encoding: "utf8" },
+	);
+	assert.equal(result.status, 0, result.stderr);
+	assert.deepEqual(JSON.parse(result.stdout), [1]);
 });
