@@ -28,14 +28,14 @@ can help update the branch when needed.
 
 <!--
 Describe the concrete user, product, or operational problem.
-In 1–3 short, plain-language sentences, explain what someone is trying to do,
-what goes wrong or is missing, and why it matters. Include a known trigger for
-bugs; describe the need without inventing a bug for other changes.
+In 1–3 plain sentences, say who is affected, what happens today, and why it
+matters to them. For a bug, name the trigger if known. For a feature or internal
+work, describe the need in the actual workflow without inventing harm.
+Could a reader understand the problem without knowing your proposed fix?
 
-Good: "Operators resuming an approved workflow can repeat work that already completed, so an external action may happen twice instead of continuing from the pause."
-Bad: "Fixes resume state restoration."
-
-Describe the experienced problem, not just the code change.
+Good: "Background checks can use up a new user's model allowance before they've
+asked the assistant to monitor anything."
+Bad: "Turn off periodic checks on fresh installs."
 -->
 
 ## User Impact
