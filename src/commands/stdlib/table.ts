@@ -39,7 +39,7 @@ export const tableCommand = {
 			}
 
 			const rows = [cols, ...items.map((it) => cols.map((c) => stringifyCell(it?.[c])))].map(
-				(row) => row.map((cell) => cell.replace(/\n/g, " ")),
+				(row) => row.map((cell) => cell.replace(/\r?\n/g, " ")),
 			);
 
 			const widths = cols.map((_, i) =>

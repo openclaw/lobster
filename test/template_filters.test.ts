@@ -90,6 +90,13 @@ test("applyFilters date formatting is UTC-stable", () => {
 	assert.equal(result, "2024-03-09");
 });
 
+test("applyFilters date expands repeated date and time tokens", () => {
+	assert.equal(
+		applyFilters(1710000000000, ['date "YYYY/MM/DD HH:mm:ss | YYYY/MM/DD HH:mm:ss"']),
+		"2024/03/09 16:00:00 | 2024/03/09 16:00:00",
+	);
+});
+
 test("applyFilters unknown filter throws", () => {
 	assert.throws(() => applyFilters("x", ["nonexistent"]), /Unknown template filter/);
 });
