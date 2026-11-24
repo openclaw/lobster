@@ -2322,6 +2322,47 @@ test("workflow pipeline steps respect cwd and feed later shell steps via stdout 
 	assert.deepEqual(result.output, [{ pwd: resolvedTargetDir }]);
 });
 
+test("workflow pipeline steps resolve template --file against the step cwd", async () => {
+	const registry = createDefaultRegistry();
+	const workflow = {
+		steps: [
+			{
+				id: "people",
+				run: "node -e \"process.stdout.write(JSON.stringify([{name:'Ada'}]))\"",
+			},
+			{
+				id: "render",
+				cwd: "${TARGET_DIR}",
+				stdin: "$people.json",
+				pipeline: "template --file ./draft.txt",
+			},
+		],
+	};
+
+	const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "lobster-workflow-template-cwd-"));
+	const targetDir = path.join(tmpDir, "mail");
+	const filePath = path.join(tmpDir, "workflow.lobster");
+	await fsp.mkdir(targetDir, { recursive: true });
+	await fsp.writeFile(path.join(targetDir, "draft.txt"), "Hi {{name}}", "utf8");
+	await fsp.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+
+	const result = await runWorkflowFile({
+		filePath,
+		args: { TARGET_DIR: targetDir },
+		ctx: {
+			stdin: process.stdin,
+			stdout: process.stdout,
+			stderr: process.stderr,
+			env: { ...process.env, LOBSTER_STATE_DIR: path.join(tmpDir, "state") },
+			mode: "tool",
+			registry,
+		},
+	});
+
+	assert.equal(result.status, "ok");
+	assert.deepEqual(result.output, ["Hi Ada"]);
+});
+
 async function closeServer(server: http.Server) {
 	if (!server.listening) return;
 	await new Promise<void>((resolve) => server.close(() => resolve()));

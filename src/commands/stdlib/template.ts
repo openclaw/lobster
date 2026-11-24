@@ -1,5 +1,6 @@
 import { getByPath } from "../../core/value_path.js";
 import fs from "node:fs/promises";
+import path from "node:path";
 import { applyFilters } from "../../core/filters.js";
 
 function splitFilterChain(expr: string): string[] {
@@ -90,12 +91,12 @@ export const templateCommand = {
 			`  json, string, default val, round N, date fmt\n`
 		);
 	},
-	async run({ input, args }: any) {
+	async run({ input, args, ctx }: any) {
 		let tpl = typeof args.text === "string" ? args.text : undefined;
 		const file = typeof args.file === "string" ? args.file : undefined;
 
 		if (!tpl && file) {
-			tpl = await fs.readFile(file, "utf8");
+			tpl = await fs.readFile(path.resolve(ctx?.cwd ?? process.cwd(), file), "utf8");
 		}
 
 		if (!tpl) {
