@@ -1,4 +1,5 @@
 import { getByPath } from "../../core/value_path.js";
+import { readOptionValue } from "./option_value.js";
 
 export const dedupeCommand = {
 	name: "dedupe",
@@ -28,7 +29,8 @@ export const dedupeCommand = {
 		);
 	},
 	async run({ input, args }: any) {
-		const key = typeof args.key === "string" ? args.key : undefined;
+		const keyArg = readOptionValue(args, "dedupe", "key");
+		const key = typeof keyArg === "string" ? keyArg : undefined;
 		const seen = new Set<string>();
 
 		return {

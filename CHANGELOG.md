@@ -7,6 +7,7 @@ All notable changes to Lobster will be documented in this file.
 - Expand repeated date and time tokens in templates, and flatten CRLF table cells before sizing columns. Thanks @Dcastroro.
 - List every registered pipeline command in top-level help and reject unknown or empty `run --mode` values before executing a workflow. Thanks @KrasimirKralev.
 - Refresh eligible formatter and linter updates while retaining the two-day dependency cooldown, runtime floor, and security override.
+- Reject `head --n`, `groupBy`/`sort`/`dedupe --key` and `map --wrap`/`--unwrap` with no value or an empty one (for example an unset workflow arg) instead of returning one item, no items, one keyless group, or the unchanged input. Thanks @KrasimirKralev.
 
 ## 2026.11.2 - 2026-11-15
 
