@@ -1,3 +1,5 @@
+import { readOptionValue } from "./option_value.js";
+
 export const headCommand = {
 	name: "head",
 	meta: {
@@ -16,7 +18,8 @@ export const headCommand = {
 		return `head — take first N items\n\nUsage:\n  head --n 10\n`;
 	},
 	async run({ input, args }) {
-		const n = args.n === undefined ? 10 : Number(args.n);
+		const value = readOptionValue(args, "head", "n");
+		const n = value === undefined ? 10 : Number(value);
 		if (!Number.isFinite(n) || n < 0) throw new Error("head --n must be a non-negative number");
 
 		return {

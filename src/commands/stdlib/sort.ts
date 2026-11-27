@@ -1,4 +1,5 @@
 import { getByPath } from "../../core/value_path.js";
+import { readOptionValue } from "./option_value.js";
 
 function defaultCompare(a: unknown, b: unknown): number {
 	const aU = a === undefined || a === null;
@@ -45,7 +46,8 @@ export const sortCommand = {
 		);
 	},
 	async run({ input, args }: any) {
-		const key = typeof args.key === "string" ? args.key : undefined;
+		const keyArg = readOptionValue(args, "sort", "key");
+		const key = typeof keyArg === "string" ? keyArg : undefined;
 		const desc = Boolean(args.desc);
 
 		// Decorate so undefined items still reach the comparator in descending order.

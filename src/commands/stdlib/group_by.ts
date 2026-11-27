@@ -1,4 +1,5 @@
 import { getByPath } from "../../core/value_path.js";
+import { readOptionValue } from "./option_value.js";
 
 export const groupByCommand = {
 	name: "groupBy",
@@ -26,7 +27,7 @@ export const groupByCommand = {
 		);
 	},
 	async run({ input, args }: any) {
-		const keyPath = String(args.key ?? "").trim();
+		const keyPath = String(readOptionValue(args, "groupBy", "key") ?? "").trim();
 		if (!keyPath) throw new Error("groupBy requires --key");
 
 		const groups = new Map<string, { key: unknown; items: unknown[] }>();

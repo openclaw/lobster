@@ -1,4 +1,5 @@
 import { getByPath } from "../../core/value_path.js";
+import { readOptionValue } from "./option_value.js";
 
 function renderTemplate(tpl: string, ctx: any): string {
 	return tpl.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, expr) => {
@@ -56,8 +57,10 @@ export const mapCommand = {
 		);
 	},
 	async run({ input, args }: any) {
-		const wrap = typeof args.wrap === "string" ? args.wrap : undefined;
-		const unwrap = typeof args.unwrap === "string" ? args.unwrap : undefined;
+		const wrapArg = readOptionValue(args, "map", "wrap");
+		const unwrapArg = readOptionValue(args, "map", "unwrap");
+		const wrap = typeof wrapArg === "string" ? wrapArg : undefined;
+		const unwrap = typeof unwrapArg === "string" ? unwrapArg : undefined;
 		const assignments = parseAssignments(Array.isArray(args._) ? args._ : []);
 
 		if (wrap && unwrap) throw new Error("map cannot use both --wrap and --unwrap");
